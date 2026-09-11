@@ -110,7 +110,29 @@ _SOURCE_CALL_RE = re.compile(
 _REF_CALL_RE = re.compile(
     r"""\{\{\s*ref\(\s*['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?\s*\)\s*\}\}"""
 )
-_JINJA_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
+_CONFIG_CALL_RE = re.compile(r"\{\{\s*config\(.*?\)\s*\}\}", re.DOTALL)
+_BLOCK_OR_COMMENT_RE = re.compile(r"\{%.*?%\}|\{#.*?#\}", re.DOTALL)
+_JINJA_EXPR_RE = re.compile(r"\{\{.*?\}\}", re.DOTALL)
+_QUOTED_IDENTIFIER_RE = re.compile(r"'([a-zA-Z_][a-zA-Z0-9_]*)'")
+# date_trunc('day', ...), datediff(..., 'hour', ...): the date/time part, not a column.
+_DATE_PART_WORDS = {
+    "day",
+    "days",
+    "hour",
+    "hours",
+    "minute",
+    "minutes",
+    "second",
+    "seconds",
+    "week",
+    "weeks",
+    "month",
+    "months",
+    "quarter",
+    "quarters",
+    "year",
+    "years",
+}
 
 _TARGET_PLACEHOLDER = "__preflight_target__"
 
@@ -135,6 +157,21 @@ def _guess_type_by_name(name: str) -> str:
     if n.endswith(_DECIMAL_SUFFIXES):
         return "decimal"
     return "varchar"
+
+
+def _macro_arg_columns(jinja_expr: str) -> set[str]:
+    """Column-shaped string-literal arguments inside a Jinja macro call.
+
+    A macro wrapping a single column - `{{ dbt.date_trunc('day', 'ordered_at') }}` - is
+    common enough in staging models that dropping the whole call would lose a column that
+    appears nowhere else in the query. A quoted identifier that is not a date/time part is
+    read as the column name the macro was given; nothing here overrides an explicit cast.
+    """
+    return {
+        m.lower()
+        for m in _QUOTED_IDENTIFIER_RE.findall(jinja_expr)
+        if m.lower() not in _DATE_PART_WORDS
+    }
 
 
 def _model_source_columns(
@@ -170,7 +207,20 @@ def _model_source_columns(
     sql = _REF_CALL_RE.sub(_sub_ref, sql)
     if not found:
         return None
-    sql = _JINJA_RE.sub(" ", sql)
+    # `{{ config(...) }}` is always its own statement, safe to drop outright. A block or
+    # comment is dropped too - a best effort, since a {% for %} loop over columns cannot be
+    # reconstructed without running it. Anything else - `{{ some_macro(...) }}` used as a
+    # select expression, like dbt's own `dbt.date_trunc(...)` - becomes a placeholder value,
+    # since dropping it would leave `, as alias,` where an expression has to be.
+    sql = _CONFIG_CALL_RE.sub("", sql)
+    sql = _BLOCK_OR_COMMENT_RE.sub("", sql)
+    macro_columns: set[str] = set()
+
+    def _sub_expr(m: re.Match[str]) -> str:
+        macro_columns.update(_macro_arg_columns(m.group(0)))
+        return "__preflight_expr__"
+
+    sql = _JINJA_EXPR_RE.sub(_sub_expr, sql)
 
     try:
         tree = sqlglot.parse_one(sql, read=None)
@@ -188,12 +238,18 @@ def _model_source_columns(
     columns: dict[str, str | None] = {}
     for col in tree.find_all(exp.Column):
         name = col.name.lower()
-        if not name or (col.table and col.table in foreign_aliases):
+        if (
+            not name
+            or name.startswith("__preflight_")
+            or (col.table and col.table in foreign_aliases)
+        ):
             continue
         columns.setdefault(name, None)
         parent = col.parent
         if isinstance(parent, exp.Cast) and parent.this is col and columns[name] is None:
             columns[name] = parent.to.sql(dialect=None)
+    for name in macro_columns:
+        columns.setdefault(name, None)
     return columns
 
 
