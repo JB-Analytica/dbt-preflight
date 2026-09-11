@@ -29,9 +29,9 @@ This is what a reviewer sees when a pull request renames `customer_id` in a stag
 >
 > ### Failing tests
 >
-> - ❌ `not_null_stg_webshop__customers_customer_id` on `stg_webshop__customers`: Binder Error: Referenced column "customer_id" not found in FROM clause!
-> - ❌ `unique_stg_webshop__customers_customer_id` on `stg_webshop__customers`: Binder Error: Referenced column "customer_id" not found in FROM clause!
-> - ❌ `relationships_stg_webshop__orders_customer_id__customer_id__ref_stg_webshop__customers_` on `stg_webshop__orders`: Binder Error: Referenced column "customer_id" not found in FROM clause!
+> - ❌ `not_null` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
+> - ❌ `unique` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
+> - ❌ relationships `stg_webshop__orders.customer_id` → `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
 
 The comment is updated in place on every push, so a pull request carries one preflight
 comment, not a stack of them.

@@ -12,6 +12,19 @@ All notable changes to this project are documented here. The format follows
   on the base branch (YAML entry, Lightdash meta, semantic layer, tests, downstream models),
   and profiles added columns (type, nulls, value distribution when low-cardinality). All
   three came from watching a coding agent use the comment.
+- A size budget on the comment: only the first three failing tests are shown in full, the
+  rest fold under one `<details>` block; "Also rebuilt" lists at most five model names and
+  says how many more; a build error past the first folds too, one model per block.
+- Generic tests (`unique`, `not_null`, `accepted_values`, `relationships`) are rendered from
+  their own metadata instead of dbt's generated name, e.g. `unique` on
+  `stg_webshop__customers.customer_id`, or for `relationships`, both sides of the join.
+  dbt's raw test name is kept inside the details block.
+- A one-line plain-English reading of common DuckDB error shapes (a dropped column, a
+  renamed column, a model that was never built, an unknown function, a parse failure),
+  shown above the raw message on a build error and on an errored test. A shape not covered
+  falls through to the raw message unchanged.
+- Row counts and rows-with-different-values in "What changed in the output" carry their
+  percentage change, e.g. `rows 800 → 742 (-7.3%)` and `30 rows with different values (20%)`.
 
 ### Changed
 
