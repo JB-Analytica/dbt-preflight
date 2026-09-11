@@ -473,16 +473,31 @@ def _num(value: float | int | None) -> str:
     return f"{v:,.4f}" if abs(v) < 1 else f"{v:,.2f}"
 
 
-def _delta(m: MetricDiff) -> str:
-    if m.base is None or m.head is None:
+def _pct_delta(base: float | int | None, head: float | int | None) -> str:
+    if base is None or head is None:
         return "–"
-    base, head = float(m.base), float(m.head)
+    base, head = float(base), float(head)
     diff = head - base
     if base == 0:
         return f"{'+' if diff > 0 else ''}{_num(diff)}"
     pct = diff / abs(base) * 100
     sign = "+" if pct > 0 else ""
     return f"{sign}{pct:.1f}%"
+
+
+def _delta(m: MetricDiff) -> str:
+    return _pct_delta(m.base, m.head)
+
+
+def _breakdown_line(m: MetricDiff, dimension: str, rows: list[tuple[str, Any, Any]]) -> str:
+    """One moved metric broken down by one dimension: the rows whose contribution to the
+    move was largest, e.g. `Net revenue (EUR) by sales_channel: web 5,210 → 4,980 (-4.4%),
+    mobile_app 3,000 → 3,200 (+6.7%)`."""
+    cells = ", ".join(
+        f"{value} {_num(base)} → {_num(head)} ({_pct_delta(base, head)})"
+        for value, base, head in rows
+    )
+    return f"{m.label} by {dimension}: {cells}"
 
 
 def _diff_section(report: PreflightReport) -> list[str]:
@@ -519,7 +534,10 @@ def _diff_section(report: PreflightReport) -> list[str]:
             bits.append(f"rows {_num(d.rows_head)} (unchanged)")
         if d.rows_differing:
             share = _share_pct(d.rows_differing, d.rows_head)
-            suffix = f" ({share})" if share else ""
+            note = [share] if share else []
+            if d.rows_differing_common_columns is not None:
+                note.append(f"on the {d.rows_differing_common_columns} columns both sides share")
+            suffix = f" ({', '.join(note)})" if note else ""
             bits.append(
                 f"{_num(d.rows_differing)} {'row' if d.rows_differing == 1 else 'rows'} "
                 f"with different values{suffix}"
@@ -556,6 +574,11 @@ def _diff_section(report: PreflightReport) -> list[str]:
             for m in moved:
                 lines.append(f"| {m.label} | {_num(m.base)} | {_num(m.head)} | {_delta(m)} |")
             lines.append("")
+            for m in moved:
+                for dimension, rows in m.breakdown.items():
+                    lines.append(f"- {_breakdown_line(m, dimension, rows)}")
+            if any(m.breakdown for m in moved):
+                lines.append("")
         steady = [m for m in d.metrics if not m.moved and not m.unsupported]
         skipped = [m for m in d.metrics if m.unsupported]
         notes: list[str] = []

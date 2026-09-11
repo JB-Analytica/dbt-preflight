@@ -6,7 +6,7 @@ import duckdb
 
 from dbt_preflight.diff import compute_diffs
 from dbt_preflight.manifest import Manifest
-from dbt_preflight.metrics import config_metrics
+from dbt_preflight.metrics import config_metrics, dbt_metrics
 
 
 def _two_builds(tmp_path: Path) -> Path:
@@ -65,7 +65,10 @@ def test_schema_rows_and_metrics_diff(raw_manifest: dict, tmp_path: Path) -> Non
     assert d.columns_removed == [("name", "VARCHAR")]
     assert d.columns_retyped == [("since_date", "DATE", "VARCHAR")]
     assert d.breaking and not d.identical
-    assert d.rows_differing is None  # columns differ, so row values are not compared
+    # columns differ, so row values are compared on customer_id and revenue only: both head
+    # rows (1, 10.0) and (2, 20.0) have an identical match on base, so nothing differs there.
+    assert d.rows_differing == 0
+    assert d.rows_differing_common_columns == 2
     moved = {m.name: (m.base, m.head) for m in d.moved_metrics}
     assert moved == {"revenue": (60.0, 30.0), "customers": (3, 2), "max_id": (3, 2)}
 
@@ -115,6 +118,38 @@ def test_value_changes_count_as_differing_rows(raw_manifest: dict, tmp_path: Pat
     d = diffs[0]
     assert not d.schema_changed and not d.rows_changed
     assert d.rows_differing == 2 and not d.identical
+
+
+def test_row_values_compared_on_shared_columns_when_schema_changed(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    """An added column must not hide a value change on the columns both sides still have."""
+    head = Manifest.from_dict(raw_manifest)
+    base_raw = {**raw_manifest, "nodes": {k: dict(v) for k, v in raw_manifest["nodes"].items()}}
+    for node in base_raw["nodes"].values():
+        if node["resource_type"] == "model":
+            node["schema"] = "preflight_base_main"
+    base = Manifest.from_dict(base_raw)
+    db = tmp_path / "preflight.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create schema preflight_main")
+    con.execute("create schema preflight_base_main")
+    con.execute(
+        "create table preflight_base_main.dim_customers as select * from (values "
+        "(1, 10.0), (2, 20.0), (3, 30.0)) t(customer_id, revenue)"
+    )
+    # head adds a column and changes customer 2's revenue: the schema no longer matches, but
+    # customer_id and revenue are still shared, with matching types.
+    con.execute(
+        "create table preflight_main.dim_customers as select * from (values "
+        "(1, 10.0, true), (2, 25.0, true), (3, 30.0, false)) t(customer_id, revenue, is_active)"
+    )
+    con.close()
+    diffs = compute_diffs(db, head, base, ["model.p.dim_customers"], [], None)
+    d = diffs[0]
+    assert d.columns_added == [("is_active", "BOOLEAN")]
+    assert d.rows_differing == 1  # only customer 2's row has no match on (customer_id, revenue)
+    assert d.rows_differing_common_columns == 2
 
 
 def test_rename_profile_and_references(raw_manifest: dict, tmp_path: Path) -> None:
@@ -184,6 +219,192 @@ def test_rename_profile_and_references(raw_manifest: dict, tmp_path: Path) -> No
     assert "Lightdash meta on `dim_customers`" in refs
     assert "semantic model `customers`" in refs
     assert "downstream model `rpt_segments`" in refs
+
+
+def _two_schema_builds(db: Path, base_rows: str, head_rows: str) -> None:
+    """Two `dim_customers(customer_id, revenue, segment)` tables for a breakdown test."""
+    con = duckdb.connect(str(db))
+    con.execute("create schema preflight_main")
+    con.execute("create schema preflight_base_main")
+    con.execute(
+        f"create table preflight_base_main.dim_customers as select * from (values {base_rows}) "
+        "t(customer_id, revenue, segment)"
+    )
+    con.execute(
+        f"create table preflight_main.dim_customers as select * from (values {head_rows}) "
+        "t(customer_id, revenue, segment)"
+    )
+    con.close()
+
+
+def _head_and_base(raw_manifest: dict) -> tuple[Manifest, Manifest]:
+    """`raw_manifest` as head, and a copy on `preflight_base_main` as base."""
+    head = Manifest.from_dict(raw_manifest)
+    base_raw = {**raw_manifest, "nodes": {k: dict(v) for k, v in raw_manifest["nodes"].items()}}
+    for node in base_raw["nodes"].values():
+        if node["resource_type"] == "model":
+            node["schema"] = "preflight_base_main"
+    return head, Manifest.from_dict(base_raw)
+
+
+def test_moved_metric_broken_down_by_lightdash_dimension(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    """A moved metric is broken down by a Lightdash `dimension.type: string` column, largest
+    contributors first, when the model has no semantic model of its own."""
+    raw_manifest["nodes"]["model.p.dim_customers"]["columns"] = {
+        "segment": {"config": {"meta": {"dimension": {"type": "string"}}}}
+    }
+    head, base = _head_and_base(raw_manifest)
+    db = tmp_path / "preflight.duckdb"
+    _two_schema_builds(
+        db,
+        "(1, 10.0, 'consumer'), (2, 20.0, 'consumer'), (3, 30.0, 'business')",
+        "(1, 15.0, 'consumer'), (2, 20.0, 'consumer'), (3, 50.0, 'business')",
+    )
+    metrics = config_metrics(
+        [{"name": "revenue", "label": "Revenue", "model": "dim_customers", "sql": "sum(revenue)"}],
+        head,
+    )
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)[0]
+    (moved,) = d.moved_metrics
+    assert moved.base == 60.0 and moved.head == 85.0
+    # business moved by 20 (30 -> 50), consumer by only 5 (30 -> 35): business sorts first.
+    assert moved.breakdown == {"segment": [("business", 30.0, 50.0), ("consumer", 30.0, 35.0)]}
+
+
+def test_moved_metric_broken_down_by_semantic_layer_categorical_dimension(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    """The same breakdown, sourced from a dbt semantic model's categorical dimension rather
+    than Lightdash meta, and evaluated through a dbt-defined simple metric."""
+    raw_manifest["semantic_models"] = {
+        "semantic_model.p.customers": {
+            "name": "customers",
+            "depends_on": {"nodes": ["model.p.dim_customers"]},
+            "measures": [{"name": "revenue", "agg": "sum", "expr": "revenue"}],
+            "dimensions": [
+                {"name": "customer_segment", "type": "categorical"},
+                {"name": "since", "type": "time"},  # not categorical: never used for a breakdown
+            ],
+            "entities": [],
+        }
+    }
+    raw_manifest["metrics"] = {
+        "metric.p.revenue": {
+            "name": "revenue",
+            "label": "Revenue",
+            "type": "simple",
+            "type_params": {"measure": {"name": "revenue", "filter": None}},
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.customers"]},
+        }
+    }
+    head, base = _head_and_base(raw_manifest)
+    db = tmp_path / "preflight.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create schema preflight_main")
+    con.execute("create schema preflight_base_main")
+    con.execute(
+        "create table preflight_base_main.dim_customers as select * from (values "
+        "(1, 10.0, 'consumer'), (2, 20.0, 'consumer'), (3, 30.0, 'business')) "
+        "t(customer_id, revenue, customer_segment)"
+    )
+    con.execute(
+        "create table preflight_main.dim_customers as select * from (values "
+        "(1, 15.0, 'consumer'), (2, 20.0, 'consumer'), (3, 50.0, 'business')) "
+        "t(customer_id, revenue, customer_segment)"
+    )
+    con.close()
+    metrics = dbt_metrics(head)
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)[0]
+    (moved,) = d.moved_metrics
+    assert moved.breakdown == {
+        "customer_segment": [("business", 30.0, 50.0), ("consumer", 30.0, 35.0)]
+    }
+
+
+def test_breakdown_caps_at_three_rows(raw_manifest: dict, tmp_path: Path) -> None:
+    """More than three distinct dimension values: only the three largest movers are kept."""
+    raw_manifest["nodes"]["model.p.dim_customers"]["columns"] = {
+        "segment": {"config": {"meta": {"dimension": {"type": "string"}}}}
+    }
+    head, base = _head_and_base(raw_manifest)
+    db = tmp_path / "preflight.duckdb"
+    _two_schema_builds(
+        db,
+        "(1, 10.0, 'a'), (2, 10.0, 'b'), (3, 10.0, 'c'), (4, 10.0, 'd')",
+        "(1, 40.0, 'a'), (2, 30.0, 'b'), (3, 20.0, 'c'), (4, 10.5, 'd')",
+    )
+    metrics = config_metrics(
+        [{"name": "revenue", "label": "Revenue", "model": "dim_customers", "sql": "sum(revenue)"}],
+        head,
+    )
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)[0]
+    (moved,) = d.moved_metrics
+    values = [row[0] for row in moved.breakdown["segment"]]
+    assert values == ["a", "b", "c"]  # largest movers first, "d" (+0.5) dropped
+
+
+def test_breakdown_skips_the_models_own_primary_key(raw_manifest: dict, tmp_path: Path) -> None:
+    """The primary key is one row per value: not a meaningful breakdown, so it is skipped
+    even though it is a Lightdash `dimension.type: string` column like any other."""
+    raw_manifest["nodes"]["model.p.dim_customers"]["config"] = {
+        **raw_manifest["nodes"]["model.p.dim_customers"]["config"],
+        "meta": {"primary_key": "customer_id"},
+    }
+    raw_manifest["nodes"]["model.p.dim_customers"]["columns"] = {
+        "customer_id": {"config": {"meta": {"dimension": {"type": "string"}}}},
+        "segment": {"config": {"meta": {"dimension": {"type": "string"}}}},
+    }
+    head, base = _head_and_base(raw_manifest)
+    db = tmp_path / "preflight.duckdb"
+    _two_schema_builds(
+        db,
+        "(1, 10.0, 'consumer'), (2, 20.0, 'consumer'), (3, 30.0, 'business')",
+        "(1, 15.0, 'consumer'), (2, 20.0, 'consumer'), (3, 50.0, 'business')",
+    )
+    metrics = config_metrics(
+        [{"name": "revenue", "label": "Revenue", "model": "dim_customers", "sql": "sum(revenue)"}],
+        head,
+    )
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)[0]
+    (moved,) = d.moved_metrics
+    assert list(moved.breakdown) == ["segment"]  # customer_id, the primary key, is excluded
+
+
+def test_breakdown_skips_dimensions_lightdash_marks_hidden(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    """A Lightdash dimension marked `hidden: true` (an internal-only field) is not offered
+    as a breakdown, the same way the team hides it from Lightdash's own explorer."""
+    raw_manifest["nodes"]["model.p.dim_customers"]["columns"] = {
+        "phone": {"config": {"meta": {"dimension": {"type": "string", "hidden": True}}}},
+        "segment": {"config": {"meta": {"dimension": {"type": "string"}}}},
+    }
+    head, base = _head_and_base(raw_manifest)
+    db = tmp_path / "preflight.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create schema preflight_main")
+    con.execute("create schema preflight_base_main")
+    con.execute(
+        "create table preflight_base_main.dim_customers as select * from (values "
+        "(1, 10.0, '0470', 'consumer'), (2, 20.0, '0471', 'consumer'), "
+        "(3, 30.0, '0472', 'business')) t(customer_id, revenue, phone, segment)"
+    )
+    con.execute(
+        "create table preflight_main.dim_customers as select * from (values "
+        "(1, 15.0, '0470', 'consumer'), (2, 20.0, '0471', 'consumer'), "
+        "(3, 50.0, '0472', 'business')) t(customer_id, revenue, phone, segment)"
+    )
+    con.close()
+    metrics = config_metrics(
+        [{"name": "revenue", "label": "Revenue", "model": "dim_customers", "sql": "sum(revenue)"}],
+        head,
+    )
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)[0]
+    (moved,) = d.moved_metrics
+    assert list(moved.breakdown) == ["segment"]  # phone, hidden, is excluded
 
 
 def test_added_column_profile_for_low_and_high_cardinality(

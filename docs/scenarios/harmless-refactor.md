@@ -9,7 +9,7 @@ Expected: **pass**. Got: **pass**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ✅ passed
 
-Built 3 of 3 models (1 changed) against synthetic data · 16 tests · 0 convention issues · 4.3 s
+Built 3 of 3 models (1 changed) against synthetic data · 16 tests · 0 convention issues · 4.2 s
 
 ### Changed models
 
@@ -31,7 +31,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `578f732`.
+Compared against base `main`, head `e8f7001`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>
