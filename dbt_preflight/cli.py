@@ -162,6 +162,9 @@ def _assemble(
                         message=r.message,
                         compiled_code=r.compiled_code if r.resource_type == "test" else None,
                         kind=r.resource_type,
+                        test_name=test.test_name if test else None,
+                        column_name=test.column_name if test else None,
+                        kwargs=test.kwargs if test else {},
                     )
                 )
 

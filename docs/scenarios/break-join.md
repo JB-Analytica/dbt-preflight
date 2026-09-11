@@ -9,7 +9,7 @@ Expected: **fail**. Got: **fail**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ❌ failed
 
-Built 7 of 8 models (1 changed) against synthetic data · 42 tests · 0 convention issues · 5.1 s
+Built 7 of 8 models (1 changed) against synthetic data · 42 tests · 0 convention issues · 4.7 s
 
 ### Changed models
 
@@ -21,12 +21,14 @@ Unchanged models this change breaks:
 
 - `dim_customers` — ⏭️ skipped (an upstream model or test failed)
 
-Also rebuilt, no new issues: `stg_webshop__products`, `stg_webshop__customers`, `stg_webshop__order_items`, `fct_order_items`, `int_orders__items_aggregated`, `fct_orders`.
+Also rebuilt, no new issues: `stg_webshop__order_items`, `stg_webshop__customers`, `stg_webshop__products`, `fct_order_items`, `int_orders__items_aggregated` and 1 more.
 
 ### Failing tests
 
-- ❌ `relationships_stg_webshop__orders_customer_id__customer_id__ref_stg_webshop__customers_` on `stg_webshop__orders`: 800 failing rows
+- ❌ relationships `stg_webshop__orders.customer_id` → `stg_webshop__customers.customer_id`: 800 failing rows
   <details><summary>details</summary>
+
+  dbt test name: `relationships_stg_webshop__orders_customer_id__customer_id__ref_stg_webshop__customers_`
 
   ```sql
   with child as (
@@ -55,15 +57,15 @@ Also rebuilt, no new issues: `stg_webshop__products`, `stg_webshop__customers`, 
 
 Base branch and pull request, built on the same synthetic data. A difference here was caused by this change and nothing else.
 
-**`fct_order_items`** — rows 2,000 (unchanged) · 2,000 rows with different values
+**`fct_order_items`** — rows 2,000 (unchanged) · 2,000 rows with different values (100%)
 
 5 metrics unchanged (Order lines, Orders containing product, Units sold, Average unit price, Product revenue).
 
-**`fct_orders`** — rows 800 (unchanged) · 800 rows with different values
+**`fct_orders`** — rows 800 (unchanged) · 800 rows with different values (100%)
 
 16 metrics unchanged (Orders, Net revenue (EUR), Cancelled orders, Average order value, Cancellation rate, Orders, …).
 
-**`stg_webshop__orders`** — rows 800 (unchanged) · 800 rows with different values
+**`stg_webshop__orders`** — rows 800 (unchanged) · 800 rows with different values (100%)
 
 <details><summary>Fixtures</summary>
 
@@ -71,7 +73,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `7913b4e`.
+Compared against base `main`, head `578f732`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>

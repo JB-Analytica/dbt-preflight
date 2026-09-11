@@ -7,7 +7,9 @@ claim. It is written to be read in the pull-request sidebar, so brevity is a fea
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from dbt_preflight.checks import SEVERITY_ERROR, Violation
 from dbt_preflight.diff import MetricDiff, ModelDiff
@@ -47,6 +49,11 @@ class FailedTest:
     message: str
     compiled_code: str | None = None
     kind: str = "test"  # test | unit_test
+    # From TestNode, for rendering a generic test's own name and target instead of dbt's
+    # generated one. None/empty for singular tests, which keep dbt's name as `name` above.
+    test_name: str | None = None  # unique | not_null | accepted_values | relationships | ...
+    column_name: str | None = None
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -165,6 +172,139 @@ def _seconds(value: float) -> str:
     return f"{value:.0f} s" if value >= 10 else f"{value:.1f} s"
 
 
+# DuckDB's error text, translated to what it means for the pull request. Tried in order;
+# a shape none of these match falls through to the raw message, unchanged.
+_ERROR_READINGS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r'Column "([^"]+)" referenced that exists in the SELECT clause'),
+        "the input no longer has a column called `{0}`",
+    ),
+    (
+        re.compile(r'Referenced column "([^"]+)" not found in FROM clause'),
+        "this model has no column `{0}`: renamed or dropped upstream?",
+    ),
+    (
+        re.compile(r"Table with name (\S+) does not exist"),
+        "`{0}` was not built, it failed or was skipped upstream",
+    ),
+    (
+        re.compile(r"Scalar Function with name (\w+) does not exist"),
+        "`{0}` is not a DuckDB function",
+    ),
+    (re.compile(r"Parser Error"), "DuckDB could not parse this SQL"),
+]
+
+
+def _human_reading(message: str) -> str | None:
+    """A one-line plain-English reading of a DuckDB error, or None for a shape not covered."""
+    for pattern, template in _ERROR_READINGS:
+        m = pattern.search(message or "")
+        if m:
+            return template.format(*m.groups())
+    return None
+
+
+def _target_name(to_kwarg: str) -> str | None:
+    """The model or table name a `to` kwarg points at: ref('x') -> x, source('a', 'b') -> b."""
+    names = re.findall(r"""['"]([^'"]+)['"]""", to_kwarg or "")
+    return names[-1] if names else None
+
+
+def _generic_test_label(t: FailedTest) -> str:
+    """A generic test's own name and target, rather than dbt's generated test name.
+
+    `unique` on `stg_webshop__customers.customer_id`; for `relationships`, both sides of
+    the join, parsed from the `to` and `field` kwargs: `relationships` `stg_webshop__orders.
+    customer_id` -> `stg_webshop__customers.customer_id`.
+    """
+    target = f"{t.model}.{t.column_name}" if t.column_name else t.model
+    if t.test_name == "relationships":
+        to_name = _target_name(str(t.kwargs.get("to", "")))
+        to_field = t.kwargs.get("field")
+        if to_name and to_field:
+            return f"relationships `{target}` → `{to_name}.{to_field}`"
+        return f"`relationships` on `{target}`"
+    return f"`{t.test_name}` on `{target}`"
+
+
+def _test_label(t: FailedTest) -> str:
+    """How a test is introduced in its bullet: a human label, or its own name."""
+    if t.kind == "unit_test":
+        return f"unit test `{t.name}` on `{t.model}`"
+    if t.test_name:
+        return _generic_test_label(t)
+    return f"`{t.name}` on `{t.model}`"
+
+
+def _test_entry_lines(t: FailedTest) -> list[str]:
+    """The bullet for one failing or warning test, with its details block where there is one."""
+    icon = "❌" if t.status in {"fail", "error"} else "⚠️"
+    if t.kind == "unit_test":
+        detail = "actual output differs from the expected rows"
+    elif t.status == "error":
+        detail = _one_line_error(t.message)
+    elif t.failures is not None:
+        detail = f"{t.failures} failing {'row' if t.failures == 1 else 'rows'}"
+    else:
+        detail = t.status
+    lines = [f"- {icon} {_test_label(t)}: {detail}"]
+    if t.compiled_code or t.status == "error" or t.kind == "unit_test" or t.test_name:
+        lines.append("  <details><summary>details</summary>")
+        lines.append("")
+        if t.test_name:
+            # dbt's own generated name, kept for anyone searching logs or `dbt test -s`.
+            lines.append(f"  dbt test name: `{t.name}`")
+            lines.append("")
+        if t.status == "error" and t.message.strip():
+            reading = _human_reading(t.message)
+            if reading:
+                lines.append(f"  {reading}")
+                lines.append("")
+        if (t.status == "error" or t.kind == "unit_test") and t.message.strip():
+            lines.append("  ```")
+            for msg_line in t.message.strip().splitlines()[:20]:
+                lines.append(f"  {msg_line}")
+            lines.append("  ```")
+        if t.compiled_code:
+            lines.append("  ```sql")
+            for code_line in t.compiled_code.strip().splitlines()[:40]:
+                lines.append(f"  {code_line}")
+            lines.append("  ```")
+        lines.append("  </details>")
+    return lines
+
+
+def _build_error_lines(m: ModelReport) -> list[str]:
+    """One model's build error: its path, a plain-English reading when there is one, then
+    the raw message."""
+    lines = [f"**`{m.name}`** — {m.path}", ""]
+    reading = _human_reading(m.message)
+    if reading:
+        lines.append(reading)
+        lines.append("")
+    lines.append("```")
+    lines.append(m.message.strip()[:1500])
+    lines.append("```")
+    lines.append("")
+    return lines
+
+
+def _row_pct(base: int | None, head: int | None) -> str | None:
+    """Row count change as a percentage of the base count, or None when it cannot be computed."""
+    if base is None or head is None or base == 0:
+        return None
+    pct = (head - base) / base * 100
+    sign = "+" if pct > 0 else ""
+    return f"{sign}{pct:.1f}%"
+
+
+def _share_pct(part: int | None, total: int | None) -> str | None:
+    """`part` as a whole-number percentage of `total`, or None when it cannot be computed."""
+    if part is None or total is None or total == 0:
+        return None
+    return f"{round(part / total * 100)}%"
+
+
 def render(report: PreflightReport) -> str:
     lines: list[str] = [MARKER]
 
@@ -248,49 +388,39 @@ def render(report: PreflightReport) -> str:
                     names.append(f"`{m.name}` (not verified: `{m.dialect_function}`)")
                 else:
                     names.append(f"`{m.name}`")
-            lines.append(f"Also rebuilt, no new issues: {', '.join(names)}.")
+            shown, extra = names[:5], len(names) - 5
+            tail = f" and {extra} more" if extra > 0 else ""
+            lines.append(f"Also rebuilt, no new issues: {', '.join(shown)}{tail}.")
             lines.append("")
 
     if report.failed_models:
         lines.append("### Build errors")
         lines.append("")
-        for m in report.failed_models:
-            lines.append(f"**`{m.name}`** — {m.path}")
-            lines.append("")
-            lines.append("```")
-            lines.append(m.message.strip()[:1500])
-            lines.append("```")
-            lines.append("")
+        for i, m in enumerate(report.failed_models):
+            entry = _build_error_lines(m)
+            if i == 0:
+                lines += entry
+            else:
+                # Keep the first error visible; the rest fold, one model per details block.
+                lines.append(f"<details><summary>`{m.name}`</summary>")
+                lines.append("")
+                lines += entry
+                lines.append("</details>")
+                lines.append("")
 
     if report.failing_tests or report.warning_tests:
         lines.append("### Failing tests")
         lines.append("")
-        for t in report.failing_tests + report.warning_tests:
-            icon = "❌" if t.status in {"fail", "error"} else "⚠️"
-            if t.kind == "unit_test":
-                detail = "actual output differs from the expected rows"
-            elif t.status == "error":
-                detail = _one_line_error(t.message)
-            elif t.failures is not None:
-                detail = f"{t.failures} failing {'row' if t.failures == 1 else 'rows'}"
-            else:
-                detail = t.status
-            label = "unit test " if t.kind == "unit_test" else ""
-            lines.append(f"- {icon} {label}`{t.name}` on `{t.model}`: {detail}")
-            if t.compiled_code or t.status == "error" or t.kind == "unit_test":
-                lines.append("  <details><summary>details</summary>")
-                lines.append("")
-                if (t.status == "error" or t.kind == "unit_test") and t.message.strip():
-                    lines.append("  ```")
-                    for msg_line in t.message.strip().splitlines()[:20]:
-                        lines.append(f"  {msg_line}")
-                    lines.append("  ```")
-                if t.compiled_code:
-                    lines.append("  ```sql")
-                    for code_line in t.compiled_code.strip().splitlines()[:40]:
-                        lines.append(f"  {code_line}")
-                    lines.append("  ```")
-                lines.append("  </details>")
+        all_tests = report.failing_tests + report.warning_tests
+        shown_tests, rest_tests = all_tests[:3], all_tests[3:]
+        for t in shown_tests:
+            lines += _test_entry_lines(t)
+        if rest_tests:
+            lines.append(f"<details><summary>{len(rest_tests)} more failing tests</summary>")
+            lines.append("")
+            for t in rest_tests:
+                lines += _test_entry_lines(t)
+            lines.append("</details>")
         lines.append("")
 
     if report.diffs:
@@ -382,13 +512,17 @@ def _diff_section(report: PreflightReport) -> list[str]:
 
         bits: list[str] = []
         if d.rows_changed:
-            bits.append(f"rows {_num(d.rows_base)} → {_num(d.rows_head)}")
+            pct = _row_pct(d.rows_base, d.rows_head)
+            suffix = f" ({pct})" if pct else ""
+            bits.append(f"rows {_num(d.rows_base)} → {_num(d.rows_head)}{suffix}")
         elif d.rows_head is not None:
             bits.append(f"rows {_num(d.rows_head)} (unchanged)")
         if d.rows_differing:
+            share = _share_pct(d.rows_differing, d.rows_head)
+            suffix = f" ({share})" if share else ""
             bits.append(
                 f"{_num(d.rows_differing)} {'row' if d.rows_differing == 1 else 'rows'} "
-                "with different values"
+                f"with different values{suffix}"
             )
         cols: list[str] = []
         for c, t in d.columns_added:
