@@ -17,8 +17,8 @@ Built 7 of 9 models (4 changed) against synthetic data · 41 tests · 0 conventi
 
 | Model | Build | Rows | Tests |
 | --- | --- | ---: | --- |
-| `stg_webshop__orders` | ✅ built | 800 | 6 passed |
 | `stg_webshop__order_items` | ✅ built | 2,000 | 7 passed |
+| `stg_webshop__orders` | ✅ built | 800 | 6 passed |
 | `stg_webshop__products` | ✅ built | 60 | 5 passed |
 | `stg_webshop__customers` | ❌ failed | – | none |
 
@@ -51,7 +51,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `e8f7001`.
+Compared against base `main`, head `ae10213`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>
