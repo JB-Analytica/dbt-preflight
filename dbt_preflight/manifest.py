@@ -100,6 +100,7 @@ class ModelNode:
     column_names: list[str]
     meta: dict[str, Any] = field(default_factory=dict)
     column_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
+    raw_code: str = ""
 
     @property
     def layer(self) -> str:
@@ -213,6 +214,7 @@ class Manifest:
                     materialized=str((node.get("config") or {}).get("materialized", "")),
                     column_names=list((node.get("columns") or {}).keys()),
                     meta=dict((node.get("config") or {}).get("meta") or node.get("meta") or {}),
+                    raw_code=str(node.get("raw_code") or ""),
                     column_meta={
                         name: dict((col.get("config") or {}).get("meta") or col.get("meta") or {})
                         for name, col in (node.get("columns") or {}).items()

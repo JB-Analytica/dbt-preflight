@@ -193,7 +193,10 @@ changed models only, so existing debt does not resurface on every pull request.
 
 Models outside those three folders are exempt from the naming and layering rules.
 
-That is the `jba` preset. A project with its own conventions adjusts them in the config:
+That is the `jba` preset, at full strength when the repository has a `.dbt-preflight.yml`.
+A repository without one gets the same rules as warnings only: it never signed up for
+anyone's conventions, and a warning is advice where an error would be a demand. A project
+with its own conventions adjusts them in the config:
 
 ```yaml
 conventions:

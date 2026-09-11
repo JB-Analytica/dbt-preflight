@@ -361,6 +361,11 @@ def _diff_section(report: PreflightReport) -> list[str]:
         "Base branch and pull request, built on the same synthetic data. A difference here was "
         "caused by this change and nothing else."
     )
+    if any(d.breaking for d in report.diffs):
+        lines.append(
+            "⚠️ marks a column that was removed, renamed or retyped: dashboards and ad-hoc SQL "
+            "select columns by name, so this can break consumers preflight cannot see."
+        )
     lines.append("")
 
     identical: list[str] = []
@@ -386,13 +391,29 @@ def _diff_section(report: PreflightReport) -> list[str]:
                 "with different values"
             )
         cols: list[str] = []
-        cols += [f"+`{c}`" for c, _ in d.columns_added]
+        for c, t in d.columns_added:
+            profile = d.profiles.get(c)
+            cols.append(f"+`{c}` ({t}, {profile.describe()})" if profile else f"+`{c}` ({t})")
+        cols += [f"`{old}` → `{new}` (renamed, same values) ⚠️" for old, new in d.columns_renamed]
         cols += [f"−`{c}` ⚠️" for c, _ in d.columns_removed]
         cols += [f"`{c}` {old} → {new} ⚠️" for c, old, new in d.columns_retyped]
         if cols:
             bits.append("columns: " + ", ".join(cols))
         lines.append(f"**`{d.name}`** — " + " · ".join(bits))
         lines.append("")
+        for column, refs in d.references.items():
+            if refs:
+                lines.append(
+                    f"`{column}` was referenced on the base branch by {', '.join(refs)}; "
+                    "each of those needs the new name or the column back."
+                )
+            else:
+                lines.append(
+                    f"`{column}` had no reference on the base branch: no YAML entry, metric, "
+                    "semantic-layer expression, test or downstream model. Only consumers "
+                    "outside the repository can still break."
+                )
+            lines.append("")
 
         moved = d.moved_metrics
         if moved:

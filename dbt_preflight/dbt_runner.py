@@ -8,6 +8,7 @@ nothing preflight does touches the project's real `target/` or the developer's p
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -173,7 +174,7 @@ class DbtRunner:
             *extra,
         ]
 
-    def _invoke(self, args: list[str]) -> Any:
+    def _invoke(self, args: list[str], quiet: bool = False) -> Any:
         from dbt.cli.main import dbtRunner
 
         previous = {k: os.environ.get(k) for k in self.env}
@@ -181,8 +182,10 @@ class DbtRunner:
         os.environ.setdefault("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
         try:
             # dbt logs to stdout. Stdout is where the comment goes when no file is given,
-            # so dbt's own output moves to stderr, where CI still shows it.
-            with contextlib.redirect_stdout(sys.stderr):
+            # so dbt's own output moves to stderr, where CI still shows it. Commands whose
+            # result is read programmatically (`ls`) print nothing at all.
+            sink = io.StringIO() if quiet else sys.stderr
+            with contextlib.redirect_stdout(sink):
                 return dbtRunner().invoke(args)
         finally:
             for k, v in previous.items():
@@ -240,7 +243,8 @@ class DbtRunner:
                 "--output-keys",
                 "unique_id",
                 "--quiet",
-            )
+            ),
+            quiet=True,
         )
         if not res.success:
             raise DbtError(f"dbt ls failed: {res.exception}")

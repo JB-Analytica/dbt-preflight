@@ -18,6 +18,20 @@ def test_default_is_the_house_preset() -> None:
     assert c.any_enabled
 
 
+def test_without_a_config_file_the_house_rules_only_warn() -> None:
+    c = from_config(None, configured=False)
+    assert c.severity("naming") == WARN and c.severity("primary_key") == WARN
+    assert c.severity("description") == WARN
+    assert c.layers == jba().layers
+
+
+def test_config_file_without_conventions_block_keeps_full_strength(tmp_path: Path) -> None:
+    (tmp_path / "dbt_project.yml").write_text("name: p\nprofile: p\n")
+    assert load_config(tmp_path).conventions.severity("naming") == WARN  # no file at all
+    (tmp_path / CONFIG_FILENAME).write_text("rows: 50\n")
+    assert load_config(tmp_path).conventions.severity("naming") == ERROR  # a file, no block
+
+
 def test_none_preset_switches_everything_off() -> None:
     c = from_config({"preset": "none"})
     assert not c.any_enabled
