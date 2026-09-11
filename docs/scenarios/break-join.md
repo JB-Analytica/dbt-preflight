@@ -73,7 +73,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `56d57a9`.
+Compared against base `main`, head `3c64964`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>
