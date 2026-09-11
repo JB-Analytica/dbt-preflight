@@ -140,12 +140,29 @@ Preflight needs to know what the source tables look like. Three options:
    one) often declare a source with no columns at all; the staging model that does
    `select id as customer_id, ... from {{ source(...) }}` already names every column it
    needs, so preflight reads that instead of asking for YAML nobody wrote. An explicit
-   `cast(x as date)` or `x::date` sets the type; everything else is guessed from the column
-   name (`_at` a timestamp, `_date` a date, `id`/`_id` an integer, `is_`/`has_` a boolean,
-   and so on) and the comment says which columns were guessed, so a reviewer can tighten
-   them in `sources.yml` if the guess is wrong. Only a column no model reads either is
+   `cast(x as date)` or `x::date` sets the type first; failing that, how the staging SQL
+   uses the column is read next - an operand of `/`, `*`, `+`, `-` against a numeric
+   literal, or wrapped in `sum(`/`avg(`/`round(`, is numeric, while a comparison to a
+   string literal or a `lower(`/`upper(`/`trim(`/`concat(` argument is varchar. Only then
+   does the column's own name decide: `_at`/`_timestamp`/`_datetime` a timestamp,
+   `_date`/`_on` a date, `id`/`_id` an integer, `is_`/`has_`/`_flag`/`enabled`/`active` a
+   boolean, a name built from `paid`, `cost`, `tax`, `fee`, `discount`, `revenue`, `amount`,
+   `price`, `total`, `rate` and the like a decimal, one built from `count`, `number`, `qty`,
+   `quantity`, `units`, `age`, `year`, `month`, `day` an integer, and a handful of common
+   attribute names (`email`, `phone`, `name`, `status`, `type`, `sku`, ...) always varchar.
+   A name shaped like a foreign key - `customer_id`, or a bare `customer` when a
+   `raw_customers` source exists - is typed as an integer and gets a `ref:` to that table's
+   `id` when one can be found, the same referential integrity an explicit `relationships`
+   test would have set up. The comment says which columns were guessed, so a reviewer can
+   tighten them in `sources.yml` if a guess is wrong. Only a column no model reads either is
    reported rather than guessed, because a fixture with the wrong type is worse than no
    fixture.
+
+   A source column named `id` is always the primary key. A staging model's own `unique`/
+   `not_null` tests on the alias it gave a source column (`id as customer_id`, tested as
+   `customer_id`) carry back to that source column too - `pk` when both are declared,
+   `unique`/`not null` alone otherwise - so a project that tests its staging models instead
+   of its sources still gets keys in the derived schema.
 
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.

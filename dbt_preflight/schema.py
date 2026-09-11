@@ -137,26 +137,202 @@ _DATE_PART_WORDS = {
 _TARGET_PLACEHOLDER = "__preflight_target__"
 
 # Name -> guessed DBML type, checked in order; the first match wins.
-_INT_SUFFIXES = ("_id", "_cents", "_count", "quantity", "units")
-_DECIMAL_SUFFIXES = ("amount", "price", "total", "rate")
+_TIMESTAMP_SUFFIXES = ("_at", "_timestamp", "_datetime")
+_DATE_SUFFIXES = ("_date", "_on")
+_BOOLEAN_PREFIXES = ("is_", "has_")
+_BOOLEAN_SUFFIXES = ("_flag", "_enabled", "_active")
+_BOOLEAN_NAMES = {"enabled", "active"}
+# Checked as a whole underscore-separated token, not a bare substring, so "package"
+# doesn't become an integer just because it ends in "age".
+_INT_WHOLE_WORDS = {
+    "count",
+    "number",
+    "num",
+    "qty",
+    "quantity",
+    "units",
+    "age",
+    "year",
+    "month",
+    "day",
+}
+_INT_SUFFIXES = ("_id", "_cents")
+# Checked as a plain substring: real columns pair these with a noun ("tax_paid",
+# "unit_price"), so a bare match is specific enough without a word-boundary rule.
+_DECIMAL_WORDS = (
+    "paid",
+    "cost",
+    "tax",
+    "fee",
+    "discount",
+    "revenue",
+    "subtotal",
+    "balance",
+    "margin",
+    "weight",
+    "score",
+    "amount",
+    "price",
+    "total",
+    "rate",
+)
+# Common attribute names that would otherwise trip a decimal/int word above (or a
+# foreign-key name match) by coincidence; kept as varchar outright.
+_VARCHAR_NAMES = {
+    "email",
+    "phone",
+    "name",
+    "city",
+    "country",
+    "address",
+    "sku",
+    "description",
+    "status",
+    "type",
+    "category",
+}
+_SOURCE_TABLE_PREFIXES = ("raw_", "stg_", "src_", "source_")
+
+
+def _int_name_signal(name: str) -> bool:
+    tokens = set(name.split("_"))
+    return bool(tokens & _INT_WHOLE_WORDS) or name.endswith(_INT_SUFFIXES)
+
+
+def _decimal_name_signal(name: str) -> bool:
+    return any(word in name for word in _DECIMAL_WORDS)
 
 
 def _guess_type_by_name(name: str) -> str:
     """A DBML type guessed from a column's name alone, house-convention style."""
     n = name.lower()
-    if n.endswith("_at"):
+    if n in _VARCHAR_NAMES:
+        return "varchar"
+    if n.endswith(_TIMESTAMP_SUFFIXES):
         return "timestamp"
-    if n.endswith("_date"):
+    if n.endswith(_DATE_SUFFIXES):
         return "date"
     if n == "id" or n.endswith("_id"):
         return "int"
-    if n.startswith("is_") or n.startswith("has_"):
+    if n.startswith(_BOOLEAN_PREFIXES) or n.endswith(_BOOLEAN_SUFFIXES) or n in _BOOLEAN_NAMES:
         return "boolean"
-    if n.endswith(_INT_SUFFIXES):
+    if _int_name_signal(n):
         return "int"
-    if n.endswith(_DECIMAL_SUFFIXES):
+    if _decimal_name_signal(n):
         return "decimal"
     return "varchar"
+
+
+def _table_basename(table_name: str) -> str:
+    """A source table's name with a conventional loader prefix stripped.
+
+    `raw_customers` reads as `customers` when matching a column name against it -
+    real projects almost always prefix their raw tables this way.
+    """
+    n = table_name.lower()
+    for prefix in _SOURCE_TABLE_PREFIXES:
+        if n.startswith(prefix) and len(n) > len(prefix):
+            return n[len(prefix) :]
+    return n
+
+
+def _pluralize(word: str) -> str:
+    if not word:
+        return word
+    if word.endswith(("s", "x", "z", "ch", "sh")):
+        return word + "es"
+    if word.endswith("y") and len(word) > 1 and word[-2] not in "aeiou":
+        return word[:-1] + "ies"
+    return word + "s"
+
+
+def _fk_ref_target(name: str, own: SourceTable, all_sources: list[SourceTable]) -> str | None:
+    """The identifier of another source table this column's name points at, as a
+    foreign key - `customer_id`, or a bare `customer` when a `raw_customers` source
+    exists - so the fixtures can keep referential integrity between them.
+
+    An `_id` suffix alone is enough to type a column as an integer (handled in
+    `_guess_type_by_name`); this only adds the `ref:` when a matching table can
+    actually be found, so an unmatched `_id` column stays an ordinary integer.
+    """
+    n = name.lower()
+    if n == "id":
+        return None
+    base = n[: -len("_id")] if n.endswith("_id") else n
+    if not base:
+        return None
+    plural = _pluralize(base)
+    for src in all_sources:
+        if src.unique_id == own.unique_id:
+            continue
+        basename = _table_basename(src.name)
+        if base in (basename, src.name.lower()) or plural in (basename, src.name.lower()):
+            return src.identifier
+    return None
+
+
+_ARITH_OPS = (exp.Div, exp.Mul, exp.Add, exp.Sub)
+_COMPARISON_OPS = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+_NUMERIC_FUNCS = (exp.Sum, exp.Avg, exp.Round)
+_STRING_FUNCS = (exp.Lower, exp.Upper, exp.Trim, exp.Concat)
+
+
+def _column_hint(col: exp.Column) -> str | None:
+    """ "numeric" or "varchar" if how this column occurrence is used in the SQL signals
+    a type, independent of its name; the strongest signal short of an explicit cast.
+
+    An operand of `/`, `*`, `+`, `-` against a numeric literal, or wrapped in `sum(`,
+    `avg(`, `round(`, reads as numeric. Compared to a string literal, or passed to
+    `lower(`/`upper(`/`trim(`/`concat(`, reads as varchar.
+    """
+    parent = col.parent
+    if isinstance(parent, _ARITH_OPS):
+        sibling = parent.expression if parent.this is col else parent.this
+        if isinstance(sibling, exp.Literal) and sibling.is_number:
+            return "numeric"
+    if isinstance(parent, _COMPARISON_OPS):
+        sibling = parent.expression if parent.this is col else parent.this
+        if isinstance(sibling, exp.Literal) and sibling.is_string:
+            return "varchar"
+    node = parent
+    while node is not None and not isinstance(node, exp.Select):
+        if isinstance(node, _NUMERIC_FUNCS):
+            return "numeric"
+        if isinstance(node, _STRING_FUNCS):
+            return "varchar"
+        node = node.parent
+    return None
+
+
+def _resolve_type_and_ref(
+    name: str,
+    cast_type: str | None,
+    hint: str | None,
+    src: SourceTable,
+    all_sources: list[SourceTable],
+) -> tuple[str, str | None]:
+    """The DBML type for an inferred source column, and a foreign-key ref if its name
+    points at another source table.
+
+    Priority, strongest first: an explicit cast; how the column is used in the SQL
+    (`_column_hint`); a foreign-key-shaped name (always an integer); the rest of the
+    name heuristics in `_guess_type_by_name`.
+    """
+    if cast_type:
+        return _dbml_type(cast_type), None
+
+    fk_target = _fk_ref_target(name, src, all_sources)
+    is_id_suffix = name.lower() != "id" and name.lower().endswith("_id")
+
+    if hint == "numeric":
+        return ("int" if _int_name_signal(name.lower()) else "decimal"), fk_target
+    if hint == "varchar":
+        return "varchar", None
+
+    if is_id_suffix or fk_target is not None:
+        return "int", fk_target
+
+    return _guess_type_by_name(name), None
 
 
 def _macro_arg_columns(jinja_expr: str) -> set[str]:
@@ -176,16 +352,17 @@ def _macro_arg_columns(jinja_expr: str) -> set[str]:
 
 def _model_source_columns(
     raw_code: str, source_name: str, table_name: str
-) -> dict[str, str | None] | None:
-    """{column_name: explicit cast type, or None} a model reads from one source table.
+) -> dict[str, tuple[str | None, str | None]] | None:
+    """{column_name: (explicit cast type, usage hint)} a model reads from one source table.
 
-    `{{ source(...) }}` and `{{ ref(...) }}` calls are swapped for plain identifiers so
-    sqlglot can parse the compiled-looking SQL, then every `exp.Column` in the query is
-    collected: a staging model's `renamed` CTE reads straight off the `source` CTE without
-    qualifying columns, so this is a query-wide walk, not a single-clause one. Columns
-    qualified with another table (a join, or a second source) are excluded. Returns None
-    when the model does not reference this source at all, or the SQL does not parse -
-    normal for a model this house style would flag as not staging.
+    Both are `None` with no evidence either way. `{{ source(...) }}` and `{{ ref(...) }}`
+    calls are swapped for plain identifiers so sqlglot can parse the compiled-looking SQL,
+    then every `exp.Column` in the query is collected: a staging model's `renamed` CTE reads
+    straight off the `source` CTE without qualifying columns, so this is a query-wide walk,
+    not a single-clause one. Columns qualified with another table (a join, or a second
+    source) are excluded. Returns None when the model does not reference this source at
+    all, or the SQL does not parse - normal for a model this house style would flag as not
+    staging.
     """
     counter = 0
     found = False
@@ -235,7 +412,7 @@ def _model_source_columns(
         if t.name.startswith("__preflight_") and t.name != _TARGET_PLACEHOLDER
     }
 
-    columns: dict[str, str | None] = {}
+    columns: dict[str, tuple[str | None, str | None]] = {}
     for col in tree.find_all(exp.Column):
         name = col.name.lower()
         if (
@@ -244,25 +421,104 @@ def _model_source_columns(
             or (col.table and col.table in foreign_aliases)
         ):
             continue
-        columns.setdefault(name, None)
+        cast_type, hint = columns.get(name, (None, None))
         parent = col.parent
-        if isinstance(parent, exp.Cast) and parent.this is col and columns[name] is None:
-            columns[name] = parent.to.sql(dialect=None)
+        if isinstance(parent, exp.Cast) and parent.this is col and cast_type is None:
+            cast_type = parent.to.sql(dialect=None)
+        if hint is None:
+            hint = _column_hint(col)
+        columns[name] = (cast_type, hint)
     for name in macro_columns:
-        columns.setdefault(name, None)
+        columns.setdefault(name, (None, None))
     return columns
+
+
+def _parse_staging_sql(raw_code: str) -> exp.Expr | None:
+    """Parse a staging model's SQL well enough to read its own select-list aliases.
+
+    Jinja is swapped for plain placeholders the same way `_model_source_columns` does,
+    but this version does not care which source a `source()`/`ref()` call points at -
+    every one becomes an anonymous placeholder, since all that matters here is that the
+    surrounding SQL parses.
+    """
+    counter = 0
+
+    def _sub_call(_m: re.Match[str]) -> str:
+        nonlocal counter
+        counter += 1
+        return f"__preflight_src_{counter}__"
+
+    sql = _SOURCE_CALL_RE.sub(_sub_call, raw_code)
+    sql = _REF_CALL_RE.sub(_sub_call, sql)
+    sql = _CONFIG_CALL_RE.sub("", sql)
+    sql = _BLOCK_OR_COMMENT_RE.sub("", sql)
+    sql = _JINJA_EXPR_RE.sub("__preflight_expr__", sql)
+    try:
+        tree = sqlglot.parse_one(sql, read=None)
+    except Exception:  # noqa: BLE001 - any parser failure just means "cannot infer"
+        return None
+    return tree
+
+
+def _model_alias_map(raw_code: str) -> dict[str, str]:
+    """{a staging model's own output column name: the source column it came from}.
+
+    `id as customer_id` -> `{"customer_id": "id"}`; a bare, unaliased column -
+    `order_id` - maps to itself, since it is its own alias. Only a direct column
+    reference counts as a rename: `lower(email) as email` is a transform, not a column
+    a not_null/unique test's name can be carried straight back through, so it is left
+    out - the test would have to attach to the source column itself for that.
+    """
+    tree = _parse_staging_sql(raw_code)
+    if tree is None:
+        return {}
+    aliases: dict[str, str] = {}
+    for select in tree.find_all(exp.Select):
+        for e in select.expressions:
+            if isinstance(e, exp.Alias) and isinstance(e.this, exp.Column):
+                aliases.setdefault(e.alias_or_name.lower(), e.this.name.lower())
+            elif isinstance(e, exp.Column):
+                aliases.setdefault(e.name.lower(), e.name.lower())
+    return aliases
+
+
+def _carried_tests_for_source(source: SourceTable, manifest: Manifest) -> dict[str, set[str]]:
+    """{source_column_name: {test names}}, carried back from the `unique`/`not_null`
+    tests a staging model declares on the alias it gave one of this source's columns.
+
+    A source column named `id` is already the primary key regardless; this is what
+    lets another column - `sku`, `order_id`, whatever the project actually keys its
+    source rows by - carry the same settings, so the fixtures satisfy tests the
+    project's own YAML already documents instead of leaving them to chance.
+    """
+    carried: dict[str, set[str]] = {}
+    for model in manifest.models.values():
+        if source.unique_id not in model.depends_on:
+            continue
+        alias_map = _model_alias_map(model.raw_code)
+        if not alias_map:
+            continue
+        for test in manifest.tests_for_model(model.unique_id):
+            if test.test_name not in {"unique", "not_null"} or not test.column_name:
+                continue
+            source_col = alias_map.get(test.column_name.lower())
+            if source_col is None:
+                continue
+            carried.setdefault(source_col, set()).add(test.test_name)
+    return carried
 
 
 def _infer_source_columns(
     source: SourceTable, manifest: Manifest
-) -> tuple[dict[str, str | None], list[str]]:
-    """Columns (and any explicit cast type) inferred from every model that reads a source.
+) -> tuple[dict[str, tuple[str | None, str | None]], list[str]]:
+    """Columns (and any explicit cast type / usage hint) inferred from every model that
+    reads a source.
 
     A staging model typically names every column it selects off its source, so this is
     read as the closest thing to a schema a project without one has. Models that do not
     parse, or do not read this source at all, are silently skipped.
     """
-    columns: dict[str, str | None] = {}
+    columns: dict[str, tuple[str | None, str | None]] = {}
     used_models: list[str] = []
     for model in manifest.models.values():
         if source.unique_id not in model.depends_on:
@@ -271,11 +527,9 @@ def _infer_source_columns(
         if found is None:
             continue
         used_models.append(model.name)
-        for name, cast_type in found.items():
-            if name not in columns:
-                columns[name] = cast_type
-            elif columns[name] is None and cast_type:
-                columns[name] = cast_type
+        for name, (cast_type, hint) in found.items():
+            existing_cast, existing_hint = columns.get(name, (None, None))
+            columns[name] = (existing_cast or cast_type, existing_hint or hint)
     return columns, sorted(used_models)
 
 
@@ -313,19 +567,36 @@ def _missing_types_patch(sources: list[SourceTable]) -> str:
 
 def _resolve_columns(
     sources: dict[str, SourceTable], manifest: Manifest
-) -> tuple[dict[str, list[SourceColumn]], list[InferredSource], list[SourceTable]]:
+) -> tuple[
+    dict[str, list[SourceColumn]],
+    list[InferredSource],
+    list[SourceTable],
+    dict[tuple[str, str], set[str]],
+    dict[tuple[str, str], str],
+]:
     """Declared columns, filled in from the staging models where sources.yml falls short.
 
     A source with every column already typed passes through untouched. Otherwise, every
     column the reading models can account for - the union of what is declared and what is
     inferred - is used; a source left with an untyped, unread column goes to `still_missing`
     for the caller to turn into a SchemaError.
+
+    Also returns, for every source (typed or not): `unique`/`not_null` tests carried back
+    from a staging model's alias for one of its columns, and the foreign-key ref a
+    column's name points at, when one was found - both keyed by (source identifier,
+    column name), for the caller to fold into the DBML it writes.
     """
     effective: dict[str, list[SourceColumn]] = {}
     inferred: list[InferredSource] = []
     still_missing: list[SourceTable] = []
+    carried_tests: dict[tuple[str, str], set[str]] = {}
+    fk_refs: dict[tuple[str, str], str] = {}
+    all_sources = list(sources.values())
 
     for src in sources.values():
+        for col_name, tests in _carried_tests_for_source(src, manifest).items():
+            carried_tests.setdefault((src.identifier, col_name), set()).update(tests)
+
         if src.columns and all(c.data_type for c in src.columns):
             effective[src.unique_id] = src.columns
             continue
@@ -340,19 +611,23 @@ def _resolve_columns(
             if col.data_type:
                 merged.append(col)
             elif col.name in found:
-                cast_type = found[col.name]
-                dtype = _dbml_type(cast_type) if cast_type else _guess_type_by_name(col.name)
+                cast_type, hint = found[col.name]
+                dtype, ref = _resolve_type_and_ref(col.name, cast_type, hint, src, all_sources)
                 if not cast_type:
                     guessed.append(col.name)
+                if ref is not None:
+                    fk_refs[(src.identifier, col.name)] = ref
                 merged.append(SourceColumn(col.name, dtype, col.description))
             else:
                 unresolved = True
-        for name, cast_type in found.items():
+        for name, (cast_type, hint) in found.items():
             if name in declared_names:
                 continue
-            dtype = _dbml_type(cast_type) if cast_type else _guess_type_by_name(name)
+            dtype, ref = _resolve_type_and_ref(name, cast_type, hint, src, all_sources)
             if not cast_type:
                 guessed.append(name)
+            if ref is not None:
+                fk_refs[(src.identifier, name)] = ref
             merged.append(SourceColumn(name, dtype))
 
         if unresolved or not merged:
@@ -371,18 +646,22 @@ def _resolve_columns(
             )
         )
 
-    return effective, inferred, still_missing
+    return effective, inferred, still_missing, carried_tests, fk_refs
 
 
 def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     """Write the sources of a manifest as DBML.
 
-    Column settings come from the generic tests declared on the source: `unique` and
+    Column settings come from the generic tests declared on the source - `unique` and
     `not_null` map to their DBML settings, a column called `id` (or one carrying both) is
-    the primary key, and a `relationships` test to another source becomes a `ref`. A source
-    with columns sources.yml leaves untyped, or does not declare at all, has them inferred
-    from the staging models that read it; only a source inference cannot help either raises
-    a SchemaError.
+    the primary key, and a `relationships` test to another source becomes a `ref` - plus
+    the same `unique`/`not_null` tests carried back from a staging model's alias for one of
+    the source's columns. A column whose name looks like a foreign key (`customer_id`, or a
+    bare `customer` when a `raw_customers` source exists) gets a ref to that table's `id`
+    too, when an explicit `relationships` test did not already set one. A source with
+    columns sources.yml leaves untyped, or does not declare at all, has them inferred from
+    the staging models that read it; only a source inference cannot help either raises a
+    SchemaError.
 
     Returns the DBML text and a record of every source whose columns were inferred.
     """
@@ -390,7 +669,7 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     if not sources:
         raise SchemaError("The dbt project declares no sources, so there is nothing to generate.")
 
-    effective, inferred, still_missing = _resolve_columns(sources, manifest)
+    effective, inferred, still_missing, carried_tests, fk_refs = _resolve_columns(sources, manifest)
     if still_missing:
         patch = _missing_types_patch(still_missing)
         if patch:
@@ -404,7 +683,11 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
             )
 
     col_settings: dict[tuple[str, str], set[str]] = {}
-    col_refs: dict[tuple[str, str], tuple[str, str]] = {}
+    for key, tests in carried_tests.items():
+        col_settings.setdefault(key, set()).update(tests)
+    col_refs: dict[tuple[str, str], tuple[str, str]] = {
+        key: (target, "id") for key, target in fk_refs.items()
+    }
     for test in manifest.source_tests():
         src = sources.get(test.attached_node or "")
         if src is None or not test.column_name:
@@ -415,7 +698,7 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
         elif test.test_name == "relationships":
             target = _ref_target(test, sources)
             if target is not None:
-                col_refs[key] = target
+                col_refs[key] = target  # an explicit test's ref wins over a guessed one
 
     lines = ["// Derived by dbt-preflight from the project's sources.yml. Do not edit.", ""]
     for src in sources.values():
@@ -423,7 +706,7 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
         for col in effective.get(src.unique_id, src.columns):
             settings: list[str] = []
             tests = col_settings.get((src.identifier, col.name), set())
-            if col.name == "id" or {"unique", "not_null"} <= tests and col.name.endswith("_id"):
+            if col.name == "id" or {"unique", "not_null"} <= tests:
                 settings.append("pk")
             else:
                 if "unique" in tests:
