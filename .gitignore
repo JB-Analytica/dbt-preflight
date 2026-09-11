@@ -24,3 +24,6 @@ logs/
 # local
 .env
 .DS_Store
+
+# Claude Code session config and agent worktrees
+.claude/
