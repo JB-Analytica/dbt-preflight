@@ -652,3 +652,70 @@ def test_differing_rows_shows_share_of_head_rows() -> None:
     )
     body = render(report)
     assert "30 rows with different values (20%)" in body
+
+
+def test_differing_rows_notes_when_restricted_to_shared_columns() -> None:
+    """When the schema changed, `rows_differing` was compared on fewer columns; say so."""
+    from dbt_preflight.diff import ModelDiff
+
+    report = PreflightReport(
+        models=[_model("dim_customers")],
+        diffs=[
+            ModelDiff(
+                unique_id="model.p.dim_customers",
+                name="dim_customers",
+                base_exists=True,
+                rows_base=150,
+                rows_head=150,
+                rows_differing=30,
+                rows_differing_common_columns=12,
+                columns_added=[("is_active", "BOOLEAN")],
+            )
+        ],
+        metrics_defined=0,
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert "30 rows with different values (20%, on the 12 columns both sides share)" in body
+
+
+def test_moved_metric_breakdown_renders_under_the_metric_table() -> None:
+    from dbt_preflight.diff import MetricDiff, ModelDiff
+
+    report = PreflightReport(
+        models=[_model("dim_customers")],
+        diffs=[
+            ModelDiff(
+                unique_id="model.p.dim_customers",
+                name="dim_customers",
+                base_exists=True,
+                rows_base=150,
+                rows_head=150,
+                metrics=[
+                    MetricDiff(
+                        "net_revenue",
+                        "Net revenue (EUR)",
+                        "dbt",
+                        base=8190.0,
+                        head=7830.0,
+                        breakdown={
+                            "sales_channel": [
+                                ("web", 5210.0, 4980.0),
+                                ("mobile_app", 2980.0, 2850.0),
+                            ]
+                        },
+                    )
+                ],
+            )
+        ],
+        metrics_defined=1,
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert "| Net revenue (EUR) | 8,190 | 7,830 | -4.4% |" in body
+    assert (
+        "- Net revenue (EUR) by sales_channel: web 5,210 → 4,980 (-4.4%), "
+        "mobile_app 2,980 → 2,850 (-4.4%)" in body
+    )
+    # the breakdown sits after the metric table, before the closing blank line's next section
+    assert body.index("| Net revenue (EUR) |") < body.index("by sales_channel")
