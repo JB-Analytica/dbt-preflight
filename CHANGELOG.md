@@ -12,6 +12,12 @@ All notable changes to this project are documented here. The format follows
   on the base branch (YAML entry, Lightdash meta, semantic layer, tests, downstream models),
   and profiles added columns (type, nulls, value distribution when low-cardinality). All
   three came from watching a coding agent use the comment.
+- Per-step timing on the run's stderr progress lines (parse, fixtures, build, base parse,
+  base build, diff), each tagged with seconds since the previous step. Added while
+  scale-testing preflight against a 120-model project; the review comment itself is
+  unchanged. On that project, head parse and build together account for most of a run, and
+  the base build (which rebuilds ancestors already built on head) is not the dominant cost
+  it was expected to be, so no build-time optimisation landed alongside it.
 
 ### Changed
 
