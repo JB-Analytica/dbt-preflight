@@ -1,0 +1,80 @@
+version: 2
+
+models:
+  - name: stg_webshop__customers
+    description: Customers, renamed and lightly cleaned. One row per customer.
+    columns:
+      - name: customer_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: email
+        description: Lower-cased login email.
+        data_tests: [unique, not_null]
+      - name: customer_segment
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [consumer, business]
+
+  - name: stg_webshop__products
+    description: The product catalogue. One row per product.
+    columns:
+      - name: product_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: sku
+        data_tests: [unique, not_null]
+      - name: product_category
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [beans, ground, capsules, equipment]
+
+  - name: stg_webshop__orders
+    description: Orders with their lifecycle status and fulfilment timestamps. One row per order.
+    columns:
+      - name: order_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_webshop__customers')
+                field: customer_id
+      - name: order_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [pending, paid, shipped, delivered, cancelled]
+      - name: sales_channel
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [web, mobile_app, marketplace, store]
+      - name: ordered_at
+        data_tests: [not_null]
+
+  - name: stg_webshop__order_items
+    description: Order lines. One row per product on an order.
+    columns:
+      - name: order_item_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_webshop__orders')
+                field: order_id
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_webshop__products')
+                field: product_id
+      - name: quantity
+        data_tests: [not_null]

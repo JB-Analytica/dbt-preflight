@@ -1,0 +1,30 @@
+name: webshop
+version: "1.0.0"
+config-version: 2
+profile: webshop
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+# Datasets are <target dataset>_<layer>: refarch_staging, refarch_marts in prod;
+# refarch_dev_staging, refarch_dev_marts in dev. dbt's default generate_schema_name does this.
+models:
+  webshop:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+      # Lightdash only exposes models with this tag (see refarch deploy). Marts are the contract;
+      # everything upstream is plumbing.
+      +tags: ["lightdash"]

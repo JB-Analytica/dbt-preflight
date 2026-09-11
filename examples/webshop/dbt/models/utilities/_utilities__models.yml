@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: metricflow_time_spine
+    description: One row per calendar day, 2024 to 2027. Required by the dbt semantic layer.
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        description: The calendar day.
+        granularity: day
+        data_tests: [unique, not_null]

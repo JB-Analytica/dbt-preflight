@@ -1,0 +1,81 @@
+version: 2
+
+# The same metrics as the Lightdash meta in _marts__models.yml, expressed in dbt's own
+# semantic layer. A project that uses only dbt defines its metrics here; preflight reads
+# both and evaluates them on the base branch and the pull request.
+
+semantic_models:
+  - name: orders
+    description: Order-grain facts.
+    model: ref('fct_orders')
+    defaults:
+      agg_time_dimension: ordered_at
+    entities:
+      - name: order
+        type: primary
+        expr: order_id
+      - name: customer
+        type: foreign
+        expr: customer_id
+    dimensions:
+      - name: ordered_at
+        type: time
+        type_params:
+          time_granularity: day
+      - name: order_status
+        type: categorical
+      - name: sales_channel
+        type: categorical
+    measures:
+      - name: order_count
+        description: Number of orders.
+        agg: count
+        expr: order_id
+      - name: net_revenue_eur
+        description: Net revenue after discounts, in euros.
+        agg: sum
+        expr: net_amount_eur
+      - name: units_sold
+        agg: sum
+        expr: units
+      - name: ordering_customers
+        agg: count_distinct
+        expr: customer_id
+
+metrics:
+  - name: orders
+    label: Orders
+    description: Number of distinct orders.
+    type: simple
+    type_params:
+      measure: order_count
+  - name: net_revenue
+    label: Net revenue (EUR)
+    description: Net revenue after discounts.
+    type: simple
+    type_params:
+      measure: net_revenue_eur
+  - name: cancelled_orders
+    label: Cancelled orders
+    description: Orders the customer or the shop cancelled.
+    type: simple
+    type_params:
+      measure: order_count
+    filter: |
+      {{ Dimension('order__order_status') }} = 'cancelled'
+  - name: average_order_value
+    label: Average order value
+    description: Net revenue divided by the number of orders.
+    type: ratio
+    type_params:
+      numerator: net_revenue
+      denominator: orders
+  - name: cancellation_rate
+    label: Cancellation rate
+    description: Share of orders that were cancelled.
+    type: derived
+    type_params:
+      expr: cancelled_orders / orders
+      metrics:
+        - name: cancelled_orders
+        - name: orders

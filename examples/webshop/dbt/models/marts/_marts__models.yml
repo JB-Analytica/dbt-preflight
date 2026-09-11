@@ -1,0 +1,650 @@
+version: 2
+
+# The marts layer is the contract with the business, and the only layer Lightdash exposes
+# (`refarch deploy` restricts explores to the `lightdash` tag, which dbt_project.yml puts on
+# everything in this folder).
+#
+# Metrics are defined here, once, in dbt -- not in Lightdash's UI. That is the whole point of
+# the semantic layer: "revenue" means the same thing in every chart, it is code-reviewed, and
+# it moves between projects with the repo.
+
+models:
+  - name: fct_orders
+    description: >
+      One row per order, with its money rolled up from the line items and its fulfilment
+      timeline. The grain every revenue and order-volume question is answered at.
+    config:
+      meta:
+        primary_key: order_id
+        label: Orders
+        group_label: Sales
+        default_time_dimension:
+          field: ordered_at
+          interval: DAY
+        joins:
+          - join: dim_customers
+            relationship: many-to-one
+            sql_on: ${fct_orders.customer_id} = ${dim_customers.customer_id}
+        metrics:
+          average_order_value_eur:
+            type: number
+            label: Average order value
+            description: Net revenue divided by the number of orders.
+            sql: ${net_revenue_eur} / nullif(${order_count}, 0)
+            format: 'eur'
+            round: 2
+          cancellation_rate:
+            type: number
+            label: Cancellation rate
+            description: Share of orders that were cancelled.
+            sql: ${cancelled_order_count} / nullif(${order_count}, 0)
+            format: percent
+            round: 1
+    columns:
+      - name: order_id
+        description: Primary key. One row per order.
+        data_tests: [unique, not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Order ID
+            metrics:
+              order_count:
+                type: count_distinct
+                label: Orders
+                description: Number of distinct orders.
+                format: '#,##0'
+              cancelled_order_count:
+                type: count_distinct
+                label: Cancelled orders
+                description: Orders the customer or the shop cancelled.
+                format: '#,##0'
+                filters:
+                  - order_status: cancelled
+      - name: customer_id
+        description: The customer who placed the order.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_id
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Customer ID
+              hidden: true
+            metrics:
+              ordering_customer_count:
+                type: count_distinct
+                label: Ordering customers
+                description: Customers who placed at least one order in the selected period.
+                format: '#,##0'
+      - name: ordered_at
+        description: When the order was placed (UTC).
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Ordered at
+              time_intervals: [DAY, WEEK, MONTH, QUARTER, YEAR]
+      - name: order_date
+        description: Date the order was placed.
+        config:
+          meta:
+            dimension:
+              type: date
+              label: Order date
+      - name: order_status
+        description: pending, paid, shipped, delivered or cancelled.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [pending, paid, shipped, delivered, cancelled]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Status
+      - name: sales_channel
+        description: Where the order came from.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [web, mobile_app, marketplace, store]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Channel
+      - name: shipping_city
+        description: City the order shipped to.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Shipping city
+      - name: shipping_country
+        description: Country the order shipped to.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Shipping country
+      - name: shipped_at
+        description: When the order left the warehouse; null until it ships.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Shipped at
+              hidden: true
+      - name: delivered_at
+        description: When the order arrived; null until delivered.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Delivered at
+              hidden: true
+      - name: line_item_count
+        description: Number of distinct products on the order.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Lines on order
+            metrics:
+              average_lines_per_order:
+                type: average
+                label: Average lines per order
+                round: 2
+      - name: units
+        description: Total units across all lines on the order.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Units on order
+              hidden: true
+            metrics:
+              units_sold:
+                type: sum
+                label: Units sold
+                format: '#,##0'
+      - name: gross_amount_eur
+        description: Line prices times quantity, before discounts, in euros.
+        config:
+          meta:
+            dimension:
+              type: number
+              hidden: true
+            metrics:
+              gross_revenue_eur:
+                type: sum
+                label: Gross revenue
+                description: Order value before discounts.
+                format: 'eur'
+                round: 2
+      - name: discount_eur
+        description: Total discount granted on the order, in euros.
+        config:
+          meta:
+            dimension:
+              type: number
+              hidden: true
+            metrics:
+              discount_given_eur:
+                type: sum
+                label: Discount given
+                format: 'eur'
+                round: 2
+      - name: net_amount_eur
+        description: Gross minus discounts, in euros. The revenue number the business uses.
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Order value
+              format: 'eur'
+            metrics:
+              net_revenue_eur:
+                type: sum
+                label: Net revenue
+                description: Order value after discounts, cancellations included. Filter on status to exclude them.
+                format: 'eur'
+                round: 2
+              delivered_revenue_eur:
+                type: sum
+                label: Delivered revenue
+                description: Net revenue on orders that actually reached the customer.
+                format: 'eur'
+                round: 2
+                filters:
+                  - order_status: delivered
+      - name: is_cancelled
+        description: True when the order was cancelled.
+        config:
+          meta:
+            dimension:
+              type: boolean
+              label: Is cancelled
+      - name: is_delivered
+        description: True when the order was delivered.
+        config:
+          meta:
+            dimension:
+              type: boolean
+              label: Is delivered
+      - name: days_to_ship
+        description: Days between ordering and shipping; null while unshipped.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Days to ship
+              round: 1
+            metrics:
+              average_days_to_ship:
+                type: average
+                label: Average days to ship
+                description: Mean fulfilment lead time over shipped orders.
+                round: 1
+
+  - name: fct_order_items
+    description: >
+      One row per product line on an order, carrying the order's customer and channel so
+      product questions can be asked without a second join.
+    config:
+      meta:
+        primary_key: order_item_id
+        label: Order items
+        group_label: Sales
+        default_time_dimension:
+          field: ordered_at
+          interval: DAY
+        joins:
+          - join: dim_products
+            relationship: many-to-one
+            sql_on: ${fct_order_items.product_id} = ${dim_products.product_id}
+          - join: dim_customers
+            relationship: many-to-one
+            sql_on: ${fct_order_items.customer_id} = ${dim_customers.customer_id}
+    columns:
+      - name: order_item_id
+        description: Primary key. One row per order line.
+        data_tests: [unique, not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              hidden: true
+            metrics:
+              order_line_count:
+                type: count_distinct
+                label: Order lines
+                format: '#,##0'
+      - name: order_id
+        description: The order this line belongs to.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_id
+        config:
+          meta:
+            dimension:
+              type: string
+              hidden: true
+            metrics:
+              orders_containing_product:
+                type: count_distinct
+                label: Orders containing product
+                format: '#,##0'
+      - name: product_id
+        description: The product sold on this line.
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              hidden: true
+      - name: customer_id
+        description: The customer who placed the order.
+        config:
+          meta:
+            dimension:
+              type: string
+              hidden: true
+      - name: ordered_at
+        description: When the parent order was placed.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Ordered at
+              time_intervals: [DAY, WEEK, MONTH, QUARTER, YEAR]
+      - name: order_status
+        description: Status of the parent order.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Order status
+      - name: sales_channel
+        description: Channel of the parent order.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Channel
+      - name: quantity
+        description: Units of this product on the line.
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: number
+              hidden: true
+            metrics:
+              units_sold:
+                type: sum
+                label: Units sold
+                format: '#,##0'
+      - name: unit_price_eur
+        description: Price per unit at the time of ordering.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Unit price
+              format: 'eur'
+            metrics:
+              average_unit_price_eur:
+                type: average
+                label: Average unit price
+                format: 'eur'
+                round: 2
+      - name: net_amount_eur
+        description: Line revenue after discount, in euros.
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: number
+              hidden: true
+            metrics:
+              line_revenue_eur:
+                type: sum
+                label: Product revenue
+                description: Revenue attributed to the product on each line.
+                format: 'eur'
+                round: 2
+
+  - name: dim_customers
+    description: >
+      One row per customer, with the lifetime aggregates that make a customer list useful on
+      its own. Cancelled orders are excluded from lifetime revenue.
+    config:
+      meta:
+        primary_key: customer_id
+        label: Customers
+        group_label: Customers
+    columns:
+      - name: customer_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Customer ID
+            metrics:
+              customer_count:
+                type: count_distinct
+                label: Customers
+                format: '#,##0'
+      - name: full_name
+        description: First and last name.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Customer
+      - name: email
+        description: Login email, lower-cased.
+        data_tests: [unique, not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Email
+      - name: phone
+        description: Phone number where the customer gave one.
+        config:
+          meta:
+            dimension:
+              type: string
+              hidden: true
+      - name: city
+        description: Customer's home city.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: City
+      - name: country
+        description: Customer's home country.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Country
+      - name: customer_segment
+        description: consumer or business.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [consumer, business]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Segment
+      - name: is_marketing_opt_in
+        description: Whether the customer accepted marketing email.
+        config:
+          meta:
+            dimension:
+              type: boolean
+              label: Marketing opt-in
+            metrics:
+              opted_in_customer_count:
+                type: count_distinct
+                label: Opted-in customers
+                hidden: true
+      - name: customer_since_at
+        description: When the account was created.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Customer since
+              time_intervals: [DAY, WEEK, MONTH, QUARTER, YEAR]
+      - name: first_order_at
+        description: First non-cancelled order; null for customers who never ordered.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: First order at
+      - name: last_order_at
+        description: Most recent non-cancelled order.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Last order at
+      - name: lifetime_order_count
+        description: Non-cancelled orders placed, all time.
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Lifetime orders
+            metrics:
+              average_lifetime_orders:
+                type: average
+                label: Average lifetime orders
+                round: 2
+      - name: lifetime_net_revenue_eur
+        description: Net revenue from this customer, all time, cancellations excluded.
+        data_tests: [not_null]
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Lifetime value
+              format: 'eur'
+            metrics:
+              lifetime_value_eur:
+                type: sum
+                label: Total lifetime value
+                format: 'eur'
+                round: 2
+              average_lifetime_value_eur:
+                type: average
+                label: Average lifetime value
+                format: 'eur'
+                round: 2
+      - name: has_ordered
+        description: True when the customer has at least one non-cancelled order.
+        config:
+          meta:
+            dimension:
+              type: boolean
+              label: Has ordered
+
+  - name: dim_products
+    description: One row per product, with a composed display name and unit economics in euros.
+    config:
+      meta:
+        primary_key: product_id
+        label: Products
+        group_label: Catalogue
+    columns:
+      - name: product_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Product ID
+            metrics:
+              product_count:
+                type: count_distinct
+                label: Products
+                format: '#,##0'
+      - name: sku
+        description: EAN-13 barcode.
+        data_tests: [unique, not_null]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: SKU
+      - name: product_name
+        description: Human-readable name composed from origin, roast, category and weight.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Product
+      - name: coffee_origin
+        description: Country the beans come from.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Origin
+      - name: roast_level
+        description: light, medium or dark.
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Roast
+      - name: product_category
+        description: beans, ground, capsules or equipment.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [beans, ground, capsules, equipment]
+        config:
+          meta:
+            dimension:
+              type: string
+              label: Category
+      - name: weight_grams
+        description: Pack weight in grams.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Weight (g)
+      - name: unit_price_eur
+        description: List price per unit.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: List price
+              format: 'eur'
+            metrics:
+              average_list_price_eur:
+                type: average
+                label: Average list price
+                format: 'eur'
+                round: 2
+      - name: unit_cost_eur
+        description: Cost per unit.
+        config:
+          meta:
+            dimension:
+              type: number
+              hidden: true
+      - name: unit_margin_eur
+        description: List price minus cost, per unit.
+        config:
+          meta:
+            dimension:
+              type: number
+              label: Unit margin
+              format: 'eur'
+            metrics:
+              average_unit_margin_eur:
+                type: average
+                label: Average unit margin
+                format: 'eur'
+                round: 2
+      - name: is_active
+        description: Whether the product is currently sellable.
+        config:
+          meta:
+            dimension:
+              type: boolean
+              label: Is active
+      - name: listed_at
+        description: When the product was added to the catalogue.
+        config:
+          meta:
+            dimension:
+              type: timestamp
+              label: Listed at

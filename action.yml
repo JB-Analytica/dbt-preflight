@@ -1,0 +1,88 @@
+name: dbt preflight
+description: >-
+  Build and test the dbt models a pull request changes against synthetic data on DuckDB,
+  check house conventions, and leave one review comment. No warehouse credentials needed.
+author: JB Analytica
+branding:
+  icon: check-circle
+  color: orange
+
+inputs:
+  base-ref:
+    description: Base branch to diff against. Defaults to the pull request's base branch.
+    required: false
+    default: ${{ github.base_ref }}
+  config:
+    description: Path to .dbt-preflight.yml, relative to the repository root.
+    required: false
+    default: .dbt-preflight.yml
+  post-comment:
+    description: Post or update the review comment on the pull request.
+    required: false
+    default: "true"
+  fail-on-error:
+    description: Fail the job when preflight fails.
+    required: false
+    default: "true"
+  python-version:
+    description: Python version to run preflight with.
+    required: false
+    default: "3.12"
+  github-token:
+    description: "Token used to post the comment. Needs the pull-requests: write permission."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+
+    - name: Install dbt-preflight
+      shell: bash
+      run: uv tool install --python "${{ inputs.python-version }}" "${{ github.action_path }}"
+
+    - name: Run preflight
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        # A pull request from a fork runs with a read-only token, so the comment cannot be
+        # posted. The report still lands in the job summary, and says why it is only there.
+        PREFLIGHT_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      run: |
+        args=(run --comment-file preflight-comment.md)
+        if [ -n "${{ inputs.base-ref }}" ]; then
+          args+=(--base-ref "origin/${{ inputs.base-ref }}")
+        fi
+        if [ -f "${{ inputs.config }}" ]; then
+          args+=(--config "${{ inputs.config }}")
+        fi
+        if [ "${{ inputs.post-comment }}" = "true" ] && [ "$PREFLIGHT_FORK" != "true" ]; then
+          args+=(--post)
+        fi
+        if [ "${{ inputs.fail-on-error }}" != "true" ]; then
+          args+=(--no-fail-on-error)
+        fi
+        dbt-preflight "${args[@]}"
+
+    - name: Add the comment to the job summary
+      if: always()
+      shell: bash
+      env:
+        PREFLIGHT_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      run: |
+        if [ "$PREFLIGHT_FORK" = "true" ] && [ "${{ inputs.post-comment }}" = "true" ]; then
+          {
+            echo "> **Not posted to the pull request.** This pull request comes from a fork, and GitHub"
+            echo "> gives its workflow a read-only token, so the report lives here in the job summary"
+            echo "> instead. To get comments on fork pull requests, run preflight from a"
+            echo "> \`pull_request_target\` workflow and read its security trade-offs first."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ -f preflight-comment.md ]; then
+          cat preflight-comment.md >> "$GITHUB_STEP_SUMMARY"
+        fi
