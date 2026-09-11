@@ -407,6 +407,47 @@ def test_breakdown_skips_dimensions_lightdash_marks_hidden(
     assert list(moved.breakdown) == ["segment"]  # phone, hidden, is excluded
 
 
+def test_breakdown_gates_out_high_cardinality_dimensions(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    """`city` is near-unique per row (13 distinct values, over the cap of 12) and tells a
+    reviewer nothing; `segment` (2 distinct values) is the useful breakdown and is kept."""
+    raw_manifest["nodes"]["model.p.dim_customers"]["columns"] = {
+        "city": {"config": {"meta": {"dimension": {"type": "string"}}}},
+        "segment": {"config": {"meta": {"dimension": {"type": "string"}}}},
+    }
+    head, base = _head_and_base(raw_manifest)
+    db = tmp_path / "preflight.duckdb"
+
+    # 13 customers: a distinct city each, a 7/6 split between two segments. Business
+    # customers' revenue doubles on head; consumers are unchanged.
+    def row(customer_id: int, revenue: float) -> str:
+        segment = "consumer" if customer_id % 2 else "business"
+        return f"({customer_id}, {revenue}, 'city_{customer_id}', '{segment}')"
+
+    base_rows = ", ".join(row(i, 10.0) for i in range(1, 14))
+    head_rows = ", ".join(row(i, 20.0 if i % 2 == 0 else 10.0) for i in range(1, 14))
+    con = duckdb.connect(str(db))
+    con.execute("create schema preflight_main")
+    con.execute("create schema preflight_base_main")
+    con.execute(
+        f"create table preflight_base_main.dim_customers as select * from (values {base_rows}) "
+        "t(customer_id, revenue, city, segment)"
+    )
+    con.execute(
+        f"create table preflight_main.dim_customers as select * from (values {head_rows}) "
+        "t(customer_id, revenue, city, segment)"
+    )
+    con.close()
+    metrics = config_metrics(
+        [{"name": "revenue", "label": "Revenue", "model": "dim_customers", "sql": "sum(revenue)"}],
+        head,
+    )
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)[0]
+    (moved,) = d.moved_metrics
+    assert moved.breakdown == {"segment": [("business", 60.0, 120.0), ("consumer", 70.0, 70.0)]}
+
+
 def test_added_column_profile_for_low_and_high_cardinality(
     raw_manifest: dict, tmp_path: Path
 ) -> None:
