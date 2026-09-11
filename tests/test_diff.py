@@ -115,3 +115,88 @@ def test_value_changes_count_as_differing_rows(raw_manifest: dict, tmp_path: Pat
     d = diffs[0]
     assert not d.schema_changed and not d.rows_changed
     assert d.rows_differing == 2 and not d.identical
+
+
+def test_rename_profile_and_references(raw_manifest: dict, tmp_path: Path) -> None:
+    # Base has customer_segment; head renames it to segment (same values) and adds a boolean.
+    head_raw = {**raw_manifest, "nodes": {k: dict(v) for k, v in raw_manifest["nodes"].items()}}
+    base_raw = {**raw_manifest, "nodes": {k: dict(v) for k, v in raw_manifest["nodes"].items()}}
+    for node in base_raw["nodes"].values():
+        if node["resource_type"] == "model":
+            node["schema"] = "preflight_base_main"
+    mart = base_raw["nodes"]["model.p.dim_customers"]
+    mart["columns"] = {"customer_segment": {"name": "customer_segment"}}
+    mart["config"] = {
+        **mart["config"],
+        "meta": {
+            "metrics": {
+                "biz": {
+                    "type": "count",
+                    "sql": "${TABLE}.customer_id",
+                    "filters": [{"customer_segment": "business"}],
+                }
+            }
+        },
+    }
+    base_raw["nodes"]["model.p.report"] = {
+        **raw_manifest["nodes"]["model.p.stg_shop__orders"],
+        "name": "rpt_segments",
+        "path": "marts/rpt_segments.sql",
+        "schema": "preflight_base_main",
+        "raw_code": "select customer_segment, count(*) from {{ ref('dim_customers') }} group by 1",
+        "depends_on": {"nodes": ["model.p.dim_customers"]},
+    }
+    base_raw["child_map"] = {**base_raw["child_map"], "model.p.dim_customers": ["model.p.report"]}
+    base_raw["semantic_models"] = {
+        "semantic_model.p.customers": {
+            "name": "customers",
+            "depends_on": {"nodes": ["model.p.dim_customers"]},
+            "measures": [],
+            "dimensions": [{"name": "customer_segment", "type": "categorical"}],
+            "entities": [],
+        }
+    }
+    head = Manifest.from_dict(head_raw)
+    base = Manifest.from_dict(base_raw)
+
+    db = tmp_path / "preflight.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create schema preflight_main")
+    con.execute("create schema preflight_base_main")
+    con.execute(
+        "create table preflight_base_main.dim_customers as select * from (values "
+        "(1, 'consumer'), (2, 'business'), (3, 'consumer')) t(customer_id, customer_segment)"
+    )
+    con.execute(
+        "create table preflight_main.dim_customers as select customer_id, "
+        "customer_segment as segment, customer_segment = 'business' as is_business "
+        "from preflight_base_main.dim_customers"
+    )
+    con.close()
+
+    d = compute_diffs(db, head, base, ["model.p.dim_customers"], [], None)[0]
+    assert d.columns_renamed == [("customer_segment", "segment")]
+    assert d.columns_removed == [] and [c for c, _ in d.columns_added] == ["is_business"]
+    assert d.breaking and not d.identical
+    assert d.profiles["is_business"].describe() == "1 true, 2 false"
+    refs = d.references["customer_segment"]
+    assert "its YAML column entry" in refs[0]
+    assert "Lightdash meta on `dim_customers`" in refs
+    assert "semantic model `customers`" in refs
+    assert "downstream model `rpt_segments`" in refs
+
+
+def test_added_column_profile_for_low_and_high_cardinality(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    from dbt_preflight.diff import ColumnProfile
+
+    assert (
+        ColumnProfile("x", "VARCHAR", 5, 1, 2, [("a", 3), ("b", 1)]).describe()
+        == "2 distinct: a 3, b 1; 1 null"
+    )
+    assert ColumnProfile("x", "BIGINT", 150, 0, 150).describe() == "150 distinct"
+    assert (
+        ColumnProfile("x", "BOOLEAN", 3, 0, 2, [("false", 2), ("true", 1)]).describe()
+        == "1 true, 2 false"
+    )

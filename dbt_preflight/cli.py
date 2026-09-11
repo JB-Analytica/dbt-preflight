@@ -489,8 +489,8 @@ def _diff_against_base(
     )
     moved = sum(len(d.moved_metrics) for d in report.diffs)
     _say(
-        f"   diff: {len(report.diffs)} models compared, "
-        f"{len(metric_defs)} metrics defined, {moved} moved"
+        f"   diff: {len(report.diffs)} models compared against {report.base_ref}; "
+        f"{len(metric_defs)} metrics defined across the project, {moved} moved"
     )
 
 

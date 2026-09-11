@@ -253,3 +253,46 @@ def test_parser_error_classification() -> None:
 
     binder = node('Binder Error: Referenced column "email" not found in FROM clause!')
     assert binder.dialect_function is None and not binder.is_parser_error
+
+
+def test_diff_section_renders_renames_profiles_and_references() -> None:
+    from dbt_preflight.diff import ColumnProfile, ModelDiff
+
+    report = PreflightReport(
+        models=[_model("dim_customers")],
+        diffs=[
+            ModelDiff(
+                unique_id="model.p.dim_customers",
+                name="dim_customers",
+                base_exists=True,
+                rows_base=150,
+                rows_head=150,
+                columns_added=[("is_business", "BOOLEAN")],
+                columns_renamed=[("customer_segment", "segment")],
+                profiles={
+                    "is_business": ColumnProfile(
+                        "is_business", "BOOLEAN", 150, 0, 2, [("false", 138), ("true", 12)]
+                    )
+                },
+                references={
+                    "customer_segment": [
+                        "its YAML column entry (models/_marts.yml)",
+                        "Lightdash meta on `dim_customers`",
+                    ]
+                },
+            )
+        ],
+        metrics_defined=3,
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert report.has_warnings
+    assert "⚠️ marks a column that was removed, renamed or retyped" in body
+    assert (
+        "+`is_business` (BOOLEAN, 12 true, 138 false), `customer_segment` → `segment` (renamed, same values) ⚠️"
+        in body
+    )
+    assert (
+        "`customer_segment` was referenced on the base branch by its YAML column entry (models/_marts.yml), Lightdash meta on `dim_customers`; each of those needs the new name or the column back."
+        in body
+    )

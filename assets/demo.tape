@@ -10,11 +10,12 @@
 #     -y <repo>/assets/demo.gif
 
 Output demo.gif
+Output demo.mp4
 
 Set Shell "zsh"
 Set FontSize 15
 Set Width 1200
-Set Height 760
+Set Height 820
 Set Padding 24
 Set Framerate 20
 Set Theme {"name": "jba", "black": "#182333", "red": "#e5989b", "green": "#7cc576", "yellow": "#FA9306", "blue": "#2196F0", "purple": "#A8C9EE", "cyan": "#2196F0", "white": "#F6F8FB", "brightBlack": "#3b4252", "brightRed": "#e5989b", "brightGreen": "#7cc576", "brightYellow": "#FA9306", "brightBlue": "#2196F0", "brightPurple": "#A8C9EE", "brightCyan": "#2196F0", "brightWhite": "#FFFFFF", "background": "#0e1117", "foreground": "#F6F8FB", "cursor": "#FA9306"}
@@ -46,8 +47,18 @@ Type "clear"
 Enter
 Sleep 300ms
 
-# 3. The comment a reviewer sees.
-Type "head -24 comment.md"
+# 3. The comment a reviewer sees: the verdict and what broke.
+Type "sed -n '2,20p' comment.md"
 Sleep 300ms
 Enter
-Sleep 7000ms
+Sleep 8000ms
+
+Type "clear"
+Enter
+Sleep 300ms
+
+# 4. And what the change did to the output, compared with main on the same data.
+Type "grep -A 7 'What changed in the output' comment.md"
+Sleep 300ms
+Enter
+Sleep 9000ms

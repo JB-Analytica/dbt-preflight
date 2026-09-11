@@ -185,7 +185,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
         metrics.append({k: str(v) for k, v in m.items()})
 
     try:
-        conventions = from_config(raw.get("conventions"))
+        conventions = from_config(raw.get("conventions"), configured=path.exists())
     except ConventionError as exc:
         raise ConfigError(str(exc)) from None
 

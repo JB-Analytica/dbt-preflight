@@ -39,6 +39,13 @@ design; if it cannot run something, say so in the pull request description.
   that appeared or disappeared, and the metrics that moved, with base and PR values. An
   agent asked for "a refactor with no behaviour change" can read "Identical output to the
   base branch" as proof, and a moved metric as the thing to explain in the pull request.
+- **What a removed or renamed column was wired to.** For each one, the comment lists its
+  references on the base branch: the YAML column entry, Lightdash meta, semantic-layer
+  expressions, tests and downstream models. Every item on that list needs the new name.
+  "No reference on the base branch" means only consumers outside the repository can break.
+- **What a new column holds.** Type, null count and, for low-cardinality columns, the value
+  distribution: `is_business (BOOLEAN, 12 true, 138 false)`. A column of all false would
+  show as such, without a second run and a DuckDB query.
 
 ## What an agent still needs from a human
 
@@ -48,6 +55,20 @@ design; if it cannot run something, say so in the pull request description.
   pull-request decision.
 - Production numbers. Synthetic data proves the SQL runs and the tests pass; it cannot say
   whether revenue moved.
+
+## Files preflight leaves behind
+
+Add these two lines to the repository's `.gitignore` so an agent never has to decide whether
+to commit them:
+
+```
+.preflight/
+.preflight-comment.md
+```
+
+The first is the work directory (fixtures, the DuckDB file, dbt artefacts), kept only with
+`--keep-workdir`. The second is the comment written by `--comment-file`. Neither belongs in
+a pull request.
 
 ## Hooking it in
 

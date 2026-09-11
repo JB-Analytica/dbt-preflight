@@ -77,6 +77,14 @@ def jba() -> ConventionSet:
     )
 
 
+def soften(conventions: ConventionSet) -> ConventionSet:
+    """The same rules, none of them fatal: every `error` becomes `warn`."""
+    conventions.severities = {
+        rule: (WARN if sev == ERROR else sev) for rule, sev in conventions.severities.items()
+    }
+    return conventions
+
+
 def none() -> ConventionSet:
     """No conventions at all: every rule off."""
     return ConventionSet(severities=dict.fromkeys(RULES, OFF))
@@ -89,10 +97,15 @@ class ConventionError(ValueError):
     pass
 
 
-def from_config(raw: object) -> ConventionSet:
-    """A ConventionSet from the `conventions:` block of the config file (or None)."""
+def from_config(raw: object, configured: bool = True) -> ConventionSet:
+    """A ConventionSet from the `conventions:` block of the config file (or None).
+
+    `configured` is whether a config file exists at all. A project that never wrote one did
+    not sign up for anyone's conventions, so the house rules run as warnings there; a
+    project with a config file gets them at full strength unless it says otherwise.
+    """
     if raw is None:
-        return jba()
+        return jba() if configured else soften(jba())
     if not isinstance(raw, dict):
         raise ConventionError("`conventions` must be a mapping.")
     unknown = sorted(set(raw) - {"preset", "rules", "layers", "source_layer"})

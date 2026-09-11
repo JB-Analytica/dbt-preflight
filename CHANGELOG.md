@@ -5,6 +5,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The output diff detects a rename (a dropped and an added column of the same type with the
+  same values) and reports it as one, lists where a removed or renamed column was referenced
+  on the base branch (YAML entry, Lightdash meta, semantic layer, tests, downstream models),
+  and profiles added columns (type, nulls, value distribution when low-cardinality). All
+  three came from watching a coding agent use the comment.
+
+### Changed
+
+- A repository with no `.dbt-preflight.yml` gets the house conventions as warnings, not
+  errors. Full strength needs a config file (a `conventions:` block is not required).
+
 ## [0.1.0] - 2026-09-11
 
 First tagged release. Private repository; the GitHub Action installs from the repository
