@@ -170,6 +170,54 @@ def test_cast_type_wins_over_name_guess(jaffle_manifest: Manifest) -> None:
     assert "  signup_date date" in dbml
 
 
+def test_macro_calls_do_not_break_parsing() -> None:
+    """A model like jaffle-shop's stg_orders, that wraps columns in dbt macros.
+
+    `{{ config(...) }}`, a comment block and `{{ dbt.date_trunc(...) }}` used as a select
+    expression would all leave invalid SQL behind if simply deleted; the macro call also
+    wraps the only occurrence of `ordered_at` in the query, so it has to be read out of the
+    call's own arguments, not off a bare `exp.Column`.
+    """
+    src_orders = "source.jaffle_shop.jaffle_shop.orders"
+    stg_orders = "model.jaffle_shop.stg_orders"
+    sql = """
+{{ config(materialized='view') }}
+with
+source as (
+    select * from {{ source('jaffle_shop', 'orders') }}
+),
+renamed as (
+    select
+        -- ids
+        id as order_id,
+        customer_id,
+        {{ cents_to_dollars('subtotal') }} as subtotal,
+        {{ dbt.date_trunc('day', 'ordered_at') }} as ordered_at
+    from source
+)
+select * from renamed
+"""
+    raw = {
+        "sources": {src_orders: _source("jaffle_shop", "orders")},
+        "nodes": {
+            stg_orders: _staging_model("stg_orders", "staging/stg_orders.sql", [src_orders], sql),
+        },
+        "parent_map": {stg_orders: [src_orders]},
+        "child_map": {src_orders: [stg_orders]},
+    }
+    manifest = Manifest.from_dict(raw)
+
+    dbml, inferred = derive_dbml(manifest)
+    assert "  id int [pk]" in dbml
+    assert "  customer_id int" in dbml
+    # Both only ever appear as a macro's string-literal argument, never a bare column: read
+    # out of the call itself, "day" (a date part, not a column) correctly left out.
+    assert "  ordered_at timestamp" in dbml
+    assert "  subtotal decimal" in dbml  # "subtotal" ends in "total", one of the guessed suffixes
+    assert "  day" not in dbml
+    assert inferred[0].models == ["stg_orders"]
+
+
 def test_declared_data_type_is_kept_over_inference() -> None:
     """A column sources.yml already types keeps that type, even one inference would guess
     differently; a column left untyped in the same source still triggers inference for it
