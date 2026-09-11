@@ -50,7 +50,10 @@ All notable changes to this project are documented here. The format follows
   `Net revenue (EUR) by sales_channel: web 5,210 → 4,980 (-4.4%), mobile_app ...`. Capped at
   three dimensions and three rows each, and only computed for metrics that actually moved, so
   the cost stays proportional to what changed. The model's own primary key and any dimension
-  Lightdash marks `hidden` are skipped, since neither makes a meaningful breakdown.
+  Lightdash marks `hidden` are skipped, since neither makes a meaningful breakdown. A
+  cardinality gate (one cheap `count(distinct ...)` per candidate) then skips a dimension
+  with only one distinct value or more than twelve — `full_name` and `city` say nothing a
+  reviewer can use — and orders what is left by fewest distinct values first.
 
 ### Changed
 
