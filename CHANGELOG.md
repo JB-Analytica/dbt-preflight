@@ -54,6 +54,30 @@ All notable changes to this project are documented here. The format follows
   cardinality gate (one cheap `count(distinct ...)` per candidate) then skips a dimension
   with only one distinct value or more than twelve — `full_name` and `city` say nothing a
   reviewer can use — and orders what is left by fewest distinct values first.
+- Schema inference for a column without an explicit cast now reads how the staging SQL
+  uses it before falling back to its name: an operand of `/`, `*`, `+`, `-` against a
+  numeric literal, or wrapped in `sum(`/`avg(`/`round(`, is numeric; compared to a string
+  literal, or passed to `lower(`/`upper(`/`trim(`/`concat(`, is varchar. The name
+  heuristics themselves grew - `paid`, `cost`, `tax`, `fee`, `discount`, `revenue`,
+  `subtotal`, `balance`, `margin`, `weight`, `score` now read as decimal, and `count`,
+  `number`, `num`, `qty`, `quantity`, `units`, `age`, `year`, `month`, `day`, each matched
+  as a whole underscore-separated word so "package" and "average" don't become integers by
+  accident, now read as integer - and a column named `email`, `phone`, `name`, `city`,
+  `country`, `address`, `sku`, `description`, `status`, `type`, or `category` always stays
+  varchar. A column shaped like a foreign key - `customer_id`, or a bare `customer` when a
+  `raw_customers` source exists - is typed as an integer and gets a `ref:` to that table's
+  `id` when a matching source table can be found, unless an explicit `relationships` test
+  already set one. Against a clone of dbt-labs/jaffle-shop with no config file, this took
+  preflight from 6 of 13 models built to 10 of 13; the remaining 3 are skipped by dbt
+  itself because of one upstream test - `order_total - tax_paid = subtotal` on
+  `stg_orders` - that checks an arithmetic relationship between three independently
+  generated columns, which no schema inference can satisfy on synthetic data.
+- A staging model's own `unique`/`not_null` tests on the alias it gave a source column
+  (`id as customer_id`, tested as `customer_id`) now carry back to that source column in
+  the derived DBML - `pk` when both are declared on the same alias, `unique`/`not null`
+  alone otherwise - so a project that tests its staging models rather than its sources
+  still gets keys in the derived schema. A source column named `id` was already the
+  primary key regardless.
 
 ### Changed
 
