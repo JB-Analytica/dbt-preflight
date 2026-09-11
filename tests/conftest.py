@@ -9,7 +9,13 @@ from dbt_preflight.manifest import Manifest
 ROOT = Path(__file__).parent
 
 
-def _model(name: str, path: str, depends_on: list[str], description: str = "described") -> dict:
+def _model(
+    name: str,
+    path: str,
+    depends_on: list[str],
+    description: str = "described",
+    raw_code: str = "",
+) -> dict:
     return {
         "resource_type": "model",
         "name": name,
@@ -22,6 +28,7 @@ def _model(name: str, path: str, depends_on: list[str], description: str = "desc
         "depends_on": {"nodes": depends_on},
         "config": {"materialized": "view"},
         "columns": {},
+        "raw_code": raw_code,
     }
 
 
