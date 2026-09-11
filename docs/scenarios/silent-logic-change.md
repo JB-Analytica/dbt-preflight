@@ -9,7 +9,7 @@ Expected: **pass**. Got: **pass**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ✅ passed
 
-Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 convention issues · 4.5 s
+Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 convention issues · 4.6 s
 
 ### Changed models
 
@@ -17,7 +17,7 @@ Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 conventi
 | --- | --- | ---: | --- |
 | `dim_customers` | ✅ built | 150 | 7 passed |
 
-Also rebuilt, no new issues: `stg_webshop__customers`, `stg_webshop__order_items`, `stg_webshop__orders`, `fct_order_items`, `int_orders__items_aggregated` and 1 more.
+Also rebuilt, no new issues: `stg_webshop__customers`, `stg_webshop__orders`, `stg_webshop__order_items`, `fct_order_items`, `int_orders__items_aggregated` and 1 more.
 
 ### What changed in the output
 
@@ -31,15 +31,9 @@ Base branch and pull request, built on the same synthetic data. A difference her
 | Total lifetime value | 73,285.32 | 76,677.25 | +4.6% |
 | Average lifetime value | 488.57 | 511.18 | +4.6% |
 
-- Average lifetime orders by full_name: Anna Van Daele 2 → 4 (+100.0%), Marc Willems 6 → 8 (+33.3%), Matthias Leys 14 → 16 (+14.3%)
-- Average lifetime orders by email: anna.vandaele@yahoo.com 2 → 4 (+100.0%), marc.willems@hotmail.com 6 → 8 (+33.3%), matthias.leys@hotmail.com 14 → 16 (+14.3%)
-- Average lifetime orders by city: Beuzet 6 → 8 (+33.3%), Hornu 21 → 23 (+9.5%), Sint-Martens-Lierde 2 → 4 (+100.0%)
-- Total lifetime value by full_name: Anna Van Daele 198.64 → 515.35 (+159.4%), Arthur De Backer 279.11 → 564.34 (+102.2%), Johan De Rycke 734.61 → 1,017.35 (+38.5%)
-- Total lifetime value by email: anna.vandaele@yahoo.com 198.64 → 515.35 (+159.4%), arthur.debacker@hotmail.com 279.11 → 564.34 (+102.2%), johan.derycke@yahoo.com 734.61 → 1,017.35 (+38.5%)
-- Total lifetime value by city: Sint-Martens-Lierde 198.64 → 515.35 (+159.4%), l'Escaillère 279.11 → 564.34 (+102.2%), Bienne-lez-Happart 734.61 → 1,017.35 (+38.5%)
-- Average lifetime value by full_name: Anna Van Daele 198.64 → 515.35 (+159.4%), Arthur De Backer 279.11 → 564.34 (+102.2%), Johan De Rycke 734.61 → 1,017.35 (+38.5%)
-- Average lifetime value by email: anna.vandaele@yahoo.com 198.64 → 515.35 (+159.4%), arthur.debacker@hotmail.com 279.11 → 564.34 (+102.2%), johan.derycke@yahoo.com 734.61 → 1,017.35 (+38.5%)
-- Average lifetime value by city: Sint-Martens-Lierde 198.64 → 515.35 (+159.4%), l'Escaillère 279.11 → 564.34 (+102.2%), Bienne-lez-Happart 734.61 → 1,017.35 (+38.5%)
+- Average lifetime orders by customer_segment: business 4.83 → 5.17 (+6.9%), consumer 4.71 → 4.93 (+4.6%)
+- Total lifetime value by customer_segment: consumer 67,582.89 → 70,468.16 (+4.3%), business 5,702.43 → 6,209.09 (+8.9%)
+- Average lifetime value by customer_segment: business 475.20 → 517.42 (+8.9%), consumer 489.73 → 510.64 (+4.3%)
 
 2 metrics unchanged.
 
@@ -49,7 +43,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `e8f7001`.
+Compared against base `main`, head `654a9de`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>

@@ -27,6 +27,11 @@ from dbt_preflight.transpile import transpile_sql
 # moved metric stays bounded regardless of how many dimensions the model has.
 _BREAKDOWN_DIMENSIONS = 3
 _BREAKDOWN_ROWS = 3
+# A dimension with only one distinct value says nothing (every row falls in one bucket); one
+# with too many is closer to a row identifier than a grouping (`full_name`, `city`) and would
+# swamp the comment with singleton rows. Both are skipped before a dimension is even offered.
+_BREAKDOWN_MIN_DISTINCT = 2
+_BREAKDOWN_MAX_DISTINCT = 12
 
 
 @dataclass
@@ -245,10 +250,52 @@ def _references(base: Manifest, model: ModelNode, column: str) -> list[str]:
     return refs
 
 
-def _categorical_dimensions(head: Manifest, model_uid: str) -> list[tuple[str, str]]:
+def _distinct_count(
+    con: duckdb.DuckDBPyConnection, expr: str, model: ModelNode, dialect: str | None
+) -> int | None:
+    sql = f"select count(distinct {expr}) from {relation(model)}"
+    if dialect:
+        try:
+            sql = transpile_sql(sql, dialect)
+        except SqlglotError:
+            pass
+    try:
+        row = con.execute(sql).fetchone()
+    except duckdb.Error:
+        return None
+    return int(row[0]) if row else None
+
+
+def _cardinality_gate(
+    con: duckdb.DuckDBPyConnection,
+    candidates: list[tuple[str, str]],
+    model: ModelNode,
+    dialect: str | None,
+) -> list[tuple[str, str]]:
+    """`candidates` with between `_BREAKDOWN_MIN_DISTINCT` and `_BREAKDOWN_MAX_DISTINCT`
+    distinct values on `model`'s head build, ordered by fewest distinct values first: one
+    query per candidate, so kept to the handful of dimensions a model actually offers."""
+    scored = []
+    for name, expr in candidates:
+        distinct = _distinct_count(con, expr, model, dialect)
+        if distinct is None or not (_BREAKDOWN_MIN_DISTINCT <= distinct <= _BREAKDOWN_MAX_DISTINCT):
+            continue
+        scored.append((distinct, name, expr))
+    scored.sort(key=lambda row: (row[0], row[1]))
+    return [(name, expr) for _, name, expr in scored]
+
+
+def _categorical_dimensions(
+    con: duckdb.DuckDBPyConnection, head: Manifest, model_uid: str, dialect: str | None
+) -> list[tuple[str, str]]:
     """Up to `_BREAKDOWN_DIMENSIONS` (name, SQL expression) categorical dimensions available
-    on `model_uid`: from the dbt semantic model tied to it, or Lightdash meta on its own
-    columns when there is no semantic model, or nothing."""
+    on `model_uid`, gated by cardinality and ordered by fewest distinct values first: from
+    the dbt semantic model tied to it, or Lightdash meta on its own columns when the semantic
+    layer has none that survive the gate, or nothing."""
+    model = head.models.get(model_uid)
+    if model is None:
+        return []
+
     for sm in head.semantic_models.values():
         if sm.model_uid != model_uid:
             continue
@@ -258,11 +305,10 @@ def _categorical_dimensions(head: Manifest, model_uid: str) -> list[tuple[str, s
             if sm.dimension_types.get(name) == "categorical"
         ]
         if categorical:
-            return categorical[:_BREAKDOWN_DIMENSIONS]
+            gated = _cardinality_gate(con, categorical, model, dialect)
+            if gated:
+                return gated[:_BREAKDOWN_DIMENSIONS]
 
-    model = head.models.get(model_uid)
-    if model is None:
-        return []
     primary_key = model.meta.get("primary_key")  # one row per value: not a real breakdown
     lightdash = []
     for col, meta in model.column_meta.items():
@@ -270,7 +316,7 @@ def _categorical_dimensions(head: Manifest, model_uid: str) -> list[tuple[str, s
         if col == primary_key or dimension.get("hidden") or dimension.get("type") != "string":
             continue
         lightdash.append((col, f'"{col}"'))
-    return lightdash[:_BREAKDOWN_DIMENSIONS]
+    return _cardinality_gate(con, lightdash, model, dialect)[:_BREAKDOWN_DIMENSIONS]
 
 
 def _grouped_metric(
@@ -420,7 +466,7 @@ def compute_diffs(
                     )
                     if metric_diff.moved:
                         if dims is None:
-                            dims = _categorical_dimensions(head, uid)
+                            dims = _categorical_dimensions(con, head, uid, dialect)
                         if dims:
                             metric_diff.breakdown = _metric_breakdown(
                                 con, d, dims, head_node, base_node, dialect
