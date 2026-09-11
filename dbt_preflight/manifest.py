@@ -66,6 +66,9 @@ class SemanticModel:
     measures: dict[str, Measure]
     dimensions: dict[str, str]  # name -> SQL expression
     entities: dict[str, str]  # name -> SQL expression
+    # name -> categorical | time | ...; kept alongside `dimensions` rather than folded into
+    # it, so the many callers that read `dimensions` as name -> SQL expression are untouched.
+    dimension_types: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -250,6 +253,9 @@ class Manifest:
                     d["name"]: d.get("expr") or d["name"] for d in sm.get("dimensions") or []
                 },
                 entities={e["name"]: e.get("expr") or e["name"] for e in sm.get("entities") or []},
+                dimension_types={
+                    d["name"]: str(d.get("type") or "") for d in sm.get("dimensions") or []
+                },
             )
 
         metrics: dict[str, MetricNode] = {}
