@@ -13,6 +13,7 @@ from dbt_preflight.report import (
     PreflightReport,
     render,
 )
+from dbt_preflight.schema import InferredSource
 
 
 def _model(name: str, status: str = BUILT, changed: bool = True, **kw) -> ModelReport:
@@ -46,6 +47,38 @@ def test_clean_run_passes() -> None:
     assert "| `stg_shop__customers` | ✅ built | 150 | 2 passed |" in body
     assert "Built 1 of 1 models (1 changed)" in body
     assert "What this checks, and what it cannot" in body
+
+
+def test_fixtures_block_shows_inference_and_model2data_warnings() -> None:
+    fixtures = FixtureSummary(
+        tables=[LoadedTable("jaffle_shop", "customers", "customers", "raw", 100)],
+        inferred_sources=[
+            InferredSource(
+                source_name="jaffle_shop",
+                table="customers",
+                identifier="customers",
+                models=["stg_customers"],
+                total_columns=6,
+                guessed_columns=["name", "email"],
+            )
+        ],
+        unmapped_columns=[("notes", "varchar")],
+        cyclic_tables=["orders"],
+        unresolved_composite_keys=["order_items (order_id, product_id)"],
+    )
+    report = PreflightReport(
+        models=[_model("stg_customers", rows=100, tests_passed=1)],
+        fixtures=fixtures,
+        schema_source="sources.yml (derived)",
+        seed=42,
+    )
+    body = render(report)
+    assert "`customers`: 6 columns inferred from `stg_customers`" in body
+    assert "types guessed for `name`, `email`" in body
+    assert "filled with placeholder text" in body.lower()
+    assert "`notes`" in body
+    assert "`orders`" in body and "unresolved foreign-key cycle" in body
+    assert "`order_items (order_id, product_id)`" in body
 
 
 def test_failing_test_fails_the_run_and_shows_one_line() -> None:
