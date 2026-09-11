@@ -25,6 +25,17 @@ All notable changes to this project are documented here. The format follows
   falls through to the raw message unchanged.
 - Row counts and rows-with-different-values in "What changed in the output" carry their
   percentage change, e.g. `rows 800 → 742 (-7.3%)` and `30 rows with different values (20%)`.
+- Rows-with-different-values is now computed even when the schema changed, over the columns
+  both sides share (matching name and type), so an added or renamed column no longer hides a
+  value change on every other column: `30 rows with different values (20%, on the 12 columns
+  both sides share)`.
+- A metric that moved is broken down by the model's categorical dimensions (the dbt semantic
+  layer's `categorical` dimensions, or Lightdash `dimension.type: string` meta when there is
+  no semantic model), showing the rows with the largest contribution to the move, e.g.
+  `Net revenue (EUR) by sales_channel: web 5,210 → 4,980 (-4.4%), mobile_app ...`. Capped at
+  three dimensions and three rows each, and only computed for metrics that actually moved, so
+  the cost stays proportional to what changed. The model's own primary key and any dimension
+  Lightdash marks `hidden` are skipped, since neither makes a meaningful breakdown.
 
 ### Changed
 

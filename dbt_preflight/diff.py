@@ -15,10 +15,18 @@ import re
 from dataclasses import dataclass, field
 
 import duckdb
+from sqlglot.errors import SqlglotError
 
 from dbt_preflight.checks import relation
 from dbt_preflight.manifest import Manifest, ModelNode
 from dbt_preflight.metrics import MetricDef, evaluate
+from dbt_preflight.transpile import transpile_sql
+
+# How many dimensions, and how many rows per dimension, a moved metric's breakdown carries.
+# Breaking a metric down is one extra query per (dimension, side); capped so the cost of a
+# moved metric stays bounded regardless of how many dimensions the model has.
+_BREAKDOWN_DIMENSIONS = 3
+_BREAKDOWN_ROWS = 3
 
 
 @dataclass
@@ -29,6 +37,11 @@ class MetricDiff:
     base: float | int | None
     head: float | int | None
     unsupported: str | None = None
+    # dimension name -> up to 3 (value, base, head) rows, the largest contributors to the
+    # metric's move; only filled in for a metric that moved, over dimensions the model has.
+    breakdown: dict[str, list[tuple[str, float | int | None, float | int | None]]] = field(
+        default_factory=dict
+    )
 
     @property
     def moved(self) -> bool:
@@ -81,6 +94,9 @@ class ModelDiff:
     rows_base: int | None = None
     rows_head: int | None = None
     rows_differing: int | None = None  # head rows with no identical row in the base build
+    # Set when `rows_differing` was compared on fewer than all columns because the schema
+    # changed: how many columns (name and type both matching) the comparison used.
+    rows_differing_common_columns: int | None = None
     metrics: list[MetricDiff] = field(default_factory=list)
 
     @property
@@ -134,13 +150,22 @@ def _count(con: duckdb.DuckDBPyConnection, model: ModelNode) -> int | None:
     return int(row[0]) if row else None
 
 
-def _rows_differing(con: duckdb.DuckDBPyConnection, head: ModelNode, base: ModelNode) -> int | None:
-    """Head rows with no identical row in the base build. Only meaningful when the
-    columns match; the caller checks that first."""
+def _rows_differing(
+    con: duckdb.DuckDBPyConnection,
+    head: ModelNode,
+    base: ModelNode,
+    columns: list[str] | None = None,
+) -> int | None:
+    """Head rows with no identical row in the base build.
+
+    Compared on every column when `columns` is None, i.e. when the schema is unchanged.
+    Otherwise compared on just `columns` (the intersection with matching types the caller
+    worked out), so a schema change does not hide every other row-value change."""
+    select = "*" if columns is None else ", ".join(f'"{c}"' for c in columns)
     try:
         row = con.execute(
-            f"select count(*) from (select * from {relation(head)} "
-            f"except all select * from {relation(base)})"
+            f"select count(*) from (select {select} from {relation(head)} "
+            f"except all select {select} from {relation(base)})"
         ).fetchone()
     except duckdb.Error:
         return None
@@ -220,6 +245,88 @@ def _references(base: Manifest, model: ModelNode, column: str) -> list[str]:
     return refs
 
 
+def _categorical_dimensions(head: Manifest, model_uid: str) -> list[tuple[str, str]]:
+    """Up to `_BREAKDOWN_DIMENSIONS` (name, SQL expression) categorical dimensions available
+    on `model_uid`: from the dbt semantic model tied to it, or Lightdash meta on its own
+    columns when there is no semantic model, or nothing."""
+    for sm in head.semantic_models.values():
+        if sm.model_uid != model_uid:
+            continue
+        categorical = [
+            (name, expr)
+            for name, expr in sm.dimensions.items()
+            if sm.dimension_types.get(name) == "categorical"
+        ]
+        if categorical:
+            return categorical[:_BREAKDOWN_DIMENSIONS]
+
+    model = head.models.get(model_uid)
+    if model is None:
+        return []
+    primary_key = model.meta.get("primary_key")  # one row per value: not a real breakdown
+    lightdash = []
+    for col, meta in model.column_meta.items():
+        dimension = meta.get("dimension") or {}
+        if col == primary_key or dimension.get("hidden") or dimension.get("type") != "string":
+            continue
+        lightdash.append((col, f'"{col}"'))
+    return lightdash[:_BREAKDOWN_DIMENSIONS]
+
+
+def _grouped_metric(
+    con: duckdb.DuckDBPyConnection,
+    metric_sql: str,
+    dim_expr: str,
+    model: ModelNode,
+    dialect: str | None,
+) -> dict[str, float | int | None] | None:
+    """`metric_sql` evaluated once per value of `dim_expr` over `model`'s relation. Every
+    aggregate in `metric_sql` sits inside the `select`, so this wraps a ratio or derived
+    metric's expression just as well as a plain aggregate."""
+    sql = (
+        f"select {dim_expr} as dbt_preflight_dim, ({metric_sql}) as dbt_preflight_val "
+        f"from {relation(model)} group by 1"
+    )
+    if dialect:
+        try:
+            sql = transpile_sql(sql, dialect)
+        except SqlglotError:
+            pass
+    try:
+        rows = con.execute(sql).fetchall()
+    except duckdb.Error:
+        return None
+    return {str(value): metric_value for value, metric_value in rows}
+
+
+def _metric_breakdown(
+    con: duckdb.DuckDBPyConnection,
+    metric: MetricDef,
+    dimensions: list[tuple[str, str]],
+    head_node: ModelNode,
+    base_node: ModelNode,
+    dialect: str | None,
+) -> dict[str, list[tuple[str, float | int | None, float | int | None]]]:
+    """A moved metric, grouped by each of `dimensions`, keeping the rows whose contribution
+    to the total delta is largest, capped at `_BREAKDOWN_ROWS` per dimension."""
+    breakdown: dict[str, list[tuple[str, float | int | None, float | int | None]]] = {}
+    for name, expr in dimensions:
+        head_vals = _grouped_metric(con, metric.sql, expr, head_node, dialect)
+        base_vals = _grouped_metric(con, metric.sql, expr, base_node, dialect)
+        if head_vals is None or base_vals is None:
+            continue
+        scored = []
+        for value in set(head_vals) | set(base_vals):
+            b, h = base_vals.get(value), head_vals.get(value)
+            contribution = abs(float(h or 0) - float(b or 0))
+            scored.append((contribution, value, b, h))
+        scored.sort(key=lambda row: (-row[0], row[1]))
+        rows = [(value, b, h) for _, value, b, h in scored[:_BREAKDOWN_ROWS]]
+        if rows:
+            breakdown[name] = rows
+    return breakdown
+
+
 def compute_diffs(
     db_path,
     head: Manifest,
@@ -270,6 +377,11 @@ def compute_diffs(
             ]
             if head_cols == base_cols:
                 diff.rows_differing = _rows_differing(con, head_node, base_node)
+            else:
+                common = [c for c, t in head_cols.items() if base_cols.get(c) == t]
+                if common:
+                    diff.rows_differing = _rows_differing(con, head_node, base_node, common)
+                    diff.rows_differing_common_columns = len(common)
 
             # A dropped column and an added one of the same type with the same values is a
             # rename; say so instead of reporting a loss and a gain.
@@ -296,17 +408,24 @@ def compute_diffs(
             if defs:
                 head_vals = evaluate(con, relation(head_node), defs, dialect)
                 base_vals = evaluate(con, relation(base_node), defs, dialect)
+                dims: list[tuple[str, str]] | None = None  # computed lazily, at most once
                 for d in defs:
-                    diff.metrics.append(
-                        MetricDiff(
-                            name=d.name,
-                            label=d.label,
-                            source=d.source,
-                            base=base_vals.get(d.name),
-                            head=head_vals.get(d.name),
-                            unsupported=d.unsupported,
-                        )
+                    metric_diff = MetricDiff(
+                        name=d.name,
+                        label=d.label,
+                        source=d.source,
+                        base=base_vals.get(d.name),
+                        head=head_vals.get(d.name),
+                        unsupported=d.unsupported,
                     )
+                    if metric_diff.moved:
+                        if dims is None:
+                            dims = _categorical_dimensions(head, uid)
+                        if dims:
+                            metric_diff.breakdown = _metric_breakdown(
+                                con, d, dims, head_node, base_node, dialect
+                            )
+                    diff.metrics.append(metric_diff)
             out.append(diff)
     finally:
         con.close()
