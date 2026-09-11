@@ -25,6 +25,12 @@ All notable changes to this project are documented here. The format follows
   falls through to the raw message unchanged.
 - Row counts and rows-with-different-values in "What changed in the output" carry their
   percentage change, e.g. `rows 800 → 742 (-7.3%)` and `30 rows with different values (20%)`.
+- Per-step timing on the run's stderr progress lines (parse, fixtures, build, base parse,
+  base build, diff), each tagged with seconds since the previous step. Added while
+  scale-testing preflight against a 120-model project; the review comment itself is
+  unchanged. On that project, head parse and build together account for most of a run, and
+  the base build (which rebuilds ancestors already built on head) is not the dominant cost
+  it was expected to be, so no build-time optimisation landed alongside it.
 
 ### Changed
 

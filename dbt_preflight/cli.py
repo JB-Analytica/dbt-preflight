@@ -55,6 +55,23 @@ def _say(msg: str) -> None:
     typer.echo(msg, err=True)
 
 
+class _StepTimer:
+    """Appends seconds-since-the-previous-mark to the existing stderr step lines.
+
+    Purely a profiling aid (see scripts/big_project.py and the scale measurements it
+    backs): it does not touch the review comment, only the progress lines CI already
+    shows, so it is safe to leave on unconditionally.
+    """
+
+    def __init__(self) -> None:
+        self.last = time.monotonic()
+
+    def mark(self, msg: str) -> None:
+        now = time.monotonic()
+        _say(f"{msg} [{now - self.last:.1f}s]")
+        self.last = now
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"dbt-preflight {__version__}")
@@ -255,12 +272,13 @@ def _run(
     write_profiles(profiles_dir, project.profile, db_path)
 
     _say(f"🛫 dbt preflight {__version__} · project `{project.name}` at {project_relpath}")
+    timer = _StepTimer()
 
     # 1. Parse the head so we know the sources and where they think they live.
     head_runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
     head_runner.deps()
     manifest = Manifest.load(head_runner.parse())
-    _say(f"   parsed {len(manifest.models)} models, {len(manifest.sources)} sources")
+    timer.mark(f"   parsed {len(manifest.models)} models, {len(manifest.sources)} sources")
 
     # DuckDB names its catalog after the file. Rename the file so `database` in the
     # sources resolves to a catalog that exists, then re-point the profile at it.
@@ -275,7 +293,7 @@ def _run(
         schema = resolve_schema(config.schema, manifest, workdir)
         fixtures = build_fixtures(config, schema, list(manifest.sources.values()), db_path)
         report.fixtures = fixtures
-        _say(
+        timer.mark(
             f"   fixtures: {len(fixtures.tables)} tables, {fixtures.total_rows:,} rows "
             f"from {report.schema_source} (seed {config.seed})"
         )
@@ -287,7 +305,7 @@ def _run(
             "The project declares no sources, so its seeds were the only input; "
             "no synthetic data was generated."
         )
-        _say("   no sources declared: the project's seeds are the only input")
+        timer.mark("   no sources declared: the project's seeds are the only input")
 
     # 3. Base manifest, for state:modified. The worktree stays checked out until the end of
     # the run: after the head build, the base is built too, into its own schemas, for the diff.
@@ -305,6 +323,7 @@ def _run(
             )
             base_runner.deps()
             base_runner.parse()
+            timer.mark("   base parsed")
             state_dir = workdir / "base_target"
             modified = set(head_runner.modified_nodes(state_dir))
             # dbt cannot see the files that shape the fixtures. If the schema or the preflight
@@ -353,6 +372,7 @@ def _run(
             changed_ids,
             db_path,
             project_relpath,
+            timer,
         )
 
         # 6. The base, built on the same fixtures, and the diff.
@@ -367,6 +387,7 @@ def _run(
                 state_dir,
                 db_path,
                 changed_ids,
+                timer,
             )
 
 
@@ -380,6 +401,7 @@ def _build_and_check(
     changed_ids: set[str],
     db_path: Path,
     project_relpath: str,
+    timer: _StepTimer,
 ) -> None:
     # 4. Build, transpiling the project's dialect to DuckDB on the way.
     dialect = (
@@ -412,7 +434,7 @@ def _build_and_check(
         report, manifest, outcome, changed_ids, selected_ids, project_relpath, hook is not None
     )
     built = [m for m in report.models if m.status == BUILT]
-    _say(
+    timer.mark(
         f"   built {len(built)}/{len(report.models)} models, "
         f"{len(report.failing_tests)} failing tests"
     )
@@ -432,7 +454,7 @@ def _build_and_check(
         db_path,
         config.conventions,
     )
-    _say(f"   {len(report.violations)} convention issues")
+    timer.mark(f"   {len(report.violations)} convention issues")
 
 
 def _diff_against_base(
@@ -445,6 +467,7 @@ def _diff_against_base(
     state_dir: Path,
     db_path: Path,
     changed_ids: set[str],
+    timer: _StepTimer,
 ) -> None:
     """Build the changed models on the base branch, then compare columns, rows and metrics."""
     base_state = Manifest.load(state_dir / "manifest.json")
@@ -483,6 +506,7 @@ def _diff_against_base(
             return
     else:
         base_runner.parse()
+    timer.mark(f"   base branch: {len(to_build)} models built")
     base_manifest = Manifest.load(workdir / "base_build" / "manifest.json")
 
     metric_defs = collect_metrics(manifest, config.metrics)
@@ -491,7 +515,7 @@ def _diff_against_base(
         db_path, manifest, base_manifest, compare_ids, metric_defs, report.dialect
     )
     moved = sum(len(d.moved_metrics) for d in report.diffs)
-    _say(
+    timer.mark(
         f"   diff: {len(report.diffs)} models compared against {report.base_ref}; "
         f"{len(metric_defs)} metrics defined across the project, {moved} moved"
     )
