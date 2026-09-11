@@ -2,7 +2,10 @@
 
 model2data does the generation; this module maps its output onto the sources the dbt
 project actually declares (database, schema, identifier), adds the columns a loader would
-have stamped on, casts everything to the DBML type, and loads it.
+have stamped on, casts everything to the DBML type, and loads it. model2data's own
+warnings about the data it generated (columns it had to fill with generic text, tables
+stuck in an unresolved foreign-key cycle, ...) are collected onto the summary too, so the
+comment can tell a weak fixture from a strong one.
 """
 
 from __future__ import annotations
@@ -13,12 +16,18 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-from model2data.generate.core import generate_data_from_dbml
+from model2data.generate.core import (
+    generate_data_from_dbml,
+    get_cyclic_tables,
+    get_unresolved_composite_keys,
+)
+from model2data.generate.faker import get_unmapped_columns, reset_stats
+from model2data.parse.dbml import get_parse_warnings
 from model2data.utils import normalize_identifier
 
 from dbt_preflight.config import PreflightConfig
 from dbt_preflight.manifest import SourceTable
-from dbt_preflight.schema import ResolvedSchema
+from dbt_preflight.schema import InferredSource, ResolvedSchema
 
 # DBML / model2data types -> DuckDB types for the cast after load.
 _DUCK_TYPES = {
@@ -55,6 +64,13 @@ class FixtureSummary:
     tables: list[LoadedTable] = field(default_factory=list)
     unmatched_sources: list[str] = field(default_factory=list)
     unused_dbml_tables: list[str] = field(default_factory=list)
+    inferred_sources: list[InferredSource] = field(default_factory=list)
+    # model2data's own warnings about the data it generated, surfaced so a reviewer can
+    # tell a weak fixture (placeholder text, an unresolved cycle) from a strong one.
+    unmapped_columns: list[tuple[str, str]] = field(default_factory=list)
+    cyclic_tables: list[str] = field(default_factory=list)
+    unresolved_composite_keys: list[str] = field(default_factory=list)
+    parse_warnings: list[str] = field(default_factory=list)
 
     @property
     def total_rows(self) -> int:
@@ -87,6 +103,9 @@ def build_fixtures(
     sources: list[SourceTable],
     db_path: Path,
 ) -> FixtureSummary:
+    parse_warnings = get_parse_warnings()
+
+    reset_stats()  # clear the record of columns generated with generic fallback text
     generated = generate_data_from_dbml(
         tables=schema.tables,
         refs=schema.refs,
@@ -97,7 +116,13 @@ def build_fixtures(
     )
     by_key = {normalize_identifier(name): (name, df) for name, df in generated.items()}
     used: set[str] = set()
-    summary = FixtureSummary()
+    summary = FixtureSummary(
+        inferred_sources=schema.inferred,
+        unmapped_columns=get_unmapped_columns(),
+        cyclic_tables=get_cyclic_tables(),
+        unresolved_composite_keys=get_unresolved_composite_keys(),
+        parse_warnings=parse_warnings,
+    )
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))

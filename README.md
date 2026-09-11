@@ -126,16 +126,26 @@ profile and its credentials are never read.
 
 ### Where the schema comes from
 
-Preflight needs to know what the source tables look like. Two options:
+Preflight needs to know what the source tables look like. Three options:
 
 1. **A DBML file** (`schema:`). If the repository already describes its source system in
    DBML, point at it. Note hints in the DBML (weighted statuses, skewed foreign keys, null
    rates) carry through to the fixtures, so the data behaves like a business. A change to
    the DBML file counts as a change to every source, so everything is rebuilt.
 2. **Derived from `sources.yml`.** With no `schema:` set, preflight reads the project's
-   sources. Every source column must declare a `data_type`; a column without one is
-   reported rather than guessed. `unique` and `not_null` tests become keys, and
-   `relationships` tests between sources become foreign keys.
+   sources. `unique` and `not_null` tests become keys, and `relationships` tests between
+   sources become foreign keys.
+3. **Inferred from the staging models that read a source**, for any table `sources.yml`
+   leaves without columns, or without a `data_type` on them. Real projects (jaffle-shop, for
+   one) often declare a source with no columns at all; the staging model that does
+   `select id as customer_id, ... from {{ source(...) }}` already names every column it
+   needs, so preflight reads that instead of asking for YAML nobody wrote. An explicit
+   `cast(x as date)` or `x::date` sets the type; everything else is guessed from the column
+   name (`_at` a timestamp, `_date` a date, `id`/`_id` an integer, `is_`/`has_` a boolean,
+   and so on) and the comment says which columns were guessed, so a reviewer can tighten
+   them in `sources.yml` if the guess is wrong. Only a column no model reads either is
+   reported rather than guessed, because a fixture with the wrong type is worse than no
+   fixture.
 
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.

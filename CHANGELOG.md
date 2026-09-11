@@ -31,6 +31,15 @@ All notable changes to this project are documented here. The format follows
   unchanged. On that project, head parse and build together account for most of a run, and
   the base build (which rebuilds ancestors already built on head) is not the dominant cost
   it was expected to be, so no build-time optimisation landed alongside it.
+- Sources with no `data_type` in `sources.yml` - or no columns declared at all, as
+  jaffle-shop and other real projects do - get their columns inferred from the staging
+  models that read them, instead of failing with a SchemaError. An explicit `cast(x as T)`
+  or `x::T` sets the type; the rest is guessed from the column name. The fixtures block in
+  the comment says which sources were inferred and which columns were guessed.
+- model2data's own warnings about the fixtures it generated - columns filled with generic
+  placeholder text, tables stuck in an unresolved foreign-key cycle, composite keys left
+  with duplicate combinations, DBML lines it could not parse - are surfaced in the
+  comment's fixtures block, so a reviewer can tell a weak fixture from a strong one.
 
 ### Changed
 

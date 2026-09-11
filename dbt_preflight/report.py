@@ -625,6 +625,39 @@ def _fixtures_block(report: PreflightReport) -> str:
             "Schema tables no source declares: "
             + ", ".join(f"`{t}`" for t in fx.unused_dbml_tables),
         ]
+    if fx.inferred_sources:
+        parts += ["", "Columns inferred from the staging models that read them:"]
+        for src in fx.inferred_sources:
+            line = f"- `{src.identifier}`: {src.total_columns} columns inferred from " + ", ".join(
+                f"`{m}`" for m in src.models
+            )
+            if src.guessed_columns:
+                line += ", types guessed for " + ", ".join(f"`{c}`" for c in src.guessed_columns)
+            parts.append(line)
+    if fx.unmapped_columns:
+        parts += [
+            "",
+            "Filled with placeholder text, no realistic data for these: "
+            + ", ".join(f"`{c}` ({t})" for c, t in fx.unmapped_columns),
+        ]
+    if fx.cyclic_tables:
+        parts += [
+            "",
+            "Stuck in an unresolved foreign-key cycle, so not every relationship in their "
+            "data is real: " + ", ".join(f"`{t}`" for t in fx.cyclic_tables),
+        ]
+    if fx.unresolved_composite_keys:
+        parts += [
+            "",
+            "Composite keys left with duplicate combinations: "
+            + ", ".join(f"`{k}`" for k in fx.unresolved_composite_keys),
+        ]
+    if fx.parse_warnings:
+        parts += [
+            "",
+            "DBML lines the parser could not understand and skipped: "
+            + "; ".join(fx.parse_warnings),
+        ]
     if report.dialect:
         parts += ["", f"Model SQL transpiled from {report.dialect} to DuckDB with sqlglot."]
         if report.untranspiled:
