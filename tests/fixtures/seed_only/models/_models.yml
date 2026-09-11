@@ -1,0 +1,7 @@
+version: 2
+models:
+  - name: customers
+    description: One row per customer, from the seed.
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]

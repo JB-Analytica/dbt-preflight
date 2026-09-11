@@ -1,0 +1,121 @@
+// The operational database of a fictional Belgian specialty-coffee webshop.
+//
+// This file is the *only* description of the source system. model2data turns it into
+// relationship-preserving synthetic data; nothing downstream (dlt, dbt, Lightdash) knows or
+// cares that the data is synthetic. Replace the generated DuckDB file with a real database
+// connection and the rest of the stack is unchanged.
+//
+// Note hints ({"...": ...}) shape the data so it behaves like a business, not noise:
+// weighted statuses, a long-tailed basket size, a few customers placing most orders.
+
+Project webshop {
+  database_type: 'PostgreSQL'
+  Note: 'Order-management database of a Belgian specialty-coffee webshop'
+}
+
+Enum customer_segment {
+  consumer
+  business
+}
+
+Enum order_status {
+  pending
+  paid
+  shipped
+  delivered
+  cancelled
+}
+
+Enum sales_channel {
+  web
+  mobile_app
+  marketplace
+  store
+}
+
+Enum product_category {
+  beans
+  ground
+  capsules
+  equipment
+}
+
+Enum roast_level {
+  light
+  medium
+  dark
+}
+
+Enum coffee_origin {
+  ethiopia
+  colombia
+  brazil
+  kenya
+  guatemala
+  honduras
+  peru
+  rwanda
+}
+
+Table customers {
+  id int [pk]
+  first_name varchar [not null]
+  last_name varchar [not null]
+  email varchar [not null, unique]
+  phone varchar [note: '{"null_rate": 0.3}']
+  city varchar [not null]
+  country varchar [not null]
+  segment customer_segment [not null, default: 'consumer', note: '{"weights": {"consumer": 8, "business": 1}}']
+  is_marketing_opt_in boolean [not null, default: false, note: '{"true_rate": 0.45}']
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'One row per registered customer account'
+}
+
+Table products {
+  id int [pk]
+  sku ean13 [not null, unique]
+  origin coffee_origin [not null]
+  roast roast_level [not null, note: '{"weights": {"medium": 3, "light": 2, "dark": 2}}']
+  category product_category [not null, note: '{"weights": {"beans": 6, "ground": 3, "capsules": 2, "equipment": 1}}']
+  weight_grams int [not null, note: '{"min": 250, "max": 1000}']
+  unit_price_cents int [not null, note: '{"min": 899, "max": 4999, "distribution": "lognormal", "median": 1450, "spread": 0.4}']
+  cost_cents int [not null, note: '{"min": 300, "max": 2200, "distribution": "lognormal", "median": 650, "spread": 0.4}']
+  is_active boolean [not null, default: true, note: '{"true_rate": 0.85}']
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'The catalogue: one row per sellable product'
+}
+
+Table orders {
+  id int [pk]
+  customer_id int [not null, ref: > customers.id, note: '{"skew": 0.7}']
+  status order_status [not null, default: 'pending', note: '{"weights": {"delivered": 14, "shipped": 3, "paid": 2, "pending": 1, "cancelled": 1}}']
+  channel sales_channel [not null, note: '{"weights": {"web": 6, "mobile_app": 3, "marketplace": 2, "store": 1}}']
+  ordered_at timestamp [not null]
+  shipped_at timestamp [note: '{"after": "ordered_at", "null_rate": 0.2}']
+  delivered_at timestamp [note: '{"after": "shipped_at", "null_rate": 0.3}']
+  shipping_city varchar [not null]
+  shipping_country varchar [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'One row per order; status moves pending -> paid -> shipped -> delivered, or cancelled'
+}
+
+Table order_items {
+  id int [pk]
+  order_id int [not null, ref: > orders.id, note: '{"skew": 0.3}']
+  product_id int [not null, ref: > products.id, note: '{"skew": 0.6}']
+  quantity int [not null, note: '{"min": 1, "max": 6, "distribution": "exponential", "mean": 1.6}']
+  unit_price_cents int [not null, note: '{"min": 899, "max": 4999, "distribution": "lognormal", "median": 1450, "spread": 0.4}']
+  discount_cents int [not null, default: 0, note: '{"min": 0, "max": 600, "distribution": "exponential", "mean": 60}']
+
+  indexes {
+    (order_id, product_id) [unique]
+  }
+
+  Note: 'One row per product line on an order; unit price is the price at time of ordering'
+}

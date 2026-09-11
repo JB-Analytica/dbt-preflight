@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: webshop
+    description: >
+      The webshop's operational database as landed by dlt (dataset raw_webshop). Tables are
+      merged on their primary key and carry dlt's _dlt_load_id / _dlt_id lineage columns.
+    database: "{{ env_var('GCP_PROJECT') }}"
+    schema: raw_webshop
+    loader: dlt
+    config:
+      # dlt stamps every row with _dlt_load_id: the epoch second of the load package, as a
+      # string like "1788961669.673802". Cast it to a timestamp and freshness tracks the
+      # pipeline instead of the business dates, which are pinned in the synthetic data.
+      # This is rendered at parse time in a restricted context, so it must be literal SQL --
+      # a project macro is not visible here.
+      loaded_at_field: "timestamp_seconds(cast(split(_dlt_load_id, '.')[offset(0)] as int64))"
+      freshness:
+        warn_after: { count: 36, period: hour }
+        error_after: { count: 72, period: hour }
+    tables:
+      - name: customers
+        description: One row per registered customer account.
+      - name: products
+        description: The catalogue, one row per sellable product.
+      - name: orders
+        description: One row per order with its status and fulfilment timestamps.
+      - name: order_items
+        description: One row per product line on an order (append-only).
+        config:
+          freshness: null # append-only and small; the orders table is the freshness signal

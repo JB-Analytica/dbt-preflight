@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: int_orders__items_aggregated
+    description: Line items rolled up to order grain -- counts, units and money in cents.
+    columns:
+      - name: order_id
+        description: Primary key; one row per order that has at least one line.
+        data_tests: [unique, not_null]
+      - name: net_amount_cents
+        description: Gross minus per-line discounts.
+        data_tests: [not_null]
+
+unit_tests:
+  - name: int_orders__items_aggregated_sums_lines_per_order
+    description: Two lines on one order and one on another roll up to the right money.
+    model: int_orders__items_aggregated
+    given:
+      - input: ref('stg_webshop__order_items')
+        rows:
+          - { order_item_id: 1, order_id: 10, product_id: 1, quantity: 2, unit_price_cents: 1000, discount_cents: 100 }
+          - { order_item_id: 2, order_id: 10, product_id: 2, quantity: 1, unit_price_cents: 500, discount_cents: 0 }
+          - { order_item_id: 3, order_id: 11, product_id: 1, quantity: 3, unit_price_cents: 1000, discount_cents: 300 }
+    expect:
+      rows:
+        - { order_id: 10, line_item_count: 2, units: 3, gross_amount_cents: 2500, discount_cents: 100, net_amount_cents: 2400 }
+        - { order_id: 11, line_item_count: 1, units: 3, gross_amount_cents: 3000, discount_cents: 300, net_amount_cents: 2700 }

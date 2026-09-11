@@ -1,0 +1,14 @@
+# dbt-preflight configuration for the bundled example. Paths are relative to this file.
+project_dir: dbt
+schema: webshop.dbml
+rows: 200
+rows_for:
+  customers: 150
+  products: 60
+  orders: 800
+  order_items: 2000
+seed: 42
+locale: nl_BE
+env:
+  # sources.yml reads the database from GCP_PROJECT; preflight names its DuckDB catalog after it.
+  GCP_PROJECT: preflight

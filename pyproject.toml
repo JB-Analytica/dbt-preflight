@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbt-preflight"
+version = "0.1.0"
+description = "Warehouse-free CI for dbt pull requests: build and test the changed models against synthetic data, check house conventions, leave one review comment."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "JB Analytica" }]
+keywords = [
+    "dbt",
+    "ci",
+    "github-actions",
+    "synthetic-data",
+    "analytics-engineering",
+    "data-engineering",
+    "duckdb",
+    "code-review",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "dbt-core>=1.11,<2",
+    "dbt-duckdb>=1.11",
+    "duckdb>=1.1",
+    "model2data>=1.3.1",
+    "pandas>=2.2",
+    "pyyaml>=6.0",
+    "sqlglot>=30.18.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+    "ruff>=0.1.0",
+    "ty>=0.0.4",
+    "types-pyyaml",
+    "poethepoet>=0.38.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JB-Analytica/dbt-preflight"
+Repository = "https://github.com/JB-Analytica/dbt-preflight"
+Issues = "https://github.com/JB-Analytica/dbt-preflight/issues"
+Changelog = "https://github.com/JB-Analytica/dbt-preflight/blob/main/CHANGELOG.md"
+
+[project.scripts]
+dbt-preflight = "dbt_preflight.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dbt_preflight*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "C", "B"]
+ignore = ["E501", "C901"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer declares options as argument defaults by design.
+"dbt_preflight/cli.py" = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dbt_preflight"]
+
+[tool.ty]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.poe.tasks]
+lint = "ruff check ."
+fix = "ruff check . --fix --exit-zero"
+format = "ruff format ."
+type = "ty check dbt_preflight/"
+test-quick = "pytest -q --no-header -p no:warnings"
+check = ["fix", "format", "lint", "type", "test-quick"]
