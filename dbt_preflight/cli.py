@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -42,6 +43,7 @@ from dbt_preflight.report import (
     render,
 )
 from dbt_preflight.schema import SchemaError, resolve_schema
+from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
 
 app = typer.Typer(
@@ -210,6 +212,12 @@ def run(
     comment_file: Optional[Path] = typer.Option(
         None, "--comment-file", help="Write the review comment (Markdown) here."
     ),
+    summary_file: Optional[Path] = typer.Option(
+        None,
+        "--summary-file",
+        help="Write a JSON summary of the run here, for a hook or agent to read "
+        "instead of parsing the comment.",
+    ),
     post: bool = typer.Option(
         False,
         "--post",
@@ -235,7 +243,7 @@ def run(
         config = load_config(repo_root, config_path)
     except ConfigError as exc:
         report.fatal = f"Configuration error: {exc}"
-        _finish(report, comment_file, post, pr, fail_on_error)
+        _finish(report, comment_file, summary_file, post, pr, fail_on_error)
         return
 
     report.seed = config.seed
@@ -259,7 +267,7 @@ def run(
         if not keep_workdir:
             shutil.rmtree(workdir, ignore_errors=True)
 
-    _finish(report, comment_file, post, pr, fail_on_error)
+    _finish(report, comment_file, summary_file, post, pr, fail_on_error)
 
 
 def _run(
@@ -524,6 +532,7 @@ def _diff_against_base(
 def _finish(
     report: PreflightReport,
     comment_file: Path | None,
+    summary_file: Path | None,
     post: bool,
     pr: int | None,
     fail_on_error: bool,
@@ -551,6 +560,16 @@ def _finish(
                 _say(f"   comment posted: {url}")
             except GitHubError as exc:
                 _say(f"⚠️  {exc}")
+
+    # Computed before the summary is written, and again below, rather than shared: the
+    # second use is the process's actual exit, which must stay the last thing this
+    # function does so a crash while writing files still lets the caller see it happen.
+    exit_code = 1 if (fail_on_error and not report.passed) else 0
+    if summary_file is not None:
+        summary_file.parent.mkdir(parents=True, exist_ok=True)
+        summary = build_summary(report, exit_code, comment_file)
+        summary_file.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        _say(f"   summary written to {summary_file}")
 
     if report.fatal:
         _say(f"❌ {report.fatal}")

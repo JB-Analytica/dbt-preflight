@@ -252,6 +252,13 @@ Without `--base-ref`, every model counts as changed and the whole project is bui
 `--keep-workdir` to leave `.preflight/` (fixtures, DuckDB file, dbt artefacts) behind for
 inspection.
 
+## Integrating
+
+`--summary-file preflight-summary.json` writes a JSON document alongside the comment, with
+the verdict, counts and every finding as structured data, for a hook, a bot or a plugin to
+act on without parsing Markdown. [docs/integration.md](docs/integration.md) has the full
+contract: every flag, the exit code, the JSON schema, and a worked pre-pull-request hook.
+
 ## How it works
 
 1. `dbt parse` on the pull request, to learn the sources, models and tests.
