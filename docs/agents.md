@@ -76,3 +76,11 @@ With [Claude Code](https://claude.com/claude-code), a `PreToolUse` hook on `gh p
 that runs preflight and blocks when it fails turns the instruction above into a guarantee.
 The JB Analytica harness will ship that hook; until then, the instruction block is enough
 for an agent that reads its `CLAUDE.md`.
+
+A hook, a bot or a plugin that has to act on the result programmatically, rather than have
+an agent read the comment, should read `--summary-file`'s JSON instead of parsing the
+Markdown: it carries the verdict, every count and every finding as structured data, derived
+from the same report the comment renders from so the two never disagree.
+[docs/integration.md](integration.md) is the contract: every flag, the exit code, the JSON
+schema, and a worked pre-pull-request hook that reads `verdict` and exits non-zero on
+`failed` or `could_not_run`.

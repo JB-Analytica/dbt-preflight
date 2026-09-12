@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `dbt-preflight run --summary-file PATH` writes a JSON document alongside the comment:
+  `verdict`, `exit_code`, counts, and every model, failing test, violation, diff and
+  fixture as structured data, for a hook, a bot or a plugin to act on without parsing
+  Markdown. It is derived from the same `PreflightReport` the comment renders from, in one
+  function (`dbt_preflight/summary.py`), so the two can never disagree. `docs/integration.md`
+  is the contract for anything wiring preflight in: every flag, the exit code, the JSON
+  schema, and a worked pre-pull-request hook. Written for the harness team's
+  pre-pull-request hook and skill.
 - The output diff detects a rename (a dropped and an added column of the same type with the
   same values) and reports it as one, lists where a removed or renamed column was referenced
   on the base branch (YAML entry, Lightdash meta, semantic layer, tests, downstream models),

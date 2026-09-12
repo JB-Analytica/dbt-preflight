@@ -6,6 +6,7 @@ tests, conventions, comment out. It takes a few seconds because dbt really runs.
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -26,6 +27,7 @@ def example_copy(tmp_path: Path) -> Path:
 
 def test_example_passes_clean(example_copy: Path, tmp_path: Path) -> None:
     comment = tmp_path / "comment.md"
+    summary_path = tmp_path / "summary.json"
     result = CliRunner().invoke(
         app,
         [
@@ -36,6 +38,8 @@ def test_example_passes_clean(example_copy: Path, tmp_path: Path) -> None:
             str(example_copy / ".dbt-preflight.yml"),
             "--comment-file",
             str(comment),
+            "--summary-file",
+            str(summary_path),
         ],
     )
     assert result.exit_code == 0, result.output
@@ -48,11 +52,18 @@ def test_example_passes_clean(example_copy: Path, tmp_path: Path) -> None:
     assert "### Not verified on DuckDB" not in body
     assert not (example_copy / ".preflight").exists()
 
+    summary = json.loads(summary_path.read_text())
+    assert summary["verdict"] == "passed"
+    assert summary["exit_code"] == 0
+    assert summary["counts"]["models"]["built"] == 10
+    assert summary["comment_file"] == str(comment)
+
 
 def test_broken_rename_fails(example_copy: Path, tmp_path: Path) -> None:
     model = example_copy / "dbt/models/staging/webshop/stg_webshop__customers.sql"
     model.write_text(model.read_text().replace("id as customer_id,", "id as cust_id,"))
     comment = tmp_path / "comment.md"
+    summary_path = tmp_path / "summary.json"
     result = CliRunner().invoke(
         app,
         [
@@ -63,6 +74,8 @@ def test_broken_rename_fails(example_copy: Path, tmp_path: Path) -> None:
             str(example_copy / ".dbt-preflight.yml"),
             "--comment-file",
             str(comment),
+            "--summary-file",
+            str(summary_path),
         ],
     )
     assert result.exit_code == 1
@@ -71,6 +84,12 @@ def test_broken_rename_fails(example_copy: Path, tmp_path: Path) -> None:
     assert "### Failing tests" in body
     assert "`not_null_stg_webshop__customers_customer_id`" in body
     assert "| `dim_customers` | ⏭️ skipped |" in body
+
+    summary = json.loads(summary_path.read_text())
+    assert summary["verdict"] == "failed"
+    assert summary["exit_code"] == 1
+    assert summary["counts"]["models"]["skipped"] >= 1
+    assert any(t["model"] == "stg_webshop__customers" for t in summary["failing_tests"])
 
 
 def test_bigquery_sql_is_transpiled_when_the_profile_says_bigquery(
