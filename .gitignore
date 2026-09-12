@@ -25,5 +25,6 @@ logs/
 .env
 .DS_Store
 
-# Claude Code session config and agent worktrees
-.claude/
+# Claude Code local session config and worktrees
+.claude/settings.local.json
+.claude/worktrees/
