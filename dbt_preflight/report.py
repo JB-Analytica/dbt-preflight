@@ -137,6 +137,9 @@ class PreflightReport:
         )
 
 
+# How many moved metrics get their dimension breakdown shown in full; the rest fold.
+_BREAKDOWN_METRICS_SHOWN = 3
+
 _STATUS_LABEL = {
     BUILT: "✅ built",
     FAILED: "❌ failed",
@@ -585,10 +588,26 @@ def _diff_section(report: PreflightReport) -> list[str]:
                     f"| {_metric_label(m)} | {_num(m.base)} | {_num(m.head)} | {_delta(m)} |"
                 )
             lines.append("")
-            for m in moved:
+            # One bullet per (metric, dimension) adds up fast on a fact table where every
+            # metric moves at once: the first few metrics' breakdowns stay visible, the
+            # rest fold, the same shape the failing-tests budget uses.
+            shown, rest = moved[:_BREAKDOWN_METRICS_SHOWN], moved[_BREAKDOWN_METRICS_SHOWN:]
+            for m in shown:
                 for dimension, rows in m.breakdown.items():
                     lines.append(f"- {_breakdown_line(m, dimension, rows)}")
-            if any(m.breakdown for m in moved):
+            if any(m.breakdown for m in shown):
+                lines.append("")
+            folded = [m for m in rest if m.breakdown]
+            if folded:
+                noun = "metric" if len(folded) == 1 else "metrics"
+                lines.append(
+                    f"<details><summary>Breakdowns for {len(folded)} more moved {noun}</summary>"
+                )
+                lines.append("")
+                for m in folded:
+                    for dimension, rows in m.breakdown.items():
+                        lines.append(f"- {_breakdown_line(m, dimension, rows)}")
+                lines.append("</details>")
                 lines.append("")
         steady = [m for m in d.metrics if not m.moved and not m.unsupported]
         skipped = [m for m in d.metrics if m.unsupported]

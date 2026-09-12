@@ -745,3 +745,38 @@ def test_metric_spanning_models_names_the_models_it_reads() -> None:
         "| Orders per customer (across `fct_orders`, `dim_customers`) | 5.33 | 5 | -6.2% |" in body
     )
     assert "1 metric unchanged." in body
+
+
+def test_breakdowns_past_the_third_moved_metric_fold() -> None:
+    def moved(name: str) -> MetricDiff:
+        return MetricDiff(
+            name,
+            name.title(),
+            "dbt",
+            100,
+            90,
+            breakdown={"sales_channel": [("web", 60, 55), ("app", 40, 35)]},
+        )
+
+    diff = ModelDiff(
+        unique_id="model.p.fct_orders",
+        name="fct_orders",
+        base_exists=True,
+        rows_base=800,
+        rows_head=763,
+        metrics=[moved(n) for n in ("orders", "revenue", "units", "discount", "gross")],
+    )
+    report = PreflightReport(models=[_model("fct_orders")], base_ref="main", diffs=[diff])
+    body = render(report)
+    visible, _, folded = body.partition(
+        "<details><summary>Breakdowns for 2 more moved metrics</summary>"
+    )
+    assert folded, body
+    for label in ("Orders", "Revenue", "Units"):
+        assert f"- {label} by sales_channel: web 60 → 55 (-8.3%), app 40 → 35 (-12.5%)" in visible
+        assert f"- {label} by sales_channel" not in folded
+    for label in ("Discount", "Gross"):
+        assert f"- {label} by sales_channel" not in visible
+        assert f"- {label} by sales_channel: web 60 → 55 (-8.3%), app 40 → 35 (-12.5%)" in folded
+    # Every moved metric is still in the table above the fold.
+    assert body.count("| 100 | 90 | -10.0% |") == 5

@@ -9,7 +9,7 @@ Expected: **fail**. Got: **fail**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ❌ failed
 
-Built 4 of 7 models (1 changed) against synthetic data · 25 tests · 0 convention issues · 8.1 s
+Built 4 of 7 models (1 changed) against synthetic data · 25 tests · 0 convention issues · 8.3 s
 
 ### Changed models
 
@@ -44,7 +44,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `e2a41bb`.
+Compared against base `main`, head `c0975e0`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>
