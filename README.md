@@ -37,8 +37,8 @@ The comment is updated in place on every push, so a pull request carries one pre
 comment, not a stack of them.
 
 Six pull-request shapes, four that must fail and two that must pass, are recorded
-with the comments they produced in [docs/scenarios](docs/scenarios/README.md). If you are
-pointing a coding agent at a dbt project, [docs/agents.md](docs/agents.md) says what to tell it.
+with the comments they produced in [docs/scenarios](https://github.com/JB-Analytica/dbt-preflight/blob/main/docs/scenarios/README.md). If you are
+pointing a coding agent at a dbt project, [docs/agents.md](https://github.com/JB-Analytica/dbt-preflight/blob/main/docs/agents.md) says what to tell it.
 
 ## Why this exists
 
@@ -193,9 +193,14 @@ defines, on the base branch and on the pull request, and lists the ones that mov
 sources are read, and a project needs only one of them:
 
 1. **dbt's semantic layer.** Semantic models and metrics in the project's YAML: `simple`
-   metrics with measure and metric filters, `ratio` and `derived` metrics. This is the
-   route for a project that uses dbt and nothing else. `cumulative` and `conversion`
-   metrics need a time spine and are reported as not evaluated.
+   metrics with measure and metric filters, `ratio` and `derived` metrics, including ones
+   whose inputs sit on different models (orders per customer reads `fct_orders` and
+   `dim_customers`; each side is evaluated on its own model and the comment names both).
+   A `cumulative` metric with no window and no grain to date is a running total over all
+   time, and its final value is the plain total, so it is evaluated as one. This is the
+   route for a project that uses dbt and nothing else. A windowed or grain-to-date
+   `cumulative` metric and a `conversion` metric need a time spine and are reported as
+   not evaluated.
 2. **Lightdash `meta.metrics`.** Aggregate metrics on columns (`sum`, `count_distinct`,
    `average`, ... with their `filters`) and `number` metrics on the model whose `sql`
    references other metrics with `${...}`.
@@ -256,7 +261,7 @@ inspection.
 
 `--summary-file preflight-summary.json` writes a JSON document alongside the comment, with
 the verdict, counts and every finding as structured data, for a hook, a bot or a plugin to
-act on without parsing Markdown. [docs/integration.md](docs/integration.md) has the full
+act on without parsing Markdown. [docs/integration.md](https://github.com/JB-Analytica/dbt-preflight/blob/main/docs/integration.md) has the full
 contract: every flag, the exit code, the JSON schema, and a worked pre-pull-request hook.
 
 ## How it works
@@ -290,4 +295,4 @@ uv run poe check          # ruff, ty, pytest
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/JB-Analytica/dbt-preflight/blob/main/LICENSE).

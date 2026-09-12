@@ -9,7 +9,7 @@ Expected: **fail**. Got: **fail**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ❌ failed
 
-Built 7 of 8 models (1 changed) against synthetic data · 42 tests · 0 convention issues · 4.5 s
+Built 7 of 8 models (1 changed) against synthetic data · 42 tests · 0 convention issues · 10 s
 
 ### Changed models
 
@@ -21,7 +21,7 @@ Unchanged models this change breaks:
 
 - `dim_customers` — ⏭️ skipped (an upstream model or test failed)
 
-Also rebuilt, no new issues: `stg_webshop__customers`, `stg_webshop__products`, `stg_webshop__order_items`, `fct_order_items`, `int_orders__items_aggregated` and 1 more.
+Also rebuilt, no new issues: `stg_webshop__order_items`, `stg_webshop__customers`, `stg_webshop__products`, `fct_order_items`, `int_orders__items_aggregated` and 1 more.
 
 ### Failing tests
 
@@ -63,7 +63,7 @@ Base branch and pull request, built on the same synthetic data. A difference her
 
 **`fct_orders`** — rows 800 (unchanged) · 800 rows with different values (100%)
 
-16 metrics unchanged (Orders, Net revenue (EUR), Cancelled orders, Average order value, Cancellation rate, Orders, …).
+16 metrics unchanged (Orders, Net revenue (EUR), Cancelled orders, Average order value, Cancellation rate, Orders, …); not evaluated: Orders per customer (across `fct_orders`, `dim_customers`) (`dim_customers` was not built in this run).
 
 **`stg_webshop__orders`** — rows 800 (unchanged) · 800 rows with different values (100%)
 
@@ -73,7 +73,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `3c64964`.
+Compared against base `main`, head `c0975e0`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>

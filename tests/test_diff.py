@@ -462,3 +462,122 @@ def test_added_column_profile_for_low_and_high_cardinality(
         ColumnProfile("x", "BOOLEAN", 3, 0, 2, [("false", 2), ("true", 1)]).describe()
         == "1 true, 2 false"
     )
+
+
+def _spanning_semantic_layer(raw: dict, orders_model: str = "model.p.stg_shop__orders") -> dict:
+    """Two semantic models and a ratio between them: orders per customer."""
+    raw["semantic_models"] = {
+        "semantic_model.p.orders": {
+            "name": "orders",
+            "depends_on": {"nodes": [orders_model]},
+            "measures": [{"name": "order_count", "agg": "count", "expr": "order_id"}],
+            "dimensions": [],
+            "entities": [{"name": "order", "type": "primary", "expr": "order_id"}],
+        },
+        "semantic_model.p.customers": {
+            "name": "customers",
+            "depends_on": {"nodes": ["model.p.dim_customers"]},
+            "measures": [{"name": "customer_count", "agg": "count", "expr": "customer_id"}],
+            "dimensions": [],
+            "entities": [{"name": "customer", "type": "primary", "expr": "customer_id"}],
+        },
+    }
+    raw["metrics"] = {
+        "metric.p.orders": {
+            "name": "orders",
+            "label": "Orders",
+            "type": "simple",
+            "type_params": {"measure": {"name": "order_count", "filter": None}},
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.orders"]},
+        },
+        "metric.p.customers": {
+            "name": "customers",
+            "label": "Customers",
+            "type": "simple",
+            "type_params": {"measure": {"name": "customer_count", "filter": None}},
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.customers"]},
+        },
+        "metric.p.orders_per_customer": {
+            "name": "orders_per_customer",
+            "label": "Orders per customer",
+            "type": "ratio",
+            "type_params": {"numerator": {"name": "orders"}, "denominator": {"name": "customers"}},
+            "filter": None,
+            "depends_on": {"nodes": ["metric.p.orders", "metric.p.customers"]},
+        },
+    }
+    return raw
+
+
+def _base_manifest(raw_manifest: dict) -> Manifest:
+    base_raw = {**raw_manifest, "nodes": {k: dict(v) for k, v in raw_manifest["nodes"].items()}}
+    for node in base_raw["nodes"].values():
+        if node["resource_type"] == "model":
+            node["schema"] = "preflight_base_main"
+    return Manifest.from_dict(base_raw)
+
+
+def test_metric_spanning_models_reads_each_input_on_its_own_model(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    head = Manifest.from_dict(_spanning_semantic_layer(raw_manifest))
+    base = _base_manifest(raw_manifest)
+    db = _two_builds(tmp_path)  # dim_customers: 3 rows on base, 2 on head; orders: 1 row, head only
+    metrics = dbt_metrics(head)
+
+    # Only dim_customers was reached by the change. stg_shop__orders was not touched, so it
+    # was never built on the base branch, and its head value stands for both sides.
+    diffs = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)
+    d = {x.name: x for x in diffs}["dim_customers"]
+    ratio = next(m for m in d.metrics if m.name == "orders_per_customer")
+    assert ratio.spans == ["stg_shop__orders", "dim_customers"]
+    assert ratio.unsupported is None
+    assert (ratio.base, ratio.head) == (1 / 3, 1 / 2)
+    assert ratio.moved and not ratio.breakdown
+    assert [m.name for m in d.metrics] == ["customers", "orders_per_customer"]
+
+
+def test_metric_spanning_models_lands_on_the_first_compared_model(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    head = Manifest.from_dict(_spanning_semantic_layer(raw_manifest))
+    base = _base_manifest(raw_manifest)
+    db = _two_builds(tmp_path)
+    metrics = dbt_metrics(head)
+
+    # Both models compared; orders is new in this pull request, so the base side has no
+    # value for it and the ratio is reported as null -> 0.5 under the orders model.
+    diffs = compute_diffs(
+        db, head, base, ["model.p.dim_customers", "model.p.stg_shop__orders"], metrics, None
+    )
+    by_name = {x.name: x for x in diffs}
+    assert "orders_per_customer" not in [m.name for m in by_name["dim_customers"].metrics]
+    ratio = next(m for m in by_name["stg_shop__orders"].metrics if m.name == "orders_per_customer")
+    assert (ratio.base, ratio.head) == (None, 0.5) and ratio.moved
+
+
+def test_metric_spanning_models_needs_every_input_built(raw_manifest: dict, tmp_path: Path) -> None:
+    # The orders semantic model points at a model no table was built for.
+    head = Manifest.from_dict(_spanning_semantic_layer(raw_manifest, "model.p.stg_shop__customers"))
+    base = _base_manifest(raw_manifest)
+    db = _two_builds(tmp_path)
+    metrics = dbt_metrics(head)
+
+    diffs = compute_diffs(db, head, base, ["model.p.dim_customers"], metrics, None)
+    ratio = next(m for m in diffs[0].metrics if m.name == "orders_per_customer")
+    assert ratio.unsupported == "`stg_shop__customers` was not built in this run"
+    assert not ratio.moved
+
+
+def test_metric_spanning_models_skipped_when_the_change_reached_none_of_them(
+    raw_manifest: dict, tmp_path: Path
+) -> None:
+    head = Manifest.from_dict(_spanning_semantic_layer(raw_manifest))
+    base = _base_manifest(raw_manifest)
+    db = _two_builds(tmp_path)
+    metrics = dbt_metrics(head)
+
+    diffs = compute_diffs(db, head, base, ["model.p.stg_shop__customers"], metrics, None)
+    assert diffs == []

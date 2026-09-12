@@ -163,7 +163,13 @@ def test_violations_and_diffs_shape() -> None:
         "segment": ["its YAML column entry (models/_marts.yml)"]
     }
     assert diff["moved_metrics"] == [
-        {"name": "net_revenue", "label": "Net revenue (EUR)", "base": 8190.0, "head": 7830.0}
+        {
+            "name": "net_revenue",
+            "label": "Net revenue (EUR)",
+            "base": 8190.0,
+            "head": 7830.0,
+            "spans": [],
+        }
     ]
 
 
