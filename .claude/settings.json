@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "jba-harness": {
+      "source": {
+        "source": "github",
+        "repo": "JB-Analytica/harness"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "jba-core@jba-harness": true
+  }
+}
