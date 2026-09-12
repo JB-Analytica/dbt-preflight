@@ -4,8 +4,12 @@ Three sources, in the order a reviewer would expect them:
 
 1. **dbt's semantic layer.** Semantic models and metrics in the manifest. Simple, ratio and
    derived metrics are rewritten as aggregate expressions over the semantic model's dbt
-   model; cumulative and conversion metrics need a time spine and are reported as not
-   evaluated rather than approximated.
+   model. A ratio or derived metric whose inputs live on different models (orders per
+   customer) keeps one aggregate per model and is combined after each has run. A
+   cumulative metric with no window and no grain to date is a running total over all
+   time, whose final value is the plain aggregate, so it is evaluated as one; a windowed
+   or grain-to-date cumulative metric and a conversion metric need a time spine and are
+   reported as not evaluated rather than approximated.
 2. **Lightdash meta.** `meta.metrics` on a model and on its columns: the aggregate types
    (`sum`, `count_distinct`, ...) with their `filters`, and `number` metrics whose `sql`
    references other metrics with `${...}`.
@@ -13,13 +17,14 @@ Three sources, in the order a reviewer would expect them:
    `sql` expression, for projects that define metrics nowhere else.
 
 Every definition becomes one aggregate expression evaluated as `select <expr> from <model>`,
-once on the base build and once on the pull request's, on the same fixtures.
+once on the base build and once on the pull request's, on the same fixtures; a metric
+spanning models becomes one such expression per model plus the expression that joins them.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import duckdb
 from sqlglot.errors import SqlglotError
@@ -40,10 +45,27 @@ class MetricDef:
     sql: str  # an aggregate expression over the model's relation
     source: str
     unsupported: str | None = None  # why it cannot be evaluated, when it cannot
+    # A metric whose inputs live on different models (a ratio of orders to customers, say)
+    # cannot be one aggregate over one relation. `expr` is then a SQL expression over the
+    # placeholder tokens in `inputs`, each a single-model MetricDef evaluated on its own
+    # relation; `combine()` puts the scalars together. `sql` is empty for such a metric.
+    expr: str | None = None
+    inputs: dict[str, MetricDef] = field(default_factory=dict)
 
     @property
     def evaluable(self) -> bool:
         return self.unsupported is None
+
+    @property
+    def spans_models(self) -> bool:
+        return bool(self.inputs)
+
+    @property
+    def model_uids(self) -> list[str]:
+        """The models this metric reads, in input order; just `model_uid` when it reads one."""
+        if not self.inputs:
+            return [self.model_uid]
+        return list(dict.fromkeys(m.model_uid for m in self.inputs.values()))
 
 
 class MetricError(ValueError):
@@ -111,57 +133,93 @@ def _semantic_model_for_measure(manifest: Manifest, measure: str) -> SemanticMod
     return owners[0]
 
 
-def _dbt_metric_sql(
+def _token(name: str) -> str:
+    """The placeholder a metric's aggregate stands behind while an expression is assembled.
+
+    Wrapped in underscores so that substituting one metric name inside an expression can
+    never match part of another metric's placeholder (`customers` inside
+    `__preflight_business_customers__` has no word boundary before it)."""
+    return f"__preflight_{name}__"
+
+
+@dataclass
+class _Resolved:
+    """A dbt metric as a SQL expression over placeholders, one per aggregate it needs.
+
+    `inputs` maps each placeholder to (metric name, aggregate SQL, model unique id). When
+    every input sits on one model the placeholders collapse into one aggregate expression;
+    when they do not, the metric spans models and each input is evaluated on its own."""
+
+    expr: str
+    inputs: dict[str, tuple[str, str, str]]
+
+
+def _resolve(
     metric: MetricNode, manifest: Manifest, by_name: dict[str, MetricNode], depth: int = 0
-) -> tuple[str, str]:
-    """(aggregate SQL, model unique id) for a dbt metric, recursing through its inputs."""
+) -> _Resolved:
     if depth > 8:
         raise MetricError("metric definitions nest too deeply")
 
-    if metric.type == "simple":
+    if metric.type in {"simple", "cumulative"}:
+        if metric.type == "cumulative":
+            # Without a window or a grain to accumulate to, a cumulative metric is a running
+            # total over all time, and its final value is exactly the plain aggregate. With
+            # either, its value is a series over a time spine, which preflight has no
+            # single number for.
+            if metric.window:
+                raise MetricError(
+                    f"cumulative over a {metric.window} window needs a time spine "
+                    "and is not evaluated"
+                )
+            if metric.grain_to_date:
+                raise MetricError(
+                    f"cumulative to the {metric.grain_to_date} needs a time spine "
+                    "and is not evaluated"
+                )
+            if not metric.measure and metric.input_metrics:
+                # Cumulative over another metric: all-time, that is the metric itself.
+                return _resolve(
+                    _input(by_name, metric.input_metrics[0]), manifest, by_name, depth + 1
+                )
         if not metric.measure:
-            raise MetricError("simple metric without a measure")
+            raise MetricError(f"{metric.type} metric without a measure")
         sm = _semantic_model_for_measure(manifest, metric.measure)
         if sm.model_uid is None:
             raise MetricError(f"semantic model `{sm.name}` is not tied to a dbt model")
-        return _measure_sql(
-            metric.measure, metric.measure_filters + metric.filters, sm
-        ), sm.model_uid
+        sql = _measure_sql(metric.measure, metric.measure_filters + metric.filters, sm)
+        token = _token(metric.name)
+        return _Resolved(token, {token: (metric.name, sql, sm.model_uid)})
 
     if metric.type == "ratio":
         if not metric.numerator or not metric.denominator:
             raise MetricError("ratio metric without numerator and denominator")
-        num, num_model = _dbt_metric_sql(
-            _input(by_name, metric.numerator), manifest, by_name, depth + 1
-        )
-        den, den_model = _dbt_metric_sql(
-            _input(by_name, metric.denominator), manifest, by_name, depth + 1
-        )
-        if num_model != den_model:
-            raise MetricError("numerator and denominator live on different models")
+        num = _resolve(_input(by_name, metric.numerator), manifest, by_name, depth + 1)
+        den = _resolve(_input(by_name, metric.denominator), manifest, by_name, depth + 1)
         if metric.filters:
             raise MetricError("filters on ratio metrics are not evaluated")
-        return f"cast(({num}) as double) / nullif(({den}), 0)", num_model
+        return _Resolved(
+            f"cast(({num.expr}) as double) / nullif(({den.expr}), 0)",
+            {**num.inputs, **den.inputs},
+        )
 
     if metric.type == "derived":
         if not metric.expr:
             raise MetricError("derived metric without an expression")
         expr = metric.expr
-        model_uid: str | None = None
+        inputs: dict[str, tuple[str, str, str]] = {}
         for name in sorted(metric.input_metrics, key=len, reverse=True):
-            sql, uid = _dbt_metric_sql(_input(by_name, name), manifest, by_name, depth + 1)
-            if model_uid is None:
-                model_uid = uid
-            elif uid != model_uid:
-                raise MetricError("inputs live on different models")
-            expr = re.sub(rf"\b{re.escape(name)}\b", f"cast(({sql}) as double)", expr)
-        if model_uid is None:
+            inner = _resolve(_input(by_name, name), manifest, by_name, depth + 1)
+            expr = re.sub(rf"\b{re.escape(name)}\b", f"cast(({inner.expr}) as double)", expr)
+            inputs.update(inner.inputs)
+        if not inputs:
             raise MetricError("derived metric without inputs")
         if metric.filters:
             raise MetricError("filters on derived metrics are not evaluated")
-        return f"({expr})", model_uid
+        return _Resolved(f"({expr})", inputs)
 
-    raise MetricError(f"{metric.type} metrics need a time spine and are not evaluated")
+    if metric.type == "conversion":
+        raise MetricError("conversion metrics join two events over a window and are not evaluated")
+    raise MetricError(f"{metric.type} metrics are not evaluated")
 
 
 def _input(by_name: dict[str, MetricNode], name: str) -> MetricNode:
@@ -171,16 +229,44 @@ def _input(by_name: dict[str, MetricNode], name: str) -> MetricNode:
         raise MetricError(f"input metric `{name}` does not exist") from None
 
 
+def _substitute(expr: str, replacements: dict[str, str]) -> str:
+    """`expr` with every placeholder token swapped for its replacement, longest token first
+    so a token that happens to prefix another is never replaced inside it."""
+    for token in sorted(replacements, key=len, reverse=True):
+        expr = expr.replace(token, replacements[token])
+    return expr
+
+
 def dbt_metrics(manifest: Manifest) -> list[MetricDef]:
     by_name = {m.name: m for m in manifest.metrics.values()}
     out: list[MetricDef] = []
     for metric in manifest.metrics.values():
         try:
-            sql, model_uid = _dbt_metric_sql(metric, manifest, by_name)
-            out.append(MetricDef(metric.name, metric.label, model_uid, sql, SOURCE_DBT))
+            resolved = _resolve(metric, manifest, by_name)
         except MetricError as exc:
             model_uid = _guess_model(metric, manifest)
             out.append(MetricDef(metric.name, metric.label, model_uid, "", SOURCE_DBT, str(exc)))
+            continue
+        uids = list(dict.fromkeys(uid for _, _, uid in resolved.inputs.values()))
+        if len(uids) == 1:
+            sql = _substitute(resolved.expr, {t: s for t, (_, s, _) in resolved.inputs.items()})
+            out.append(MetricDef(metric.name, metric.label, uids[0], sql, SOURCE_DBT))
+            continue
+        inputs = {
+            token: MetricDef(name, name, uid, sql, SOURCE_DBT)
+            for token, (name, sql, uid) in resolved.inputs.items()
+        }
+        out.append(
+            MetricDef(
+                metric.name,
+                metric.label,
+                uids[0],
+                "",
+                SOURCE_DBT,
+                expr=resolved.expr,
+                inputs=inputs,
+            )
+        )
     return out
 
 
@@ -362,7 +448,7 @@ def evaluate(
 ) -> dict[str, float | int | None]:
     """Metric values over `relation`; a metric that errors maps to None with its reason kept."""
     values: dict[str, float | int | None] = {}
-    evaluable = [m for m in metrics if m.evaluable]
+    evaluable = [m for m in metrics if m.evaluable and not m.spans_models]
     if not evaluable:
         return values
 
@@ -391,3 +477,35 @@ def evaluate(
             m.unsupported = str(exc).splitlines()[0][:160]
             values[m.name] = None
     return values
+
+
+def _literal(value: object) -> str:
+    """A scalar DuckDB returned, as a SQL literal it will read back: `None` is null, and a
+    `Decimal` (what a sum over a DECIMAL column comes back as) prints as plain digits."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return str(value)
+
+
+def combine(
+    con: duckdb.DuckDBPyConnection, metric: MetricDef, values: dict[str, float | int | None]
+) -> float | int | None:
+    """A metric that spans models, put together from its inputs' already-evaluated values.
+
+    `values` maps each placeholder in `metric.inputs` to the scalar its aggregate produced
+    on one side of the diff. The expression runs in DuckDB with the scalars inlined, so
+    its arithmetic (`nullif`, casts, division) behaves exactly as it would in one query."""
+    literals = {token: _literal(value) for token, value in values.items()}
+    missing = [token for token in metric.inputs if token not in literals]
+    if missing or metric.expr is None:
+        return None
+    try:
+        row = con.execute(f"select ({_substitute(metric.expr, literals)})").fetchone()
+    except duckdb.Error as exc:
+        metric.unsupported = str(exc).splitlines()[0][:160]
+        return None
+    return row[0] if row else None

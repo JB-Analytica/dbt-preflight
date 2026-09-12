@@ -100,7 +100,7 @@ def _diff(d: ModelDiff) -> dict[str, Any]:
         ],
         "columns_renamed": [{"old_name": old, "new_name": new} for old, new in d.columns_renamed],
         "moved_metrics": [
-            {"name": m.name, "label": m.label, "base": m.base, "head": m.head}
+            {"name": m.name, "label": m.label, "base": m.base, "head": m.head, "spans": m.spans}
             for m in d.moved_metrics
         ],
         "removed_column_references": {col: list(refs) for col, refs in d.references.items()},

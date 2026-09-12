@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import duckdb
 
 from dbt_preflight.manifest import Manifest
@@ -8,6 +10,7 @@ from dbt_preflight.metrics import (
     SOURCE_DBT,
     SOURCE_LIGHTDASH,
     collect_metrics,
+    combine,
     config_metrics,
     dbt_metrics,
     evaluate,
@@ -17,7 +20,15 @@ from dbt_preflight.metrics import (
 
 def _with_semantic_layer(raw: dict) -> dict:
     mart = "model.p.dim_customers"
+    orders = "model.p.stg_shop__orders"
     raw["semantic_models"] = {
+        "semantic_model.p.orders": {
+            "name": "orders",
+            "depends_on": {"nodes": [orders]},
+            "measures": [{"name": "order_count", "agg": "count", "expr": "order_id"}],
+            "dimensions": [],
+            "entities": [{"name": "order", "type": "primary", "expr": "order_id"}],
+        },
         "semantic_model.p.customers": {
             "name": "customers",
             "depends_on": {"nodes": [mart]},
@@ -32,7 +43,7 @@ def _with_semantic_layer(raw: dict) -> dict:
                 {"name": "customer_since_at", "type": "time", "expr": "customer_since_at"},
             ],
             "entities": [{"name": "customer", "type": "primary", "expr": "customer_id"}],
-        }
+        },
     }
     raw["metrics"] = {
         "metric.p.customers": {
@@ -108,6 +119,63 @@ def _with_semantic_layer(raw: dict) -> dict:
             "filter": None,
             "depends_on": {"nodes": ["semantic_model.p.customers"]},
         },
+        "metric.p.revenue_7d": {
+            "name": "revenue_7d",
+            "label": "Revenue, trailing 7 days",
+            "type": "cumulative",
+            "type_params": {
+                "measure": {"name": "revenue", "filter": None},
+                "cumulative_type_params": {"window": {"count": 7, "granularity": "day"}},
+            },
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.customers"]},
+        },
+        "metric.p.revenue_mtd": {
+            "name": "revenue_mtd",
+            "label": "Revenue month to date",
+            "type": "cumulative",
+            "type_params": {
+                "measure": {"name": "revenue", "filter": None},
+                "grain_to_date": "month",
+            },
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.customers"]},
+        },
+        "metric.p.signup_conversion": {
+            "name": "signup_conversion",
+            "label": "Signup conversion",
+            "type": "conversion",
+            "type_params": {"conversion_type_params": {}},
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.customers"]},
+        },
+        "metric.p.orders": {
+            "name": "orders",
+            "label": "Orders",
+            "type": "simple",
+            "type_params": {"measure": {"name": "order_count", "filter": None}},
+            "filter": None,
+            "depends_on": {"nodes": ["semantic_model.p.orders"]},
+        },
+        "metric.p.orders_per_customer": {
+            "name": "orders_per_customer",
+            "label": "Orders per customer",
+            "type": "ratio",
+            "type_params": {"numerator": {"name": "orders"}, "denominator": {"name": "customers"}},
+            "filter": None,
+            "depends_on": {"nodes": ["metric.p.orders", "metric.p.customers"]},
+        },
+        "metric.p.revenue_per_order": {
+            "name": "revenue_per_order",
+            "label": "Revenue per order",
+            "type": "derived",
+            "type_params": {
+                "expr": "revenue / orders",
+                "metrics": [{"name": "revenue"}, {"name": "orders"}],
+            },
+            "filter": None,
+            "depends_on": {"nodes": ["metric.p.revenue", "metric.p.orders"]},
+        },
     }
     return raw
 
@@ -181,9 +249,57 @@ def test_dbt_metrics_become_aggregates(raw_manifest: dict) -> None:
     assert "cast((count(customer_id) filter" in defs["business_share"].sql
     assert defs["buyers"].sql == "sum(case when has_ordered then 1 else 0 end)"
     assert defs["p90"].unsupported == "aggregation `percentile` is not evaluated"
-    assert "time spine" in (defs["cumulative_revenue"].unsupported or "")
-    assert all(m.model_uid == "model.p.dim_customers" for m in defs.values())
+    # All-time cumulative: the running total's final value is the plain aggregate.
+    assert defs["cumulative_revenue"].sql == "sum(lifetime_net_revenue_eur)"
+    assert defs["revenue_7d"].unsupported == (
+        "cumulative over a 7 day window needs a time spine and is not evaluated"
+    )
+    assert defs["revenue_mtd"].unsupported == (
+        "cumulative to the month needs a time spine and is not evaluated"
+    )
+    assert "conversion metrics" in (defs["signup_conversion"].unsupported or "")
+    single = {n: m for n, m in defs.items() if not m.spans_models and n != "orders"}
+    assert all(m.model_uid == "model.p.dim_customers" for m in single.values())
     assert all(m.source == SOURCE_DBT for m in defs.values())
+
+
+def test_dbt_metrics_across_models_keep_one_input_per_model(raw_manifest: dict) -> None:
+    manifest = Manifest.from_dict(_with_semantic_layer(raw_manifest))
+    defs = {m.name: m for m in dbt_metrics(manifest)}
+    ratio = defs["orders_per_customer"]
+    assert ratio.spans_models and ratio.sql == ""
+    assert ratio.model_uids == ["model.p.stg_shop__orders", "model.p.dim_customers"]
+    assert ratio.model_uid == "model.p.stg_shop__orders"
+    inputs = {m.name: m for m in ratio.inputs.values()}
+    assert inputs["orders"].sql == "count(order_id)"
+    assert inputs["customers"].sql == "count(customer_id)"
+    assert not inputs["orders"].spans_models
+    assert ratio.expr == (
+        "cast((__preflight_orders__) as double) / nullif((__preflight_customers__), 0)"
+    )
+    derived = defs["revenue_per_order"]
+    assert derived.spans_models
+    assert derived.model_uids == ["model.p.dim_customers", "model.p.stg_shop__orders"]
+    assert derived.expr == (
+        "(cast((__preflight_revenue__) as double) / cast((__preflight_orders__) as double))"
+    )
+
+
+def test_combine_puts_input_values_together(raw_manifest: dict) -> None:
+    manifest = Manifest.from_dict(_with_semantic_layer(raw_manifest))
+    defs = {m.name: m for m in dbt_metrics(manifest)}
+    ratio = defs["orders_per_customer"]
+    tokens = {m.name: token for token, m in ratio.inputs.items()}
+    con = duckdb.connect()
+    assert combine(con, ratio, {tokens["orders"]: 10, tokens["customers"]: 4}) == 2.5
+    assert combine(con, ratio, {tokens["orders"]: 10, tokens["customers"]: 0}) is None
+    assert combine(con, ratio, {tokens["orders"]: None, tokens["customers"]: 4}) is None
+    # A missing input is not silently treated as zero.
+    assert combine(con, ratio, {tokens["orders"]: 10}) is None
+    # A sum over a DECIMAL column comes back from DuckDB as a Decimal; it must inline as digits.
+    assert (
+        combine(con, ratio, {tokens["orders"]: Decimal("10.50"), tokens["customers"]: 4}) == 2.625
+    )
 
 
 def test_dbt_metrics_evaluate_on_duckdb(raw_manifest: dict) -> None:
@@ -197,7 +313,10 @@ def test_dbt_metrics_evaluate_on_duckdb(raw_manifest: dict) -> None:
     assert values["revenue_per_customer"] == 112.5
     assert values["business_share"] == 0.25
     assert values["buyers"] == 3
-    assert "p90" not in values and "cumulative_revenue" not in values
+    assert values["cumulative_revenue"] == 450.0
+    assert "p90" not in values and "revenue_7d" not in values
+    # A metric spanning models has no single relation to run on; the diff combines it.
+    assert "orders_per_customer" not in values and "revenue_per_order" not in values
 
 
 def test_lightdash_metrics_resolve_references_and_filters(raw_manifest: dict) -> None:
