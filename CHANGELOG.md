@@ -22,6 +22,10 @@ All notable changes to this project are documented here. The format follows
   the window, and a conversion metric says it joins two events over a window. The bundled
   example gained a `customers` semantic model and an orders-per-customer ratio to show it.
 - README links are absolute, so the page renders with working links on PyPI.
+- The comment's size budget now covers metric breakdowns: only the first three moved
+  metrics show their per-dimension breakdown in full, the rest fold under one `<details>`
+  block. A change to a fact table moves every metric on it at once, and fifteen moved
+  metrics over two dimensions were thirty bullets, longer than the rest of the comment.
 - `dbt-preflight run --summary-file PATH` writes a JSON document alongside the comment:
   `verdict`, `exit_code`, counts, and every model, failing test, violation, diff and
   fixture as structured data, for a hook, a bot or a plugin to act on without parsing
