@@ -19,7 +19,7 @@ from sqlglot.errors import SqlglotError
 
 from dbt_preflight.checks import relation
 from dbt_preflight.manifest import Manifest, ModelNode
-from dbt_preflight.metrics import MetricDef, evaluate
+from dbt_preflight.metrics import MetricDef, combine, evaluate
 from dbt_preflight.transpile import transpile_sql
 
 # How many dimensions, and how many rows per dimension, a moved metric's breakdown carries.
@@ -47,6 +47,9 @@ class MetricDiff:
     breakdown: dict[str, list[tuple[str, float | int | None, float | int | None]]] = field(
         default_factory=dict
     )
+    # The models a metric reads when it reads more than one (a ratio of orders to
+    # customers): empty for the usual metric over a single model.
+    spans: list[str] = field(default_factory=list)
 
     @property
     def moved(self) -> bool:
@@ -373,6 +376,57 @@ def _metric_breakdown(
     return breakdown
 
 
+def _spanning_metric_diff(
+    con: duckdb.DuckDBPyConnection,
+    metric: MetricDef,
+    head: Manifest,
+    base: Manifest,
+    compared: dict[str, ModelDiff],
+    dialect: str | None,
+) -> MetricDiff:
+    """A metric whose inputs live on different models: each input is evaluated on its own
+    relation, on both sides, and the scalars are combined.
+
+    `compared` holds the models the change reached and that built on head. An input model
+    outside it was not touched by the change and was not built on the base branch, so its
+    head value stands for both sides: same SQL, same fixtures, same output."""
+    spans = [head.models[uid].name for uid in metric.model_uids if uid in head.models]
+    diff = MetricDiff(
+        name=metric.name,
+        label=metric.label,
+        source=metric.source,
+        base=None,
+        head=None,
+        unsupported=metric.unsupported,
+        spans=spans,
+    )
+    if diff.unsupported:
+        return diff
+    head_vals: dict[str, float | int | None] = {}
+    base_vals: dict[str, float | int | None] = {}
+    for token, inp in metric.inputs.items():
+        node = head.models.get(inp.model_uid)
+        if node is None or not _columns(con, node):
+            diff.unsupported = f"`{node.name if node else inp.model_uid}` was not built in this run"
+            return diff
+        head_vals[token] = evaluate(con, relation(node), [inp], dialect).get(inp.name)
+        model_diff = compared.get(inp.model_uid)
+        if model_diff is None:
+            base_vals[token] = head_vals[token]
+        elif not model_diff.base_exists:
+            base_vals[token] = None  # new in this pull request: nothing on the base side
+        else:
+            base_node = base.models[inp.model_uid]
+            base_vals[token] = evaluate(con, relation(base_node), [inp], dialect).get(inp.name)
+        if inp.unsupported:
+            diff.unsupported = f"{inp.name}: {inp.unsupported}"
+            return diff
+    diff.head = combine(con, metric, head_vals)
+    diff.base = combine(con, metric, base_vals)
+    diff.unsupported = metric.unsupported
+    return diff
+
+
 def compute_diffs(
     db_path,
     head: Manifest,
@@ -384,7 +438,9 @@ def compute_diffs(
     """Diffs for `model_ids` (head unique ids) that built on both sides."""
     by_model: dict[str, list[MetricDef]] = {}
     for m in metrics:
-        by_model.setdefault(m.model_uid, []).append(m)
+        if not m.spans_models:
+            by_model.setdefault(m.model_uid, []).append(m)
+    spanning = [m for m in metrics if m.spans_models]
 
     out: list[ModelDiff] = []
     con = duckdb.connect(str(db_path))
@@ -473,6 +529,15 @@ def compute_diffs(
                             )
                     diff.metrics.append(metric_diff)
             out.append(diff)
+
+        # A metric that spans models is reported under the first of its models the change
+        # reached; one none of whose models the change reached cannot have moved.
+        compared = {d.unique_id: d for d in out}
+        for metric in spanning:
+            home = next((compared[uid] for uid in metric.model_uids if uid in compared), None)
+            if home is None:
+                continue
+            home.metrics.append(_spanning_metric_diff(con, metric, head, base, compared, dialect))
     finally:
         con.close()
     return out

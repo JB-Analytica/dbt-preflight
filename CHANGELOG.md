@@ -7,6 +7,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Metrics whose inputs live on different models are evaluated. A `ratio` or `derived`
+  metric in dbt's semantic layer that divides orders (on `fct_orders`) by customers (on
+  `dim_customers`) used to be reported as "inputs live on different models"; now each
+  input is evaluated on its own model, on both sides of the diff, and the scalars are
+  combined in DuckDB with the metric's own arithmetic. An input model the change did not
+  reach was not built on the base branch, and being untouched its head value stands for
+  both sides. The metric is listed under the first of its models the change reached, with
+  the label saying which models it reads (`Orders per customer (across `fct_orders`,
+  `dim_customers`)`), and the summary JSON carries the same list under `spans`. A
+  `cumulative` metric with no window and no grain to date is a running total over all
+  time, whose final value is exactly the plain aggregate, so it is evaluated as one; a
+  windowed or grain-to-date cumulative metric still says it needs a time spine, now naming
+  the window, and a conversion metric says it joins two events over a window. The bundled
+  example gained a `customers` semantic model and an orders-per-customer ratio to show it.
+- README links are absolute, so the page renders with working links on PyPI.
 - `dbt-preflight run --summary-file PATH` writes a JSON document alongside the comment:
   `verdict`, `exit_code`, counts, and every model, failing test, violation, diff and
   fixture as structured data, for a hook, a bot or a plugin to act on without parsing

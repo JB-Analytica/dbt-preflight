@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dbt_preflight.checks import Violation
+from dbt_preflight.diff import MetricDiff, ModelDiff
 from dbt_preflight.fixtures import FixtureSummary, LoadedTable
 from dbt_preflight.report import (
     BUILT,
@@ -203,8 +204,6 @@ def test_no_base_run_says_so() -> None:
 
 
 def test_diff_section_lists_moves_and_identical_models() -> None:
-    from dbt_preflight.diff import MetricDiff, ModelDiff
-
     report = PreflightReport(
         models=[_model("fct_orders"), _model("dim_products")],
         diffs=[
@@ -680,7 +679,6 @@ def test_differing_rows_notes_when_restricted_to_shared_columns() -> None:
 
 
 def test_moved_metric_breakdown_renders_under_the_metric_table() -> None:
-    from dbt_preflight.diff import MetricDiff, ModelDiff
 
     report = PreflightReport(
         models=[_model("dim_customers")],
@@ -719,3 +717,31 @@ def test_moved_metric_breakdown_renders_under_the_metric_table() -> None:
     )
     # the breakdown sits after the metric table, before the closing blank line's next section
     assert body.index("| Net revenue (EUR) |") < body.index("by sales_channel")
+
+
+def test_metric_spanning_models_names_the_models_it_reads() -> None:
+    diff = ModelDiff(
+        unique_id="model.p.dim_customers",
+        name="dim_customers",
+        base_exists=True,
+        rows_base=150,
+        rows_head=150,
+        rows_differing=0,
+        metrics=[
+            MetricDiff(
+                "orders_per_customer",
+                "Orders per customer",
+                "dbt",
+                5.33,
+                5.0,
+                spans=["fct_orders", "dim_customers"],
+            ),
+            MetricDiff("customers", "Customers", "dbt", 150, 150),
+        ],
+    )
+    report = PreflightReport(models=[_model("dim_customers")], base_ref="main", diffs=[diff])
+    body = render(report)
+    assert (
+        "| Orders per customer (across `fct_orders`, `dim_customers`) | 5.33 | 5 | -6.2% |" in body
+    )
+    assert "1 metric unchanged." in body

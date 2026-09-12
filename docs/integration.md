@@ -77,7 +77,7 @@ Every flag on `run`:
 | `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, dialect_function. |
 | `failing_tests` | array | Every failing or warning test: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, reading (a one-line plain-English reading of the DuckDB error, when there is one). |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
-| `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values, and where a removed or renamed column was referenced on the base branch. |
+| `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
 | `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared, and model2data's own warnings. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
 

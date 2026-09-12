@@ -24,6 +24,15 @@ def _where_templates(filter_obj: Any) -> list[str]:
     ]
 
 
+def _window_string(window: Any) -> str | None:
+    """A metric time window (`{"count": 7, "granularity": "day"}`) as "7 day", or None."""
+    if isinstance(window, dict) and window.get("count") is not None:
+        return f"{window['count']} {window.get('granularity', '')}".strip()
+    if isinstance(window, str) and window.strip():
+        return window.strip()
+    return None
+
+
 def _strip_project(patch_path: str | None) -> str | None:
     """`project://models/x.yml` -> `models/x.yml`."""
     if not patch_path:
@@ -85,6 +94,10 @@ class MetricNode:
     input_metrics: list[str]
     filters: list[str]  # where_sql_template strings
     depends_on: list[str]
+    # Cumulative metrics only: a trailing window ("7 day") or a grain to accumulate to
+    # ("month"). Either needs a time spine to evaluate; neither set means all-time.
+    window: str | None = None
+    grain_to_date: str | None = None
 
 
 @dataclass
@@ -262,6 +275,12 @@ class Manifest:
         for uid, mt in (raw.get("metrics") or {}).items():
             tp = mt.get("type_params") or {}
             measure = tp.get("measure") or {}
+            cumulative = tp.get("cumulative_type_params") or {}
+            input_metrics = [m["name"] for m in tp.get("metrics") or [] if m.get("name")]
+            # A cumulative metric over another metric (semantic YAML v2) names it here.
+            cumulative_input = cumulative.get("metric") or {}
+            if isinstance(cumulative_input, dict) and cumulative_input.get("name"):
+                input_metrics.append(str(cumulative_input["name"]))
             metrics[uid] = MetricNode(
                 unique_id=uid,
                 name=mt["name"],
@@ -274,9 +293,11 @@ class Manifest:
                 numerator=(tp.get("numerator") or {}).get("name"),
                 denominator=(tp.get("denominator") or {}).get("name"),
                 expr=tp.get("expr"),
-                input_metrics=[m["name"] for m in tp.get("metrics") or [] if m.get("name")],
+                input_metrics=input_metrics,
                 filters=_where_templates(mt.get("filter")),
                 depends_on=list((mt.get("depends_on") or {}).get("nodes") or []),
+                window=_window_string(cumulative.get("window") or tp.get("window")),
+                grain_to_date=cumulative.get("grain_to_date") or tp.get("grain_to_date") or None,
             )
 
         return cls(

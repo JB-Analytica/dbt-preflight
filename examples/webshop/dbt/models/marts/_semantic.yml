@@ -42,6 +42,28 @@ semantic_models:
         agg: count_distinct
         expr: customer_id
 
+  - name: customers
+    description: Customer-grain facts, ordering customers or not.
+    model: ref('dim_customers')
+    defaults:
+      agg_time_dimension: customer_since_at
+    entities:
+      - name: customer
+        type: primary
+        expr: customer_id
+    dimensions:
+      - name: customer_since_at
+        type: time
+        type_params:
+          time_granularity: day
+      - name: customer_segment
+        type: categorical
+    measures:
+      - name: customer_count
+        description: Number of customers.
+        agg: count
+        expr: customer_id
+
 metrics:
   - name: orders
     label: Orders
@@ -79,3 +101,18 @@ metrics:
       metrics:
         - name: cancelled_orders
         - name: orders
+  - name: customers
+    label: Customers
+    description: Number of customers, whether they have ordered or not.
+    type: simple
+    type_params:
+      measure: customer_count
+  - name: orders_per_customer
+    label: Orders per customer
+    description: >
+      Orders divided by customers. The numerator lives on fct_orders and the denominator on
+      dim_customers, so preflight evaluates each on its own model and combines them.
+    type: ratio
+    type_params:
+      numerator: orders
+      denominator: customers
