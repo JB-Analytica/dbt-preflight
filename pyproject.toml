@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dbt-preflight"
-version = "0.1.0"
+version = "0.2.0"
 description = "Warehouse-free CI for dbt pull requests: build and test the changed models against synthetic data, check house conventions, leave one review comment."
 readme = "README.md"
 requires-python = ">=3.10"
