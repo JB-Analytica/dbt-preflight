@@ -62,3 +62,17 @@ def test_bad_values_are_rejected(tmp_path: Path, body: str, fragment: str) -> No
     (repo / CONFIG_FILENAME).write_text(body)
     with pytest.raises(ConfigError, match=fragment):
         load_config(repo)
+
+
+def test_version_matches_the_packaging_metadata() -> None:
+    """`--version` printed 0.1.0 on the 0.2.0 release: the version was hardcoded in
+    __init__.py and pyproject.toml had moved on without it."""
+    from pathlib import Path
+
+    import tomllib
+
+    from dbt_preflight import __version__
+
+    pyproject = Path(__file__).parent.parent / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text())["project"]["version"]
+    assert __version__ == declared

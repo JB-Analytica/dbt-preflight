@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-16
+
+### Fixed
+
+- `dbt-preflight --version` reported 0.1.0 on the 0.2.0 release, and the run's first
+  progress line with it. The version was hardcoded in `dbt_preflight/__init__.py` and had
+  never been bumped alongside `pyproject.toml`. It is now read from the installed package
+  metadata, so there is one source of truth and the two cannot drift again. A test asserts
+  the two agree.
+
 ## [0.2.0] - 2026-09-16
 
 ### Added
