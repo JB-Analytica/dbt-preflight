@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-16
+
+### Added
+
+- An `accepted_values` test on a staging column now carries back to its source column, the
+  way `unique` and `not_null` already did, and the column is generated as a DBML enum of
+  exactly those values. Without it the generator filled an enum-shaped column with
+  placeholder text and the project's own test rejected every row, which on a project with
+  a few enum columns was the difference between a green run and a red one. The values are
+  the test's own arguments, so unlike the other two carry-backs this one arrives with its
+  answer attached. A test declared on the source column itself is used the same way, and
+  wins over one carried back from staging.
+
+  Only a string column becomes an enum: an enum's values are strings, so turning a numeric
+  column into one would change its type to satisfy a test. A test whose values could not
+  survive a DBML enum block - empty, or carrying a quote, a brace or a newline - leaves the
+  column exactly as it would have been rather than emitting a schema that does not parse.
+
 ## [0.2.1] - 2026-09-16
 
 ### Fixed

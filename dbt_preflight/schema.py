@@ -85,6 +85,14 @@ def _dbml_type(data_type: str) -> str:
     return _TYPE_ALIASES.get(base, base)
 
 
+def _enum_name(table: str, column: str) -> str:
+    """A DBML enum name for one column's accepted values, unique within the derived file.
+
+    Qualified by table, because two tables can each have a `status` with different values,
+    and DBML resolves a column's type by name across the whole document."""
+    return re.sub(r"[^a-z0-9_]", "_", f"{table}__{column}".lower())
+
+
 def _ref_target(test: TestNode, sources: dict[str, SourceTable]) -> tuple[str, str] | None:
     """For a relationships test on a source column, the (table, column) it points at.
 
@@ -505,7 +513,29 @@ def _model_alias_map(raw_code: str) -> dict[str, str]:
     return aliases
 
 
-def _carried_tests_for_source(source: SourceTable, manifest: Manifest) -> dict[str, set[str]]:
+def _accepted_values(test: TestNode) -> list[str]:
+    """The `values:` an `accepted_values` test declares, as strings, in declared order.
+
+    A test with no usable values - an empty list, or one carrying something that is not a
+    scalar - yields nothing, and the column is generated as it would have been."""
+    raw = test.kwargs.get("values")
+    if not isinstance(raw, list) or not raw:
+        return []
+    out: list[str] = []
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return []
+        text = str(value)
+        # The value has to survive being written into a DBML enum block and read back.
+        if not text or any(ch in text for ch in "\"'{}\n\r"):
+            return []
+        out.append(text)
+    return out
+
+
+def _carried_tests_for_source(
+    source: SourceTable, manifest: Manifest
+) -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     """{source_column_name: {test names}}, carried back from the `unique`/`not_null`
     tests a staging model declares on the alias it gave one of this source's columns.
 
@@ -515,6 +545,7 @@ def _carried_tests_for_source(source: SourceTable, manifest: Manifest) -> dict[s
     project's own YAML already documents instead of leaving them to chance.
     """
     carried: dict[str, set[str]] = {}
+    carried_values: dict[str, list[str]] = {}
     for model in manifest.models.values():
         if source.unique_id not in model.depends_on:
             continue
@@ -522,13 +553,18 @@ def _carried_tests_for_source(source: SourceTable, manifest: Manifest) -> dict[s
         if not alias_map:
             continue
         for test in manifest.tests_for_model(model.unique_id):
-            if test.test_name not in {"unique", "not_null"} or not test.column_name:
+            if not test.column_name:
                 continue
             source_col = alias_map.get(test.column_name.lower())
             if source_col is None:
                 continue
-            carried.setdefault(source_col, set()).add(test.test_name)
-    return carried
+            if test.test_name in {"unique", "not_null"}:
+                carried.setdefault(source_col, set()).add(test.test_name)
+            elif test.test_name == "accepted_values":
+                values = _accepted_values(test)
+                if values:
+                    carried_values.setdefault(source_col, values)
+    return carried, carried_values
 
 
 def _infer_source_columns(
@@ -596,6 +632,7 @@ def _resolve_columns(
     list[SourceTable],
     dict[tuple[str, str], set[str]],
     dict[tuple[str, str], str],
+    dict[tuple[str, str], list[str]],
 ]:
     """Declared columns, filled in from the staging models where sources.yml falls short.
 
@@ -613,12 +650,16 @@ def _resolve_columns(
     inferred: list[InferredSource] = []
     still_missing: list[SourceTable] = []
     carried_tests: dict[tuple[str, str], set[str]] = {}
+    carried_values: dict[tuple[str, str], list[str]] = {}
     fk_refs: dict[tuple[str, str], str] = {}
     all_sources = list(sources.values())
 
     for src in sources.values():
-        for col_name, tests in _carried_tests_for_source(src, manifest).items():
+        src_tests, src_values = _carried_tests_for_source(src, manifest)
+        for col_name, tests in src_tests.items():
             carried_tests.setdefault((src.identifier, col_name), set()).update(tests)
+        for col_name, values in src_values.items():
+            carried_values.setdefault((src.identifier, col_name), values)
 
         if src.columns and all(c.data_type for c in src.columns):
             effective[src.unique_id] = src.columns
@@ -669,7 +710,7 @@ def _resolve_columns(
             )
         )
 
-    return effective, inferred, still_missing, carried_tests, fk_refs
+    return effective, inferred, still_missing, carried_tests, fk_refs, carried_values
 
 
 def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
@@ -692,7 +733,9 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     if not sources:
         raise SchemaError("The dbt project declares no sources, so there is nothing to generate.")
 
-    effective, inferred, still_missing, carried_tests, fk_refs = _resolve_columns(sources, manifest)
+    effective, inferred, still_missing, carried_tests, fk_refs, carried_values = _resolve_columns(
+        sources, manifest
+    )
     if still_missing:
         patch = _missing_types_patch(still_missing)
         if patch:
@@ -711,6 +754,7 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     col_refs: dict[tuple[str, str], tuple[str, str]] = {
         key: (target, "id") for key, target in fk_refs.items()
     }
+    col_values: dict[tuple[str, str], list[str]] = dict(carried_values)
     for test in manifest.source_tests():
         src = sources.get(test.attached_node or "")
         if src is None or not test.column_name:
@@ -722,10 +766,15 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
             target = _ref_target(test, sources)
             if target is not None:
                 col_refs[key] = target  # an explicit test's ref wins over a guessed one
+        elif test.test_name == "accepted_values":
+            values = _accepted_values(test)
+            if values:
+                col_values[key] = values  # declared on the source itself: it wins
 
-    lines = ["// Derived by dbt-preflight from the project's sources.yml. Do not edit.", ""]
+    enum_blocks: list[str] = []
+    table_lines: list[str] = []
     for src in sources.values():
-        lines.append(f"Table {src.identifier} {{")
+        table_lines.append(f"Table {src.identifier} {{")
         for col in effective.get(src.unique_id, src.columns):
             settings: list[str] = []
             tests = col_settings.get((src.identifier, col.name), set())
@@ -740,12 +789,28 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
             if ref is not None:
                 settings.append(f"ref: > {ref[0]}.{ref[1]}")
             suffix = f" [{', '.join(settings)}]" if settings else ""
-            lines.append(f"  {col.name} {_dbml_type(col.data_type or 'varchar')}{suffix}")
+            col_type = _dbml_type(col.data_type or "varchar")
+            # An `accepted_values` test names the only values the column may hold, so the
+            # column is written as an enum of exactly those: model2data draws from an enum's
+            # own values, where a varchar would get placeholder text the test then rejects.
+            # Only a string column qualifies - an enum's values are strings, so turning a
+            # numeric column into one would change its type to satisfy a test.
+            values = col_values.get((src.identifier, col.name))
+            if values and col_type == "varchar":
+                enum_name = _enum_name(src.identifier, col.name)
+                enum_blocks.append(
+                    f"Enum {enum_name} {{\n" + "".join(f'  "{v}"\n' for v in values) + "}\n"
+                )
+                col_type = enum_name
+            table_lines.append(f"  {col.name} {col_type}{suffix}")
         if src.description:
             note = src.description.strip().replace("'", "\\'").splitlines()[0]
-            lines.append(f"  Note: '{note}'")
-        lines.append("}")
-        lines.append("")
+            table_lines.append(f"  Note: '{note}'")
+        table_lines.append("}")
+        table_lines.append("")
+    lines = ["// Derived by dbt-preflight from the project's sources.yml. Do not edit.", ""]
+    lines += enum_blocks  # enums first, so a column's type is defined before it is used
+    lines += table_lines
     return "\n".join(lines), inferred
 
 
