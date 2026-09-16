@@ -9,6 +9,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A `unique`/`not_null` test on a staging column stopped carrying back to its source
+  column as soon as the staging model wrapped the column in a `cast()`. A staging layer
+  over a schemaless loader is where types get pinned, so such a project casts every column
+  it selects, which meant it carried nothing at all: every source column came out
+  nullable, the generator put its usual share of nulls in, and every staging `not_null`
+  test failed against the fixtures. Found in a project where that skipped every model
+  downstream of staging, so the models a pull request actually touched were never built.
+  A cast preserves identity and nullness, which is exactly what the carry-back needs, so
+  it is now seen through - `cast(x as t)`, `try_cast(x as t)` and `x::t`, nested or not.
+  `lower(email)` keeps nullness but not identity and `coalesce(x, 0)` turns a nullable
+  column non-null; neither carries back, nor does a cast wrapped around either.
+
 - `dbt-preflight --version` reported 0.1.0 on the 0.2.0 release, and the run's first
   progress line with it. The version was hardcoded in `dbt_preflight/__init__.py` and had
   never been bumped alongside `pyproject.toml`. It is now read from the installed package

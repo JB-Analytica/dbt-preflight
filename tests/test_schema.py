@@ -597,3 +597,74 @@ def test_transform_alias_does_not_carry_a_test_back() -> None:
     dbml, _ = derive_dbml(manifest)
     assert "  email varchar" in dbml
     assert "  email varchar [unique]" not in dbml
+
+
+def test_cast_alias_carries_a_test_back() -> None:
+    """A staging layer over a schemaless loader pins types with a cast on every column.
+    The cast preserves identity and nullness, so the model's own `unique`/`not_null`
+    tests still describe the source column underneath and carry back to it. Found in
+    audience-analytics, where every staging model casts every column and preflight
+    therefore carried nothing at all: every source column came out nullable and every
+    staging not_null test failed against the fixtures."""
+    src_site = "source.p.cloudflare.site_daily"
+    stg_site = "model.p.stg_cloudflare__site_daily"
+    sql = """
+    select
+        cast(site_tag as varchar) as site_tag,
+        cast(stat_date as date) as stat_date,
+        try_cast(page_views as bigint) as page_views,
+        visits::bigint as visits
+    from {{ source('cloudflare', 'site_daily') }}
+    """
+    raw = {
+        "sources": {src_site: _source("cloudflare", "site_daily")},
+        "nodes": {
+            stg_site: _staging_model(
+                "stg_cloudflare__site_daily", "staging/stg_site.sql", [src_site], sql
+            ),
+            "test.p.su": _model_test(
+                "unique_stg_site_site_tag", "unique", "site_tag", stg_site, [stg_site]
+            ),
+            "test.p.sn": _model_test(
+                "not_null_stg_site_site_tag", "not_null", "site_tag", stg_site, [stg_site]
+            ),
+            "test.p.dn": _model_test(
+                "not_null_stg_site_stat_date", "not_null", "stat_date", stg_site, [stg_site]
+            ),
+            "test.p.pn": _model_test(
+                "not_null_stg_site_page_views", "not_null", "page_views", stg_site, [stg_site]
+            ),
+            "test.p.vn": _model_test(
+                "not_null_stg_site_visits", "not_null", "visits", stg_site, [stg_site]
+            ),
+        },
+        "parent_map": {stg_site: [src_site]},
+        "child_map": {src_site: [stg_site]},
+    }
+    manifest = Manifest.from_dict(raw)
+    dbml, _ = derive_dbml(manifest)
+    assert "  site_tag varchar [pk]" in dbml  # unique + not_null on the same alias
+    assert "  stat_date date [not null]" in dbml
+    assert "  page_views int [not null]" in dbml  # try_cast
+    assert "  visits int [not null]" in dbml  # x::t
+
+
+def test_alias_map_sees_through_casts_only() -> None:
+    """The wrappers a test carries back through preserve identity *and* nullness. A cast
+    does both. `lower()` keeps nullness but not identity, `coalesce()` keeps identity but
+    makes a nullable column non-null, and a cast around either inherits the problem."""
+    from dbt_preflight.schema import _model_alias_map
+
+    def carried(expression: str) -> dict[str, str]:
+        return _model_alias_map(f"select {expression} from {{{{ source('s', 't') }}}}")
+
+    assert carried("id as customer_id") == {"customer_id": "id"}
+    assert carried("order_id") == {"order_id": "order_id"}
+    assert carried("cast(id as bigint) as customer_id") == {"customer_id": "id"}
+    assert carried("try_cast(id as bigint) as customer_id") == {"customer_id": "id"}
+    assert carried("id::bigint as customer_id") == {"customer_id": "id"}
+    assert carried("cast(cast(id as int) as varchar) as customer_id") == {"customer_id": "id"}
+    assert carried("lower(email) as email") == {}
+    assert carried("coalesce(visits, 0) as visits") == {}
+    assert carried("cast(lower(email) as varchar) as email") == {}
+    assert carried("cast(coalesce(visits, 0) as bigint) as visits") == {}

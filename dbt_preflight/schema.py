@@ -460,14 +460,35 @@ def _parse_staging_sql(raw_code: str) -> exp.Expr | None:
     return tree
 
 
+# Wrappers a `unique`/`not_null` test can be carried back through, because they preserve
+# both identity and nullness: `cast(x as t)` is null exactly when `x` is, and two rows
+# differ after the cast only if they differed before it. That pair is the whole
+# requirement, and it is why the list is this short. `lower(email)` preserves nullness but
+# not identity; `coalesce(x, 0)` preserves identity but turns a nullable column non-null,
+# so carrying a `not_null` back through it would assert something about the source that
+# the staging test never checked. Neither belongs here. `exp.TryCast` subclasses
+# `exp.Cast`, so both spellings and `x::t` are covered.
+_NULL_PRESERVING_WRAPPERS = (exp.Cast,)
+
+
+def _unwrap_null_preserving(e: exp.Expression) -> exp.Expression:
+    """`cast(cast(x as int) as varchar)` -> the `x` column reference underneath."""
+    while isinstance(e, _NULL_PRESERVING_WRAPPERS):
+        e = e.this
+    return e
+
+
 def _model_alias_map(raw_code: str) -> dict[str, str]:
     """{a staging model's own output column name: the source column it came from}.
 
     `id as customer_id` -> `{"customer_id": "id"}`; a bare, unaliased column -
-    `order_id` - maps to itself, since it is its own alias. Only a direct column
-    reference counts as a rename: `lower(email) as email` is a transform, not a column
-    a not_null/unique test's name can be carried straight back through, so it is left
-    out - the test would have to attach to the source column itself for that.
+    `order_id` - maps to itself, since it is its own alias. A cast around the column
+    counts too (`cast(site_tag as string) as site_tag`), because a staging layer over a
+    schemaless loader is where types get pinned, and such a project casts every column it
+    selects - without this it would carry nothing at all. Only the wrappers in
+    `_NULL_PRESERVING_WRAPPERS` are seen through: `lower(email) as email` is a transform,
+    not a column a not_null/unique test's name can be carried straight back through, so it
+    is left out - the test would have to attach to the source column itself for that.
     """
     tree = _parse_staging_sql(raw_code)
     if tree is None:
@@ -475,8 +496,10 @@ def _model_alias_map(raw_code: str) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for select in tree.find_all(exp.Select):
         for e in select.expressions:
-            if isinstance(e, exp.Alias) and isinstance(e.this, exp.Column):
-                aliases.setdefault(e.alias_or_name.lower(), e.this.name.lower())
+            if isinstance(e, exp.Alias):
+                inner = _unwrap_null_preserving(e.this)
+                if isinstance(inner, exp.Column):
+                    aliases.setdefault(e.alias_or_name.lower(), inner.name.lower())
             elif isinstance(e, exp.Column):
                 aliases.setdefault(e.name.lower(), e.name.lower())
     return aliases
