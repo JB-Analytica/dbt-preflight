@@ -96,7 +96,7 @@ jobs:
       - uses: JB-Analytica/dbt-preflight@v0
 ```
 
-`@v0` follows the latest 0.x release; pin `@v0.1.0` for an exact version. Pull requests
+`@v0` follows the latest 0.x release; pin `@v0.2.0` for an exact version. Pull requests
 from forks run with a read-only token, so for those the report lands in the job summary
 only, with a note saying so.
 
@@ -245,12 +245,10 @@ conventions:
 ## Running it locally
 
 ```bash
-uv tool install git+https://github.com/JB-Analytica/dbt-preflight@v0
+uv tool install dbt-preflight
 cd your-repo
 dbt-preflight run --base-ref origin/main
 ```
-
-A PyPI release (`uv tool install dbt-preflight`) follows once the repository is public.
 
 Without `--base-ref`, every model counts as changed and the whole project is built. Add
 `--comment-file preflight.md` to write the comment to a file instead of stdout, and
