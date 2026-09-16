@@ -9,7 +9,7 @@ Expected: **fail**. Got: **fail**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ❌ failed
 
-Built 4 of 7 models (1 changed) against synthetic data · 25 tests · 0 convention issues · 8.3 s
+Built 4 of 7 models (1 changed) against synthetic data · 25 tests · 0 convention issues · 7.2 s
 
 ### Changed models
 
@@ -22,7 +22,7 @@ Unchanged models this change breaks:
 - `dim_customers` — ⏭️ skipped (an upstream model or test failed)
 - `fct_orders` — ⏭️ skipped (an upstream model or test failed)
 
-Also rebuilt, no new issues: `stg_webshop__orders`, `stg_webshop__order_items`, `stg_webshop__customers`, `fct_order_items`.
+Also rebuilt, no new issues: `fct_order_items`, `stg_webshop__customers`, `stg_webshop__order_items`, `stg_webshop__orders`.
 
 ### Failing tests
 
@@ -44,7 +44,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `c0975e0`.
+Compared against base `main`, head `0d55e6b`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>
