@@ -1,5 +1,10 @@
 # dbt-preflight
 
+[![PyPI](https://img.shields.io/pypi/v/dbt-preflight)](https://pypi.org/project/dbt-preflight/)
+[![Python versions](https://img.shields.io/pypi/pyversions/dbt-preflight)](https://pypi.org/project/dbt-preflight/)
+[![CI](https://github.com/JB-Analytica/dbt-preflight/actions/workflows/ci.yml/badge.svg)](https://github.com/JB-Analytica/dbt-preflight/actions/workflows/ci.yml)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](https://github.com/JB-Analytica/dbt-preflight/blob/main/LICENSE)
+
 Built and maintained by [JB Analytica](https://www.jbanalytica.com/) — data platform
 architecture and analytics engineering.
 
@@ -14,7 +19,7 @@ This is what a reviewer sees when a pull request renames `customer_id` in a stag
 
 > ## 🛫 dbt preflight: ❌ failed
 >
-> Built 6 of 8 models (1 changed) against synthetic data · 33 tests · 0 convention issues · 3.6 s
+> Built 7 of 8 models (1 changed) against synthetic data · 42 tests · 0 convention issues · 11 s
 >
 > ### Changed models
 >
@@ -27,11 +32,17 @@ This is what a reviewer sees when a pull request renames `customer_id` in a stag
 > - `stg_webshop__orders` — ✅ built, 1 failing test
 > - `dim_customers` — ⏭️ skipped (an upstream model or test failed)
 >
+> Also rebuilt, no new issues: `stg_webshop__products`, `stg_webshop__order_items`, `fct_order_items`, `int_orders__items_aggregated`, `fct_orders`.
+>
 > ### Failing tests
 >
-> - ❌ `not_null` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
 > - ❌ `unique` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
+> - ❌ `not_null` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
 > - ❌ relationships `stg_webshop__orders.customer_id` → `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
+
+Each failing test folds a `<details>` block under it with a plain-English reading of the
+error (*this model has no column `customer_id`: renamed or dropped upstream?*), dbt's own
+test name, and the compiled SQL that failed.
 
 The comment is updated in place on every push, so a pull request carries one preflight
 comment, not a stack of them.
@@ -245,7 +256,7 @@ conventions:
 ## Running it locally
 
 ```bash
-uv tool install dbt-preflight
+uv tool install dbt-preflight     # or: pipx install dbt-preflight, pip install dbt-preflight
 cd your-repo
 dbt-preflight run --base-ref origin/main
 ```
@@ -290,6 +301,12 @@ the action's self-check run against.
 uv sync --extra dev
 uv run poe check          # ruff, ty, pytest
 ```
+
+Bugs and feature requests belong in
+[the issue tracker](https://github.com/JB-Analytica/dbt-preflight/issues). A pull request
+is welcome; `poe check` has to be green and, if you change what the comment says,
+`uv run python scripts/scenarios.py` re-records the six scenarios so the change shows up
+in `docs/scenarios/`.
 
 ## Licence
 
