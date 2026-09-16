@@ -173,7 +173,14 @@ Preflight needs to know what the source tables look like. Three options:
    `not_null` tests on the alias it gave a source column (`id as customer_id`, tested as
    `customer_id`) carry back to that source column too - `pk` when both are declared,
    `unique`/`not null` alone otherwise - so a project that tests its staging models instead
-   of its sources still gets keys in the derived schema.
+   of its sources still gets keys in the derived schema. A `cast()` around the column is
+   seen through, because a staging layer over a schemaless loader is where types get
+   pinned; `lower(email)` is not, because it changes the value rather than the type.
+
+   An `accepted_values` test carries back the same way, and the column is generated as an
+   enum of exactly those values, so a column the project treats as a vocabulary is not
+   filled with placeholder text its own test then rejects. Only a string column becomes an
+   enum, since an enum's values are strings.
 
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.

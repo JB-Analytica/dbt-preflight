@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from dbt_preflight.manifest import Manifest, SourceTable
@@ -668,3 +670,148 @@ def test_alias_map_sees_through_casts_only() -> None:
     assert carried("coalesce(visits, 0) as visits") == {}
     assert carried("cast(lower(email) as varchar) as email") == {}
     assert carried("cast(coalesce(visits, 0) as bigint) as visits") == {}
+
+
+def _accepted_values_test(name: str, column: str, attached: str, values: list) -> dict:
+    return {
+        "resource_type": "test",
+        "name": name,
+        "column_name": column,
+        "attached_node": attached,
+        "depends_on": {"nodes": [attached]},
+        "test_metadata": {
+            "name": "accepted_values",
+            "kwargs": {"column_name": column, "values": values},
+        },
+        "original_file_path": "models/_models.yml",
+    }
+
+
+def test_accepted_values_become_an_enum_the_generator_draws_from() -> None:
+    """An `accepted_values` test names the only values a column may hold, and it arrives
+    with its answer attached. Without this the generator fills the column with placeholder
+    text and the project's own test rejects every row."""
+    src = "source.p.li.posts"
+    stg = "model.p.stg_li__posts"
+    sql = """
+    select
+        cast(id as bigint) as post_id,
+        cast(lifecycle_state as varchar) as lifecycle_state,
+        cast(visibility as varchar) as visibility,
+        cast(views as bigint) as views
+    from {{ source('li', 'posts') }}
+    """
+    raw = {
+        "sources": {src: _source("li", "posts")},
+        "nodes": {
+            stg: _staging_model("stg_li__posts", "staging/stg_li__posts.sql", [src], sql),
+            "test.p.a1": _accepted_values_test(
+                "av_lifecycle", "lifecycle_state", stg, ["PUBLISHED", "DRAFT"]
+            ),
+            "test.p.a2": _accepted_values_test(
+                "av_visibility", "visibility", stg, ["PUBLIC", "member-only"]
+            ),
+            # A numeric column: an enum's values are strings, so turning this into one
+            # would change the column's type to satisfy a test. Left alone on purpose.
+            "test.p.a3": _accepted_values_test("av_views", "views", stg, [1, 2, 3]),
+        },
+        "parent_map": {stg: [src]},
+        "child_map": {src: [stg]},
+    }
+    dbml, _ = derive_dbml(Manifest.from_dict(raw))
+    assert 'Enum posts__lifecycle_state {\n  "PUBLISHED"\n  "DRAFT"\n}' in dbml
+    assert 'Enum posts__visibility {\n  "PUBLIC"\n  "member-only"\n}' in dbml
+    assert "  lifecycle_state posts__lifecycle_state" in dbml
+    assert "  visibility posts__visibility" in dbml
+    assert "  views int" in dbml and "posts__views" not in dbml
+    # The enum has to be defined before the table that uses it.
+    assert dbml.index("Enum posts__lifecycle_state") < dbml.index("Table posts")
+
+
+def test_accepted_values_on_the_source_itself_is_used_too() -> None:
+    """A project that declares the test on the source column rather than on staging gets
+    the same fixtures."""
+    src = "source.p.li.posts"
+    source = _source("li", "posts")
+    source["columns"] = {
+        "id": {"name": "id", "data_type": "int64"},
+        "lifecycle_state": {"name": "lifecycle_state", "data_type": "string"},
+    }
+    raw = {
+        "sources": {src: source},
+        "nodes": {
+            "test.p.av": {
+                "resource_type": "test",
+                "name": "av_state",
+                "column_name": "lifecycle_state",
+                "attached_node": src,
+                "depends_on": {"nodes": [src]},
+                "test_metadata": {
+                    "name": "accepted_values",
+                    "kwargs": {"column_name": "lifecycle_state", "values": ["on", "off"]},
+                },
+                "original_file_path": "models/_sources.yml",
+            }
+        },
+        "parent_map": {},
+        "child_map": {},
+    }
+    dbml, _ = derive_dbml(Manifest.from_dict(raw))
+    assert 'Enum posts__lifecycle_state {\n  "on"\n  "off"\n}' in dbml
+    assert "  lifecycle_state posts__lifecycle_state" in dbml
+
+
+def test_unusable_accepted_values_leave_the_column_alone() -> None:
+    """A value that cannot survive a DBML enum block, or a test with no values at all,
+    generates as it would have without the test rather than emitting a broken schema."""
+    from dbt_preflight.manifest import TestNode
+    from dbt_preflight.schema import _accepted_values
+
+    def values(raw: object) -> list[str]:
+        return _accepted_values(
+            TestNode("t", "t", "accepted_values", "c", None, [], {"values": raw}, "f.yml")
+        )
+
+    assert values(["a", "b"]) == ["a", "b"]
+    assert values([1, 2]) == ["1", "2"]
+    assert values([]) == []
+    assert values(None) == []
+    assert values(["ok", 'has"quote']) == []
+    assert values(["ok", "has}brace"]) == []
+    assert values(["ok", "has\nnewline"]) == []
+    assert values(["ok", ""]) == []
+    assert values(["ok", True]) == []
+
+
+def test_generated_fixtures_only_hold_the_accepted_values(tmp_path: Path) -> None:
+    """The whole point: the data model2data generates for the derived schema satisfies the
+    project's own accepted_values test."""
+    from model2data.generate.core import generate_data_from_dbml
+    from model2data.parse.dbml import parse_dbml
+
+    src = "source.p.li.posts"
+    stg = "model.p.stg_li__posts"
+    sql = """
+    select
+        cast(id as bigint) as post_id,
+        cast(lifecycle_state as varchar) as lifecycle_state
+    from {{ source('li', 'posts') }}
+    """
+    raw = {
+        "sources": {src: _source("li", "posts")},
+        "nodes": {
+            stg: _staging_model("stg_li__posts", "staging/stg_li__posts.sql", [src], sql),
+            "test.p.a1": _accepted_values_test(
+                "av_lifecycle", "lifecycle_state", stg, ["PUBLISHED", "DRAFT"]
+            ),
+        },
+        "parent_map": {stg: [src]},
+        "child_map": {src: [stg]},
+    }
+    dbml, _ = derive_dbml(Manifest.from_dict(raw))
+    path = tmp_path / "derived.dbml"
+    path.write_text(dbml, encoding="utf-8")
+    tables, refs = parse_dbml(path)
+    generated = generate_data_from_dbml(tables=tables, refs=refs, base_rows=50, seed=42)
+    produced = set(generated["posts"]["lifecycle_state"])
+    assert produced <= {"PUBLISHED", "DRAFT"} and produced
