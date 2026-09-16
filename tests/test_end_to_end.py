@@ -261,3 +261,35 @@ def test_seed_only_project_runs_without_fixtures(tmp_path: Path) -> None:
     assert "## 🛫 dbt preflight: ✅ passed" in body
     assert "| `customers` | ✅ built | 3 | 2 passed |" in body
     assert "The project declares no sources, so its seeds were the only input" in body
+
+
+def test_model_and_test_order_is_stable_across_runs(example_copy: Path, tmp_path: Path) -> None:
+    """dbt finishes models in whatever order its threads land in. The comment is updated in
+    place on every push, so anything ordered by that would churn with no change behind it."""
+    bodies, model_orders = [], []
+    for i in range(2):
+        comment = tmp_path / f"comment{i}.md"
+        summary_path = tmp_path / f"summary{i}.json"
+        result = CliRunner().invoke(
+            app,
+            [
+                "run",
+                "--repo-root",
+                str(example_copy),
+                "--config",
+                str(example_copy / ".dbt-preflight.yml"),
+                "--comment-file",
+                str(comment),
+                "--summary-file",
+                str(summary_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        summary = json.loads(summary_path.read_text())
+        model_orders.append([m["name"] for m in summary["models"]])
+        # The elapsed time is the one line that legitimately differs between two runs.
+        bodies.append("\n".join(ln for ln in comment.read_text().splitlines() if " · " not in ln))
+
+    assert model_orders[0] == sorted(model_orders[0])
+    assert model_orders[0] == model_orders[1]
+    assert bodies[0] == bodies[1]

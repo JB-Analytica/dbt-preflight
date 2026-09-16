@@ -192,6 +192,8 @@ def _assemble(
         if m.status == SKIPPED:
             m.message = m.message or "upstream model failed"
     report.models = list(by_model.values())
+    # Failing tests come off the same unordered results; keep them stable for the same reason.
+    report.tests.sort(key=lambda t: (t.model, t.name))
 
 
 @app.command()
@@ -438,6 +440,11 @@ def _build_and_check(
     for uid in changed_ids:
         if uid not in selected_ids and uid in manifest.models:
             selected_ids.append(uid)
+    # dbt returns results in thread-completion order, which differs from run to run. The
+    # comment is updated in place on every push, so that order would reshuffle its model
+    # lists with no change behind it, and the summary JSON with them. Order by model name
+    # once, here, and every list downstream (rows, "Also rebuilt", violations) is stable.
+    selected_ids.sort(key=lambda uid: manifest.models[uid].name)
     _assemble(
         report, manifest, outcome, changed_ids, selected_ids, project_relpath, hook is not None
     )

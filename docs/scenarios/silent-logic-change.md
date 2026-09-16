@@ -9,7 +9,7 @@ Expected: **pass**. Got: **pass**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ✅ passed
 
-Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 convention issues · 10 s
+Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 convention issues · 9.0 s
 
 ### Changed models
 
@@ -17,7 +17,7 @@ Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 conventi
 | --- | --- | ---: | --- |
 | `dim_customers` | ✅ built | 150 | 7 passed |
 
-Also rebuilt, no new issues: `stg_webshop__customers`, `stg_webshop__orders`, `stg_webshop__order_items`, `fct_order_items`, `int_orders__items_aggregated` and 1 more.
+Also rebuilt, no new issues: `fct_order_items`, `fct_orders`, `int_orders__items_aggregated`, `stg_webshop__customers`, `stg_webshop__order_items` and 1 more.
 
 ### What changed in the output
 
@@ -43,7 +43,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `c0975e0`.
+Compared against base `main`, head `0d55e6b`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>

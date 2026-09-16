@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-16
+
 ### Added
 
 - Metrics whose inputs live on different models are evaluated. A `ratio` or `derived`
@@ -105,6 +107,14 @@ All notable changes to this project are documented here. The format follows
   alone otherwise - so a project that tests its staging models rather than its sources
   still gets keys in the derived schema. A source column named `id` was already the
   primary key regardless.
+
+### Fixed
+
+- The comment no longer reshuffles between runs. Model lists (the changed-models table,
+  "Unchanged models this change breaks", "Also rebuilt") and convention violations followed
+  dbt's thread-completion order, so a push that changed nothing could still rewrite the
+  comment's lists, and the summary JSON with them. Everything a reader sees is ordered by
+  model name, and failing tests by model and test name.
 
 ### Changed
 
