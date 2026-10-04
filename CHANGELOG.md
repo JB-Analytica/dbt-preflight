@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Requires model2data 1.10.3 or newer, the first release that promises byte-identical
+  output for the same schema and seed, and the lock now tests against 1.11.0 (it had stayed
+  on 1.7.1, while a fresh install already resolved the newest release).
+
 ## [0.3.0] - 2026-09-16
 
 ### Added
