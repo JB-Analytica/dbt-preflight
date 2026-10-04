@@ -14,9 +14,20 @@ All notable changes to this project are documented here. The format follows
   11 September covered full builds alone. The selection is now closed over the seeds and
   snapshots the selected models read, on both branches, and an edited seed counts as a
   change to the models that read it.
+- Three schema-derivation bugs found on a real Snowflake project: two sources declaring the
+  same table name crashed the run (the clash now gets `<source>__<identifier>`), a bare
+  `date` column was guessed as a foreign key to a `dates` table, and in a model reading
+  several sources every unqualified column was attributed to every source. A model2data
+  error while reading the derived schema is now a readable `SchemaError`. On a fork of
+  mattermost-data-warehouse a run went from 0 of 10 models built to 7.
 
 ### Changed
 
+- **The house conventions are opt-in.** A `.dbt-preflight.yml` no longer turns the `jba`
+  preset on at full strength by itself: without a `conventions:` block the rules run as
+  warnings, exactly as they do with no config file at all. Add `conventions: {preset: jba}`
+  to keep them as errors. A config file written only for `project_dir` and `dialect` had
+  turned fivetran/dbt_shopify into 263 convention errors.
 - A failing test is judged against the base branch. The base now runs the same tests on
   the same fixtures, before the pull request is built, and a test fails the check only
   when it is new, passed on the base, or fails on more rows than it did there. One that
