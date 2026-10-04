@@ -186,10 +186,14 @@ def _assemble(
             if r.status in {"fail", "error", "warn"}:
                 if m is not None:
                     owner = m.name
-                elif test is not None and test.attached_node in (
-                    manifest.seeds | manifest.snapshots
+                elif test is not None and (
+                    test.attached_node in manifest.models
+                    or test.attached_node in manifest.seeds
+                    or test.attached_node in manifest.snapshots
                 ):
-                    owner = manifest.node_name(test.attached_node)  # a seed's own test
+                    # A seed's or snapshot's own test, or one on an ephemeral model: none
+                    # of them has a row of its own.
+                    owner = manifest.node_name(test.attached_node)
                 else:
                     owner = "(unknown)"
                 report.tests.append(
@@ -401,7 +405,9 @@ def _run(
                 f"   {n_models} models, {n_inputs} sources/seeds/snapshots and {n_tests} tests "
                 f"changed against {base_ref}"
             )
-            if not affected:
+            # Not just models: a test added on a seed, or an edited snapshot nothing reads,
+            # still has something to build and run.
+            if not affected_nodes:
                 report.nothing_changed = True
                 return
             select: list[str] | None = [manifest.node_name(uid) for uid in affected_nodes]
@@ -410,8 +416,21 @@ def _run(
                 f"   building {len(affected)} models the change can reach"
                 + (f", and the {loads} seeds/snapshots they read" if loads else "")
             )
+            report.shared_snapshots = sorted(
+                manifest.node_name(u)
+                for u in affected_nodes
+                if u in manifest.fixed_schema_snapshots
+            )
             base = _build_base(
-                config, report, base_project, profiles_dir, workdir, db_path, select, timer
+                config,
+                report,
+                base_project,
+                profiles_dir,
+                workdir,
+                db_path,
+                select,
+                modified,
+                timer,
             )
         else:
             changed_ids = set(manifest.models)
@@ -445,9 +464,13 @@ class _BaseBuild:
     # could not run, which leaves every head failure counted, exactly as before.
     tests: dict[str, NodeResult] = field(default_factory=dict)
 
-    @property
-    def failing_test_names(self) -> list[str]:
-        return sorted({r.name for r in self.tests.values() if r.status in FAILING})
+    def failing_test_selectors(self, head: Manifest) -> list[str]:
+        """Exact selectors for the head's copies of the tests that fail on the base."""
+        return sorted(
+            head.selector(uid)
+            for uid, r in self.tests.items()
+            if r.status in FAILING and uid in head.fqns
+        )
 
 
 def _build_base(
@@ -458,6 +481,7 @@ def _build_base(
     workdir: Path,
     db_path: Path,
     select: list[str],
+    modified: set[str],
     timer: _StepTimer,
 ) -> _BaseBuild | None:
     """Build the base branch's side of the selection, then run its tests.
@@ -465,8 +489,17 @@ def _build_base(
     Tables first, tests after, in two dbt invocations rather than one `dbt build`: a test
     that fails on the base must not skip what depends on it there either, or the tests
     downstream of it would have no base result to be compared with.
+
+    A test the pull request modified keeps no base result: its unique id survives an
+    edit to a singular test's SQL, a unit test's rows or a generic test's config, so the
+    base result would describe a different test. Snapshots with a fixed `target_schema`
+    are left out, with everything downstream of them: building them here would leave the
+    pull request merging its snapshot onto the base's rows in the same table.
     """
     base_state = Manifest.load(workdir / "base_target" / "manifest.json")
+    shared = {u for u in base_state.fixed_schema_snapshots if base_state.snapshots[u] in select}
+    excluded = shared | base_state.descendants(shared)
+    exclude = [base_state.selector(u) for u in sorted(excluded) if u in base_state.fqns]
     on_base = {base_state.node_name(u) for u in base_state.models}
     on_base |= set(base_state.seeds.values()) | set(base_state.snapshots.values())
     names = [n for n in select if n in on_base]
@@ -487,16 +520,23 @@ def _build_base(
     # `+`: the base may read an ancestor the head no longer does, which the head's
     # selection, closed over the head's graph, would not include.
     tables = runner.build(
-        [f"+{n}" for n in names], hook, exclude_resource_types=["test", "unit_test"]
+        [f"+{n}" for n in names],
+        hook,
+        exclude=exclude,
+        exclude_resource_types=["test", "unit_test"],
     )
     if tables.error:
         _say(f"   ⚠️  base build failed, no diff and no base test results: {tables.error}")
         return None
-    tests = runner.build(names, hook, command="test")
+    tests = runner.build(names, hook, command="test", exclude=exclude)
     if tests.error:
         _say(f"   ⚠️  base tests could not run, every head failure counts: {tests.error}")
     built = sum(1 for r in tables.results if r.status == "success")
-    results = {r.unique_id: r for r in tests.results if r.resource_type in {"test", "unit_test"}}
+    results = {
+        r.unique_id: r
+        for r in tests.results
+        if r.resource_type in {"test", "unit_test"} and r.unique_id not in modified
+    }
     failing = sum(1 for r in results.values() if r.status in FAILING)
     timer.mark(
         f"   base branch: {built} nodes built, {len(results)} tests, {failing} failing there"
@@ -523,30 +563,17 @@ def _build_and_check(
     # A test already failing on the base branch is left out of the build and run after
     # it, on its own: inside `dbt build` its failure would skip every model downstream,
     # so the rest of the pull request would go unchecked for something it did not do.
-    known_failing = base.failing_test_names if base is not None and select is not None else []
+    known_failing = (
+        base.failing_test_selectors(manifest) if base is not None and select is not None else []
+    )
     outcome = head_runner.build(select, hook, exclude=known_failing)
     if outcome.error:
         raise DbtError(outcome.error)
-    if known_failing:
+    if base is not None and known_failing:
         later = head_runner.build(known_failing, hook, command="test")
         if later.error:
             raise DbtError(later.error)
-        # What `dbt build` would have done with them: a test whose model did not build is
-        # skipped, not reported, since its failure says nothing the build error does not.
-        built_nodes = {
-            r.unique_id
-            for r in outcome.results
-            if r.resource_type in {"model", "seed", "snapshot"} and r.status == "success"
-        }
-        outcome.results += [
-            r
-            for r in later.results
-            if all(
-                d in built_nodes
-                for d in r.depends_on
-                if d.split(".", 1)[0] in {"model", "seed", "snapshot"}
-            )
-        ]
+        _fold_in_later_tests(manifest, outcome, later.results, base)
     if hook is not None:
         report.untranspiled = dict(hook.unparsed)
         for name, why in hook.unparsed.items():
@@ -604,6 +631,60 @@ def _build_and_check(
     timer.mark(f"   {len(report.violations)} convention issues")
 
 
+_TABLE_KINDS = {"model", "seed", "snapshot"}
+
+
+def _fold_in_later_tests(
+    manifest: Manifest, outcome: RunOutcome, later: list[NodeResult], base: _BaseBuild
+) -> None:
+    """Merge the tests run after the build into its results, as `dbt build` would have.
+
+    A test whose model did not build is dropped: dbt build would have skipped it, and its
+    failure says nothing the build error does not. An ephemeral model never has a result
+    of its own, so one counts as built when everything it reads did.
+
+    A test that fails worse than on the base is the change's doing, and inside one
+    `dbt build` it would have skipped everything downstream of the models it reads. That
+    is replayed here: those models are reported as skipped, and their tests dropped, so
+    the comment says what a single build would have said.
+    """
+    status = {r.unique_id: r.status for r in outcome.results if r.resource_type in _TABLE_KINDS}
+
+    def built(uid: str) -> bool:
+        if uid in status:
+            return status[uid] == "success"
+        model = manifest.models.get(uid)
+        if model is None or model.materialized != "ephemeral":
+            return False  # not in this build at all
+        # Inlined into whatever reads it: as good as the nodes it reads.
+        return all(built(d) for d in model.depends_on if d.split(".", 1)[0] in _TABLE_KINDS)
+
+    def parents(r: NodeResult) -> set[str]:
+        return {d for d in r.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
+
+    kept = [r for r in later if all(built(d) for d in parents(r))]
+    worse = [
+        r
+        for r in kept
+        if r.status in FAILING and not is_preexisting(r, base.tests.get(r.unique_id))
+    ]
+    skipped: set[str] = set()
+    for r in worse:
+        skipped |= manifest.descendants(parents(r))
+    outcome.results += kept
+    if not skipped:
+        return
+    results: list[NodeResult] = []
+    for r in outcome.results:
+        if r.resource_type in _TABLE_KINDS and r.unique_id in skipped:
+            r.status = "skipped"
+            r.message = "an upstream test failed"
+        elif r.resource_type in {"test", "unit_test"} and parents(r) & skipped:
+            continue
+        results.append(r)
+    outcome.results = results
+
+
 def _diff_against_base(
     config: PreflightConfig,
     report: PreflightReport,
@@ -625,7 +706,14 @@ def _diff_against_base(
             continue
         compare.add(uid)
         frontier += [c for c in manifest.child_map.get(uid, []) if c in manifest.models]
-    compare_ids = sorted(uid for uid in compare if uid in built)
+    # Downstream of a snapshot with a fixed schema there is no base build to compare with.
+    shared = {
+        u
+        for u in manifest.fixed_schema_snapshots
+        if manifest.snapshots[u] in report.shared_snapshots
+    }
+    unshared = manifest.descendants(shared)
+    compare_ids = sorted(uid for uid in compare if uid in built and uid not in unshared)
     if not compare_ids:
         return
 

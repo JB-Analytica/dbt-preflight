@@ -27,7 +27,10 @@ All notable changes to this project are documented here. The format follows
   `expression_is_true` test that fails on both branches used to skip `customers`,
   `orders` and `order_items` and list them as broken by the change. *Unchanged models
   this change breaks* lists only models with failures the change caused. A model that
-  fails to build, and a test failure the change caused, still skip what depends on them.
+  fails to build, and a test failure the change caused (new, edited, or worse than on the
+  base), still skip what depends on them. A test the pull request edited is never
+  compared with its base result, since dbt keeps its unique id through an edit to a
+  singular test's SQL, a unit test's rows or a generic test's config.
   Runs without `--base-ref` behave as before.
 - The summary JSON adds `preexisting_failing_tests`, `counts.tests.failed_on_base`,
   per-model `tests_failed_on_base`, and `base_failures` on each failing test.
@@ -35,7 +38,11 @@ All notable changes to this project are documented here. The format follows
   `schema_version` stays 1.
 - A pull request that only adds or edits a test now runs it: tests count toward
   `state:modified`, and the model a modified test is declared on is a changed model.
-  Before, such a pull request reported that nothing had changed.
+  Before, such a pull request reported that nothing had changed. The same holds for a test
+  added on a seed and for an edited snapshot no model reads.
+- A snapshot with a legacy `target_schema` writes to the same table on both branches, so
+  it is no longer built on the base: it, and every model reading it, is built for the pull
+  request only, not compared with the base, and the comment says so.
 - The base branch is built once, before the pull request, and covers the whole selection
   rather than only what the diff compares. A pull-request run now makes one more dbt
   invocation on the base (its tests), and one more on the head when any test already

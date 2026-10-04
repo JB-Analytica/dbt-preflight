@@ -158,6 +158,11 @@ class Manifest:
     seeds: dict[str, str] = field(default_factory=dict)
     snapshots: dict[str, str] = field(default_factory=dict)
     unit_tests: dict[str, UnitTestNode] = field(default_factory=dict)
+    # Every node's dbt fully qualified name, for selecting exactly one node (see `selector`).
+    fqns: dict[str, list[str]] = field(default_factory=dict)
+    # Snapshots with a legacy `target_schema`: the schema is fixed, not derived from the
+    # target, so the base branch and the pull request would write the same table.
+    fixed_schema_snapshots: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls, path: Path) -> Manifest:
@@ -218,6 +223,28 @@ class Manifest:
         out |= {u.model_uid for uid, u in self.unit_tests.items() if uid in test_ids}
         return {uid for uid in out if uid in self.models}
 
+    def selector(self, uid: str) -> str:
+        """A dbt selector that matches exactly this node, and nothing else.
+
+        A bare name is matched against every node's fqn leaf, so a singular test called
+        `orders` also selects the model `orders`, and a package node of the same name.
+        The node's full fqn pins the package and folder; the resource type keeps a test
+        apart from a model whose file sits at the same relative path.
+        """
+        rtype = uid.split(".", 1)[0]
+        return f"resource_type:{rtype},fqn:{'.'.join(self.fqns[uid])}"
+
+    def descendants(self, uids: set[str]) -> set[str]:
+        """Every model, seed and snapshot downstream of `uids`, not counting `uids`."""
+        out: set[str] = set()
+        frontier = list(uids)
+        while frontier:
+            for child in self.child_map.get(frontier.pop(), []):
+                if self._buildable(child) and child not in out and child not in uids:
+                    out.add(child)
+                    frontier.append(child)
+        return out
+
     def node_name(self, uid: str) -> str:
         """The name dbt selects a model, seed or snapshot by."""
         if uid in self.models:
@@ -252,12 +279,21 @@ class Manifest:
         tests: dict[str, TestNode] = {}
         seeds: dict[str, str] = {}
         snapshots: dict[str, str] = {}
+        fixed_schema_snapshots: set[str] = set()
+        fqns: dict[str, list[str]] = {
+            uid: [str(part) for part in node["fqn"]]
+            for section in ("nodes", "unit_tests")
+            for uid, node in (raw.get(section) or {}).items()
+            if node.get("fqn")
+        }
         for uid, node in raw.get("nodes", {}).items():
             rtype = node.get("resource_type")
             if rtype == "seed":
                 seeds[uid] = node["name"]
             elif rtype == "snapshot":
                 snapshots[uid] = node["name"]
+                if (node.get("config") or {}).get("target_schema"):
+                    fixed_schema_snapshots.add(uid)
             elif rtype == "model":
                 models[uid] = ModelNode(
                     unique_id=uid,
@@ -363,6 +399,8 @@ class Manifest:
             seeds=seeds,
             snapshots=snapshots,
             unit_tests=unit_tests,
+            fqns=fqns,
+            fixed_schema_snapshots=fixed_schema_snapshots,
         )
 
     def tests_for_model(self, model_uid: str) -> list[TestNode]:

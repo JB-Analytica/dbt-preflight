@@ -169,9 +169,149 @@ def test_a_test_failing_on_more_rows_than_on_base_blocks(webshop: Path, tmp_path
     code, body, summary = _run(webshop, tmp_path)
     assert code == 1
     assert summary["verdict"] == "failed"
-    # The mart's own accepted_values test rejects the new status too: new, so it counts.
-    by_name = {t["readable_name"]: t for t in summary["failing_tests"]}
-    worse = by_name["`accepted_values` on `stg_webshop__orders.order_status`"]
-    assert by_name["`accepted_values` on `fct_orders.order_status`"]["base_failures"] is None
+    [worse] = summary["failing_tests"]
+    assert worse["readable_name"] == "`accepted_values` on `stg_webshop__orders.order_status`"
+    # Worse than on the base, so it is the change's failure: what reads the model is
+    # skipped, as one `dbt build` would have done, and blamed on the change.
+    statuses = _statuses(summary)
+    for downstream in ("fct_orders", "fct_order_items", "dim_customers"):
+        assert statuses[downstream] == "skipped", statuses
+    assert "Unchanged models this change breaks" in body
     assert worse["failures"] > worse["base_failures"] > 0
     assert f"({worse['base_failures']} on the base branch)" in body
+
+
+def _write(repo: Path, rel: str, text: str) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+CANCELLED_CHECK = "dbt/tests/assert_no_cancelled_orders.sql"
+
+
+def test_a_rewritten_singular_test_is_not_judged_by_its_old_self(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # A singular test keeps its unique id when its SQL changes. Failing on fewer rows than
+    # the old version did must not read as "already failing": it is a different test.
+    _write(
+        webshop,
+        CANCELLED_CHECK,
+        "select * from {{ ref('stg_webshop__orders') }} where order_status = 'cancelled'\n",
+    )
+    _commit_base_then_branch(webshop)
+    _edit(webshop, CANCELLED_CHECK, "\n", " and order_id % 2 = 0\n")
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["verdict"] == "failed"
+    [rewritten] = summary["failing_tests"]
+    assert rewritten["name"] == "assert_no_cancelled_orders"
+    assert rewritten["base_failures"] is None
+    assert summary["preexisting_failing_tests"] == []
+
+
+def test_a_test_named_like_a_model_does_not_take_the_model_with_it(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # Excluding the failing singular test `dim_customers` by bare name would exclude the
+    # model `dim_customers` too, and the model would never build.
+    _write(
+        webshop,
+        "dbt/tests/dim_customers.sql",
+        "select customer_id from {{ ref('dim_customers') }} where customer_id <= 3\n",
+    )
+    _commit_base_then_branch(webshop)
+    _edit(
+        webshop,
+        "dbt/models/marts/dim_customers.sql",
+        "with customers as",
+        "-- a harmless comment\nwith customers as",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 0, body
+    assert summary["verdict"] == "passed_with_warnings"
+    assert _statuses(summary)["dim_customers"] == "built"
+    assert [t["name"] for t in summary["preexisting_failing_tests"]] == ["dim_customers"]
+    assert summary["failing_tests"] == []
+
+
+def test_a_worse_failure_on_an_ephemeral_model_is_not_lost(webshop: Path, tmp_path: Path) -> None:
+    # An ephemeral model never has a run result of its own. A test on it that already
+    # fails on the base, and fails worse on the pull request, must still be reported.
+    _write(
+        webshop,
+        "dbt/models/intermediate/int_orders__statuses.sql",
+        "{{ config(materialized='ephemeral') }}\n"
+        "select case when order_status = 'cancelled' then null else order_id end as order_id\n"
+        "from {{ ref('stg_webshop__orders') }}\n",
+    )
+    _write(
+        webshop,
+        "dbt/models/intermediate/_int_orders__statuses.yml",
+        "version: 2\nmodels:\n  - name: int_orders__statuses\n    columns:\n"
+        "      - name: order_id\n        data_tests:\n          - not_null\n",
+    )
+    _commit_base_then_branch(webshop)
+    # Delivered orders now read as cancelled: fine by staging's own tests, but more rows
+    # for the ephemeral model's not_null test to fail on.
+    _edit(
+        webshop,
+        STG_ORDERS,
+        "        status as order_status,",
+        "        case when status = 'delivered' then 'cancelled' else status end as order_status,",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    [worse] = summary["failing_tests"]
+    assert worse["readable_name"] == "`not_null` on `int_orders__statuses.order_id`"
+    assert worse["failures"] > worse["base_failures"] > 0
+
+
+def test_a_test_added_on_a_seed_alone_still_runs(tmp_path: Path) -> None:
+    # No model changed, only a seed's tests: that is still something to build and run.
+    repo = tmp_path / "seedshop"
+    shutil.copytree(FIXTURES / "seed_only", repo)
+    _commit_base_then_branch(repo)
+    _write(
+        repo,
+        "seeds/_seeds.yml",
+        "version: 2\nseeds:\n  - name: raw_customers\n    columns:\n      - name: country\n"
+        "        data_tests:\n          - accepted_values:\n              arguments:\n"
+        "                values: [BE]\n",
+    )
+
+    code, body, summary = _run(repo, tmp_path, config=False)
+    assert summary["verdict"] == "failed", body
+    [new] = summary["failing_tests"]
+    assert new["model"] == "raw_customers"
+    assert new["failures"] == 1
+
+
+def test_a_snapshot_with_a_fixed_schema_is_built_for_the_head_only(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # A legacy `target_schema` is the same on both targets: built on the base first, the
+    # head's snapshot would merge onto the base's rows instead of starting fresh.
+    _write(
+        webshop,
+        "dbt/snapshots/orders_snapshot.sql",
+        "{% snapshot orders_snapshot %}\n"
+        "{{ config(target_schema='snapshots', unique_key='order_id', strategy='check',"
+        " check_cols='all') }}\n"
+        "select * from {{ ref('stg_webshop__orders') }}\n"
+        "{% endsnapshot %}\n",
+    )
+    _commit_base_then_branch(webshop)
+    _edit(webshop, STG_ORDERS, "with source as", "-- a harmless comment\nwith source as")
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 0, body
+    assert "`orders_snapshot` writes to a fixed `target_schema`" in body
+    # The base still built, with the snapshot excluded by an exact selector: the staging
+    # model it reads has a base to compare with.
+    diff = next(d for d in summary["diffs"] if d["name"] == "stg_webshop__orders")
+    assert diff["base_exists"] and diff["rows_differing"] == 0

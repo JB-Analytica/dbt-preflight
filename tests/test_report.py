@@ -860,3 +860,13 @@ def test_preexisting_details_are_capped() -> None:
     section = render(report).split("Already failing on the base branch (14)")[1]
     assert section.count("<summary>details</summary>") == 10
     assert "- ⚪ `expression_is_true` on `m13`: 1 failing row" in section
+
+
+def test_snapshots_with_a_fixed_schema_are_named() -> None:
+    report = PreflightReport(
+        models=[_model("dim_customers")], base_ref="origin/main", shared_snapshots=["orders_snap"]
+    )
+    assert (
+        "`orders_snap` writes to a fixed `target_schema` that both branches would share, so it "
+        "was built for this pull request only" in render(report)
+    )

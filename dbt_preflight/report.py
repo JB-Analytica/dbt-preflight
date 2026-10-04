@@ -80,6 +80,8 @@ class PreflightReport:
     note: str | None = None  # one line of context under the summary, e.g. why all models ran
     dialect: str | None = None  # SQL dialect transpiled to DuckDB, when one was
     untranspiled: dict[str, str] = field(default_factory=dict)  # model -> why sqlglot gave up
+    # Snapshots with a legacy fixed `target_schema`, built for the pull request only.
+    shared_snapshots: list[str] = field(default_factory=list)
     diffs: list[ModelDiff] = field(default_factory=list)  # base vs head, for changed models
     metrics_defined: int = 0  # how many metric definitions the project has, across sources
 
@@ -386,6 +388,16 @@ def render(report: PreflightReport) -> str:
     lines.append("")
     if report.note:
         lines.append(report.note)
+        lines.append("")
+    if report.shared_snapshots:
+        names = ", ".join(f"`{n}`" for n in report.shared_snapshots)
+        lines.append(
+            f"{names} {'writes' if len(report.shared_snapshots) == 1 else 'write'} to a fixed "
+            "`target_schema` that both branches would share, so "
+            f"{'it was' if len(report.shared_snapshots) == 1 else 'they were'} built for this "
+            "pull request only: the models reading them have no base branch to be compared "
+            "with, and every failing test on them counts."
+        )
         lines.append("")
 
     # Changed models. When there is no base to diff against, every model is "changed".
