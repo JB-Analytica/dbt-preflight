@@ -818,7 +818,9 @@ def test_generated_fixtures_only_hold_the_accepted_values(tmp_path: Path) -> Non
     path.write_text(dbml, encoding="utf-8")
     tables, refs = parse_dbml(path)
     generated = generate_data_from_dbml(tables=tables, refs=refs, base_rows=50, seed=42)
-    produced = set(generated["posts"]["lifecycle_state"])
+    # dbt's accepted_values lets nulls through (`null not in (...)` is never true), and
+    # newer model2data releases leave nulls in a nullable enum column, so only the values count.
+    produced = set(generated["posts"]["lifecycle_state"].dropna())
     assert produced <= {"PUBLISHED", "DRAFT"} and produced
 
 
