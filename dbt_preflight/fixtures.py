@@ -27,7 +27,7 @@ from model2data.utils import normalize_identifier
 
 from dbt_preflight.config import PreflightConfig
 from dbt_preflight.manifest import SourceTable
-from dbt_preflight.schema import InferredSource, ResolvedSchema
+from dbt_preflight.schema import InferredSource, ResolvedSchema, source_table_names
 
 # DBML / model2data types -> DuckDB types for the cast after load.
 _DUCK_TYPES = {
@@ -127,9 +127,14 @@ def build_fixtures(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
     try:
+        table_names = source_table_names(sources)
         for src in sources:
-            key = normalize_identifier(src.identifier)
-            match = by_key.get(key) or by_key.get(normalize_identifier(src.name))
+            # A derived schema writes two same-named source tables under distinct names.
+            match = (
+                by_key.get(normalize_identifier(table_names[src.unique_id]))
+                or by_key.get(normalize_identifier(src.identifier))
+                or by_key.get(normalize_identifier(src.name))
+            )
             if match is None:
                 summary.unmatched_sources.append(f"{src.source_name}.{src.name}")
                 continue

@@ -17,12 +17,15 @@ Three routes to the same thing, a parsed DBML model that model2data can generate
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import sqlglot
 from model2data.parse.dbml import TableDef, parse_dbml
+from model2data.utils import normalize_identifier
 from sqlglot import exp
+from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from dbt_preflight.manifest import Manifest, SourceColumn, SourceTable, TestNode
 
@@ -93,7 +96,38 @@ def _enum_name(table: str, column: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", f"{table}__{column}".lower())
 
 
-def _ref_target(test: TestNode, sources: dict[str, SourceTable]) -> tuple[str, str] | None:
+def source_table_names(sources: Iterable[SourceTable]) -> dict[str, str]:
+    """{source unique_id: the table name its DBML table is written under}.
+
+    The identifier alone when it is unique among the sources; `<source>__<identifier>` when
+    two sources declare the same table name (`ga_traffic_org.report` and
+    `ga_traffic_com.report`), because DBML tables share one namespace and model2data would
+    otherwise refuse the file. `fixtures.build_fixtures` uses the same mapping to load each
+    generated table under the schema and identifier dbt expects for that source."""
+    srcs = list(sources)
+    counts: dict[str, int] = {}
+    for src in srcs:
+        key = normalize_identifier(src.identifier)
+        counts[key] = counts.get(key, 0) + 1
+    # model2data compares names through `normalize_identifier`, so uniqueness is checked there.
+    taken = {key for key, n in counts.items() if n == 1}
+    names: dict[str, str] = {}
+    for src in srcs:
+        if counts[normalize_identifier(src.identifier)] == 1:
+            names[src.unique_id] = src.identifier
+            continue
+        base = re.sub(r"[^A-Za-z0-9_]", "_", f"{src.source_name}__{src.identifier}")
+        name, n = base, 2
+        while normalize_identifier(name) in taken:
+            name, n = f"{base}_{n}", n + 1
+        taken.add(normalize_identifier(name))
+        names[src.unique_id] = name
+    return names
+
+
+def _ref_target(
+    test: TestNode, sources: dict[str, SourceTable], names: dict[str, str]
+) -> tuple[str, str] | None:
     """For a relationships test on a source column, the (table, column) it points at.
 
     Only source-to-source relationships become DBML refs. A relationship to a `ref()`
@@ -106,7 +140,7 @@ def _ref_target(test: TestNode, sources: dict[str, SourceTable]) -> tuple[str, s
         return None
     for src in sources.values():
         if src.source_name == m.group(1) and src.name == m.group(2):
-            return src.identifier, str(field_)
+            return names[src.unique_id], str(field_)
     return None
 
 
@@ -216,9 +250,9 @@ def _guess_type_by_name(name: str) -> str:
     n = name.lower()
     if n in _VARCHAR_NAMES:
         return "varchar"
-    if n.endswith(_TIMESTAMP_SUFFIXES):
+    if n in ("timestamp", "datetime") or n.endswith(_TIMESTAMP_SUFFIXES):
         return "timestamp"
-    if n.endswith(_DATE_SUFFIXES):
+    if n == "date" or n.endswith(_DATE_SUFFIXES):
         return "date"
     if n == "id" or n.endswith("_id"):
         return "int"
@@ -254,28 +288,67 @@ def _pluralize(word: str) -> str:
     return word + "s"
 
 
-def _fk_ref_target(name: str, own: SourceTable, all_sources: list[SourceTable]) -> str | None:
-    """The identifier of another source table this column's name points at, as a
-    foreign key - `customer_id`, or a bare `customer` when a `raw_customers` source
-    exists - so the fixtures can keep referential integrity between them.
+_TEMPORAL_NAMES = {
+    "date",
+    "time",
+    "timestamp",
+    "datetime",
+    "dt",
+    "ts",
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
+    "hour",
+    "minute",
+    "second",
+}
+
+
+def _is_temporal_name(name: str) -> bool:
+    """A date/time-looking column name, which is never a key into another table."""
+    n = name.lower()
+    return (
+        n in _TEMPORAL_NAMES
+        or n.endswith(_TIMESTAMP_SUFFIXES)
+        or n.endswith(_DATE_SUFFIXES)
+        or n.endswith(("_time", "_ts", "_dt"))
+    )
+
+
+def _fk_ref_target(
+    name: str,
+    own: SourceTable,
+    all_sources: list[SourceTable],
+    id_tables: set[str],
+) -> SourceTable | None:
+    """The other source table this column's name points at, as a foreign key -
+    `customer_id`, or a bare `customer` when a `raw_customers` source exists - so the
+    fixtures can keep referential integrity between them.
 
     An `_id` suffix alone is enough to type a column as an integer (handled in
     `_guess_type_by_name`); this only adds the `ref:` when a matching table can
-    actually be found, so an unmatched `_id` column stays an ordinary integer.
+    actually be found, so an unmatched `_id` column stays an ordinary integer. A target
+    must have an `id` column (`id_tables`, by unique_id) because the ref points at it, and
+    a date/time-looking name (`date` next to a `dates` source) is never a key. A table in
+    the same dbt source as the column wins over a same-named one in another source.
     """
     n = name.lower()
-    if n == "id":
+    if n == "id" or _is_temporal_name(n):
         return None
     base = n[: -len("_id")] if n.endswith("_id") else n
     if not base:
         return None
     plural = _pluralize(base)
-    for src in all_sources:
-        if src.unique_id == own.unique_id:
-            continue
+    candidates = [
+        s for s in all_sources if s.unique_id != own.unique_id and s.unique_id in id_tables
+    ]
+    candidates.sort(key=lambda s: s.source_name != own.source_name)
+    for src in candidates:
         basename = _table_basename(src.name)
         if base in (basename, src.name.lower()) or plural in (basename, src.name.lower()):
-            return src.identifier
+            return src
     return None
 
 
@@ -286,7 +359,7 @@ _STRING_FUNCS = (exp.Lower, exp.Upper, exp.Trim, exp.Concat)
 
 
 def _column_hint(col: exp.Column) -> str | None:
-    """ "numeric" or "varchar" if how this column occurrence is used in the SQL signals
+    """ "numeric", "varchar" or "boolean" if how this column occurrence is used in the SQL signals
     a type, independent of its name; the strongest signal short of an explicit cast.
 
     An operand of `/`, `*`, `+`, `-` against a numeric literal, or wrapped in `sum(`,
@@ -294,6 +367,9 @@ def _column_hint(col: exp.Column) -> str | None:
     `lower(`/`upper(`/`trim(`/`concat(`, reads as varchar.
     """
     parent = col.parent
+    # `where opportunity.iswon`, `and not x`: a bare predicate is a boolean.
+    if isinstance(parent, (exp.Where, exp.Not, exp.And, exp.Or)):
+        return "boolean"
     if isinstance(parent, _ARITH_OPS):
         sibling = parent.expression if parent.this is col else parent.this
         if isinstance(sibling, exp.Literal) and sibling.is_number:
@@ -318,7 +394,8 @@ def _resolve_type_and_ref(
     hint: str | None,
     src: SourceTable,
     all_sources: list[SourceTable],
-) -> tuple[str, str | None]:
+    id_tables: set[str],
+) -> tuple[str, SourceTable | None]:
     """The DBML type for an inferred source column, and a foreign-key ref if its name
     points at another source table.
 
@@ -329,13 +406,15 @@ def _resolve_type_and_ref(
     if cast_type:
         return _dbml_type(cast_type), None
 
-    fk_target = _fk_ref_target(name, src, all_sources)
+    fk_target = _fk_ref_target(name, src, all_sources, id_tables)
     is_id_suffix = name.lower() != "id" and name.lower().endswith("_id")
 
     if hint == "numeric":
         return ("int" if _int_name_signal(name.lower()) else "decimal"), fk_target
     if hint == "varchar":
         return "varchar", None
+    if hint == "boolean":
+        return "boolean", None
 
     if is_id_suffix or fk_target is not None:
         return "int", fk_target
@@ -365,10 +444,12 @@ def _model_source_columns(
 
     Both are `None` with no evidence either way. `{{ source(...) }}` and `{{ ref(...) }}`
     calls are swapped for plain identifiers so sqlglot can parse the compiled-looking SQL,
-    then every `exp.Column` in the query is collected: a staging model's `renamed` CTE reads
-    straight off the `source` CTE without qualifying columns, so this is a query-wide walk,
-    not a single-clause one. Columns qualified with another table (a join, or a second
-    source) are excluded. Returns None when the model does not reference this source at
+    then every `exp.Column` in every select scope of the query is considered: a staging
+    model's `renamed` CTE reads straight off the `source` CTE without qualifying columns, so
+    this is a query-wide walk, not a single-clause one. A column counts only when it is
+    qualified by this source's alias, or is unqualified in a scope that reads this source and
+    nothing else (`_column_is_from_target`); an unqualified column in a scope that joins
+    several sources is ambiguous and is left unattributed. Returns None when the model does not reference this source at
     all, or the SQL does not parse - normal for a model this house style would flag as not
     staging.
     """
@@ -414,31 +495,94 @@ def _model_source_columns(
     if tree is None:
         return None
 
-    foreign_aliases = {
-        t.alias_or_name
-        for t in tree.find_all(exp.Table)
-        if t.name.startswith("__preflight_") and t.name != _TARGET_PLACEHOLDER
-    }
-
     columns: dict[str, tuple[str | None, str | None]] = {}
-    for col in tree.find_all(exp.Column):
-        name = col.name.lower()
-        if (
-            not name
-            or name.startswith("__preflight_")
-            or (col.table and col.table in foreign_aliases)
-        ):
-            continue
-        cast_type, hint = columns.get(name, (None, None))
-        parent = col.parent
-        if isinstance(parent, exp.Cast) and parent.this is col and cast_type is None:
-            cast_type = parent.to.sql(dialect=None)
-        if hint is None:
-            hint = _column_hint(col)
-        columns[name] = (cast_type, hint)
-    for name in macro_columns:
-        columns.setdefault(name, (None, None))
+    for scope in traverse_scope(tree):
+        for col in scope.columns:
+            name = col.name.lower()
+            if not name or name.startswith("__preflight_"):
+                continue
+            if not _column_is_from_target(col, scope, table_name):
+                continue
+            cast_type, hint = columns.get(name, (None, None))
+            parent = col.parent
+            if isinstance(parent, exp.Cast) and parent.this is col and cast_type is None:
+                cast_type = parent.to.sql(dialect=None)
+            if hint is None:
+                hint = _column_hint(col)
+            columns[name] = (cast_type, hint)
+    # A macro's string argument names a column but not which table it belongs to, so it is
+    # only trusted when the model reads nothing but this source.
+    if not any(
+        t.name.startswith("__preflight_") and t.name != _TARGET_PLACEHOLDER
+        for t in tree.find_all(exp.Table)
+    ):
+        for name in macro_columns:
+            columns.setdefault(name, (None, None))
     return columns
+
+
+def _leaf_tables(source: object, seen: frozenset[int] = frozenset()) -> set[str] | None:
+    """The names of the real tables a scope source ultimately reads from: the table itself,
+    or, for a CTE / derived table, every table underneath it. None when it cannot be told."""
+    if isinstance(source, exp.Table):
+        return {source.name}
+    if not isinstance(source, Scope) or id(source) in seen:
+        return None
+    out: set[str] = set()
+    for inner in source.sources.values():
+        leaves = _leaf_tables(inner, seen | {id(source)})
+        if leaves is None:
+            return None
+        out |= leaves
+    return out
+
+
+def _column_is_from_target(col: exp.Column, scope: Scope, table_name: str) -> bool:
+    """Whether one column reference in `scope` belongs to the source table being inferred.
+
+    A qualified column belongs to the source its qualifier names. An unqualified one is only
+    attributed when the scope reads exactly one source, since otherwise it could be any of
+    them - and giving it to all of them produces ambiguous references downstream. Either
+    way the source has to resolve to the target table alone (a CTE over two tables does
+    not), and the name must not be one the CTE defines itself (`id as customer_id`).
+    """
+    sources = {k.lower(): v for k, v in scope.sources.items()}
+    # `from {{ source('s', 'licenses') }}` with no alias is qualified by the table's own name,
+    # which the placeholder hides.
+    if _TARGET_PLACEHOLDER in sources:
+        sources.setdefault(table_name.lower(), sources[_TARGET_PLACEHOLDER])
+    if col.table:
+        source = sources.get(col.table.lower())
+    elif len(scope.sources) == 1:
+        source = next(iter(scope.sources.values()))
+    else:
+        return False
+    if source is None or _leaf_tables(source) != {_TARGET_PLACEHOLDER}:
+        return False
+    name = col.name.lower()
+    if isinstance(source, Scope):
+        body = source.expression
+        selects = body.named_selects if isinstance(body, exp.Query) else []
+        defined = {n.lower() for n in selects if n != "*"}
+        if name in defined:
+            return False
+    # An alias minted in this same select and used in a clause (`... as total` then
+    # `where total > 0`) is not a source column; one read inside the select list is.
+    select = scope.expression
+    if isinstance(select, exp.Select) and not col.table:
+        projections = {id(e) for e in select.expressions}
+        in_select_list = False
+        node: exp.Expr | None = col
+        while node is not None and node is not select:
+            if id(node) in projections:
+                in_select_list = True
+                break
+            node = node.parent
+        if not in_select_list:
+            for e in select.expressions:
+                if isinstance(e, exp.Alias) and e.alias.lower() == name:
+                    return False
+    return True
 
 
 def _parse_staging_sql(raw_code: str) -> exp.Expr | None:
@@ -625,7 +769,7 @@ def _missing_types_patch(sources: list[SourceTable]) -> str:
 
 
 def _resolve_columns(
-    sources: dict[str, SourceTable], manifest: Manifest
+    sources: dict[str, SourceTable], manifest: Manifest, names: dict[str, str]
 ) -> tuple[
     dict[str, list[SourceColumn]],
     list[InferredSource],
@@ -643,8 +787,9 @@ def _resolve_columns(
 
     Also returns, for every source (typed or not): `unique`/`not_null` tests carried back
     from a staging model's alias for one of its columns, and the foreign-key ref a
-    column's name points at, when one was found - both keyed by (source identifier,
-    column name), for the caller to fold into the DBML it writes.
+    column's name points at, when one was found - both keyed by (source unique_id,
+    column name), for the caller to fold into the DBML it writes. The ref's value is the
+    DBML table name it points at.
     """
     effective: dict[str, list[SourceColumn]] = {}
     inferred: list[InferredSource] = []
@@ -654,45 +799,68 @@ def _resolve_columns(
     fk_refs: dict[tuple[str, str], str] = {}
     all_sources = list(sources.values())
 
-    for src in sources.values():
+    # What each source's models read, up front: a foreign-key guess needs to know whether
+    # its target has an `id` column, and an untyped target only learns that from inference.
+    found_by_source: dict[str, tuple[dict[str, tuple[str | None, str | None]], list[str]]] = {}
+    id_tables: set[str] = set()
+    for src in all_sources:
+        fully_typed = bool(src.columns) and all(c.data_type for c in src.columns)
+        found_by_source[src.unique_id] = (
+            ({}, []) if fully_typed else _infer_source_columns(src, manifest)
+        )
+        if (
+            "id" in {c.name.lower() for c in src.columns}
+            or "id" in found_by_source[src.unique_id][0]
+        ):
+            id_tables.add(src.unique_id)
+
+    for src in all_sources:
         src_tests, src_values = _carried_tests_for_source(src, manifest)
         for col_name, tests in src_tests.items():
-            carried_tests.setdefault((src.identifier, col_name), set()).update(tests)
+            carried_tests.setdefault((src.unique_id, col_name), set()).update(tests)
         for col_name, values in src_values.items():
-            carried_values.setdefault((src.identifier, col_name), values)
+            carried_values.setdefault((src.unique_id, col_name), values)
 
         if src.columns and all(c.data_type for c in src.columns):
             effective[src.unique_id] = src.columns
             continue
 
-        found, used_models = _infer_source_columns(src, manifest)
+        found, used_models = found_by_source[src.unique_id]
         declared_names = {c.name for c in src.columns}
         merged: list[SourceColumn] = []
         guessed: list[str] = []
         unresolved = False
+
+        def _resolve(
+            name: str,
+            cast_type: str | None,
+            hint: str | None,
+            src: SourceTable = src,
+            guessed: list[str] = guessed,
+        ) -> str:
+            dtype, target = _resolve_type_and_ref(
+                name, cast_type, hint, src, all_sources, id_tables
+            )
+            if not cast_type:
+                guessed.append(name)
+            if target is not None:
+                fk_refs[(src.unique_id, name)] = names[target.unique_id]
+            return dtype
 
         for col in src.columns:
             if col.data_type:
                 merged.append(col)
             elif col.name in found:
                 cast_type, hint = found[col.name]
-                dtype, ref = _resolve_type_and_ref(col.name, cast_type, hint, src, all_sources)
-                if not cast_type:
-                    guessed.append(col.name)
-                if ref is not None:
-                    fk_refs[(src.identifier, col.name)] = ref
-                merged.append(SourceColumn(col.name, dtype, col.description))
+                merged.append(
+                    SourceColumn(col.name, _resolve(col.name, cast_type, hint), col.description)
+                )
             else:
                 unresolved = True
         for name, (cast_type, hint) in found.items():
             if name in declared_names:
                 continue
-            dtype, ref = _resolve_type_and_ref(name, cast_type, hint, src, all_sources)
-            if not cast_type:
-                guessed.append(name)
-            if ref is not None:
-                fk_refs[(src.identifier, name)] = ref
-            merged.append(SourceColumn(name, dtype))
+            merged.append(SourceColumn(name, _resolve(name, cast_type, hint)))
 
         if unresolved or not merged:
             still_missing.append(src)
@@ -733,8 +901,9 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     if not sources:
         raise SchemaError("The dbt project declares no sources, so there is nothing to generate.")
 
+    names = source_table_names(sources.values())
     effective, inferred, still_missing, carried_tests, fk_refs, carried_values = _resolve_columns(
-        sources, manifest
+        sources, manifest, names
     )
     if still_missing:
         patch = _missing_types_patch(still_missing)
@@ -759,11 +928,11 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
         src = sources.get(test.attached_node or "")
         if src is None or not test.column_name:
             continue
-        key = (src.identifier, test.column_name)
+        key = (src.unique_id, test.column_name)
         if test.test_name in {"unique", "not_null"}:
             col_settings.setdefault(key, set()).add(test.test_name)
         elif test.test_name == "relationships":
-            target = _ref_target(test, sources)
+            target = _ref_target(test, sources, names)
             if target is not None:
                 col_refs[key] = target  # an explicit test's ref wins over a guessed one
         elif test.test_name == "accepted_values":
@@ -774,10 +943,11 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     enum_blocks: list[str] = []
     table_lines: list[str] = []
     for src in sources.values():
-        table_lines.append(f"Table {src.identifier} {{")
+        table_name = names[src.unique_id]
+        table_lines.append(f"Table {table_name} {{")
         for col in effective.get(src.unique_id, src.columns):
             settings: list[str] = []
-            tests = col_settings.get((src.identifier, col.name), set())
+            tests = col_settings.get((src.unique_id, col.name), set())
             if col.name == "id" or {"unique", "not_null"} <= tests:
                 settings.append("pk")
             else:
@@ -785,7 +955,7 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
                     settings.append("unique")
                 if "not_null" in tests:
                     settings.append("not null")
-            ref = col_refs.get((src.identifier, col.name))
+            ref = col_refs.get((src.unique_id, col.name))
             if ref is not None:
                 settings.append(f"ref: > {ref[0]}.{ref[1]}")
             suffix = f" [{', '.join(settings)}]" if settings else ""
@@ -795,9 +965,9 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
             # own values, where a varchar would get placeholder text the test then rejects.
             # Only a string column qualifies - an enum's values are strings, so turning a
             # numeric column into one would change its type to satisfy a test.
-            values = col_values.get((src.identifier, col.name))
+            values = col_values.get((src.unique_id, col.name))
             if values and col_type == "varchar":
-                enum_name = _enum_name(src.identifier, col.name)
+                enum_name = _enum_name(table_name, col.name)
                 enum_blocks.append(
                     f"Enum {enum_name} {{\n" + "".join(f'  "{v}"\n' for v in values) + "}\n"
                 )
@@ -825,5 +995,11 @@ def resolve_schema(schema_file: Path | None, manifest: Manifest, workdir: Path) 
     workdir.mkdir(parents=True, exist_ok=True)
     path = workdir / "derived.dbml"
     path.write_text(text, encoding="utf-8")
-    tables, refs = parse_dbml(path)
+    try:
+        tables, refs = parse_dbml(path)
+    except Exception as exc:  # noqa: BLE001 - model2data's own error type varies by release
+        raise SchemaError(
+            f"The schema derived from sources.yml could not be read by model2data "
+            f"({type(exc).__name__}): {exc}"
+        ) from exc
     return ResolvedSchema(tables=tables, refs=refs, dbml_path=path, derived=True, inferred=inferred)
