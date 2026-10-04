@@ -9,18 +9,21 @@ import shutil
 import sys
 import time
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from dbt_preflight import __version__
+from dbt_preflight.baseline import FAILING, is_preexisting
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
 from dbt_preflight.config import ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
     DbtError,
     DbtRunner,
+    NodeResult,
     RunOutcome,
     read_project,
     write_profiles,
@@ -118,8 +121,13 @@ def _assemble(
     selected_ids: list[str],
     project_relpath: str,
     strict_syntax: bool = False,
+    base_tests: dict[str, NodeResult] | None = None,
 ) -> None:
-    """Fold dbt's run results into the report's per-model and per-test rows."""
+    """Fold dbt's run results into the report's per-model and per-test rows.
+
+    With `base_tests` (the same tests' results on the base branch), a failure that was
+    already there is counted and listed apart, and does not fail the check.
+    """
     by_model: dict[str, ModelReport] = {}
     for uid in selected_ids:
         node = manifest.models[uid]
@@ -164,18 +172,30 @@ def _assemble(
             if model_uid is None:
                 model_uid = next((d for d in r.depends_on if d in by_model), None)
             m = by_model.get(model_uid or "")
+            base = (base_tests or {}).get(r.unique_id)
+            preexisting = is_preexisting(r, base)
             if m is not None:
                 if r.status == "pass":
                     m.tests_passed += 1
                 elif r.status == "warn":
                     m.tests_warned += 1
-                elif r.status in {"fail", "error"}:
+                elif preexisting:
+                    m.tests_failed_on_base += 1
+                elif r.status in FAILING:
                     m.tests_failed += 1
             if r.status in {"fail", "error", "warn"}:
+                if m is not None:
+                    owner = m.name
+                elif test is not None and test.attached_node in (
+                    manifest.seeds | manifest.snapshots
+                ):
+                    owner = manifest.node_name(test.attached_node)  # a seed's own test
+                else:
+                    owner = "(unknown)"
                 report.tests.append(
                     FailedTest(
                         name=r.name,
-                        model=m.name if m else "(unknown)",
+                        model=owner,
                         status=r.status,
                         failures=r.failures,
                         message=r.message,
@@ -184,6 +204,11 @@ def _assemble(
                         test_name=test.test_name if test else None,
                         column_name=test.column_name if test else None,
                         kwargs=test.kwargs if test else {},
+                        unique_id=r.unique_id,
+                        preexisting=preexisting,
+                        base_failures=base.failures
+                        if base is not None and base.status == "fail" and r.status == "fail"
+                        else None,
                     )
                 )
 
@@ -318,10 +343,18 @@ def _run(
         timer.mark("   no sources declared: the project's seeds are the only input")
 
     # 3. Base manifest, for state:modified. The worktree stays checked out until the end of
-    # the run: after the head build, the base is built too, into its own schemas, for the diff.
-    state_dir: Path | None = None
+    # the run: before the head build, the base is built too, into its own schemas, on the
+    # same fixtures, so its test results and its tables can be compared with the head's.
+    dialect = (
+        config.dialect
+        if config.dialect is not None
+        else detect_dialect(config.project_dir, project.profile)
+    )
+    if dialect and dialect not in {"duckdb", "none"}:
+        report.dialect = dialect
+        _say(f"   transpiling model SQL from {dialect} to DuckDB")
     changed_ids: set[str] = set()
-    base_project = None
+    base: _BaseBuild | None = None
     with contextlib.ExitStack() as stack:
         if base_ref:
             base_root = stack.enter_context(
@@ -346,27 +379,40 @@ def _run(
                     f"{names} changed, so every source counts as modified and all models ran."
                 )
                 modified |= set(manifest.sources)
-            affected = manifest.affected_models(modified)
-            # "Changed" rows in the comment: modified models, plus models that read a
-            # modified source directly (the staging layer of a schema change).
+            # Models, plus the seeds and snapshots they read: a pull-request build that
+            # selected models alone never loaded a seed, so a project whose staging layer
+            # reads `ref('raw_customers')` failed on every model.
+            affected_nodes = manifest.affected_nodes(modified)
+            affected = [uid for uid in affected_nodes if uid in manifest.models]
+            inputs = {**manifest.sources, **manifest.seeds, **manifest.snapshots}
+            # "Changed" rows in the comment: modified models, models that read a modified
+            # source, seed or snapshot directly (the staging layer of a schema change), and
+            # models whose own tests were added or edited.
             changed_ids = {
                 uid
                 for uid in affected
                 if uid in modified
-                or any(
-                    p in modified and p in manifest.sources
-                    for p in manifest.parent_map.get(uid, [])
-                )
-            }
+                or any(p in modified and p in inputs for p in manifest.parent_map.get(uid, []))
+            } | manifest.tested_models(modified)
+            n_models = len([m for m in modified if m in manifest.models])
+            n_inputs = len([m for m in modified if m in inputs])
+            n_tests = len([m for m in modified if m.split(".", 1)[0] in {"test", "unit_test"}])
             _say(
-                f"   {len([m for m in modified if m in manifest.models])} models and "
-                f"{len([m for m in modified if m in manifest.sources])} sources changed against {base_ref}"
+                f"   {n_models} models, {n_inputs} sources/seeds/snapshots and {n_tests} tests "
+                f"changed against {base_ref}"
             )
             if not affected:
                 report.nothing_changed = True
                 return
-            select: list[str] | None = [manifest.models[uid].name for uid in affected]
-            _say(f"   building {len(select)} models the change can reach")
+            select: list[str] | None = [manifest.node_name(uid) for uid in affected_nodes]
+            loads = len(affected_nodes) - len(affected)
+            _say(
+                f"   building {len(affected)} models the change can reach"
+                + (f", and the {loads} seeds/snapshots they read" if loads else "")
+            )
+            base = _build_base(
+                config, report, base_project, profiles_dir, workdir, db_path, select, timer
+            )
         else:
             changed_ids = set(manifest.models)
             select = None
@@ -377,28 +423,87 @@ def _run(
             report,
             manifest,
             head_runner,
-            project,
             select,
             changed_ids,
             db_path,
             project_relpath,
             timer,
+            base,
         )
 
-        # 6. The base, built on the same fixtures, and the diff.
-        if base_ref and base_project is not None and state_dir is not None:
-            _diff_against_base(
-                config,
-                report,
-                manifest,
-                base_project,
-                profiles_dir,
-                workdir,
-                state_dir,
-                db_path,
-                changed_ids,
-                timer,
-            )
+        # 6. The diff, against the base built before the head.
+        if base is not None:
+            _diff_against_base(config, report, manifest, base, db_path, changed_ids, timer)
+
+
+@dataclass
+class _BaseBuild:
+    """The base branch, built on the same fixtures before the head."""
+
+    manifest: Manifest
+    # Test and unit-test results on the base branch, by unique id. Empty when its tests
+    # could not run, which leaves every head failure counted, exactly as before.
+    tests: dict[str, NodeResult] = field(default_factory=dict)
+
+    @property
+    def failing_test_names(self) -> list[str]:
+        return sorted({r.name for r in self.tests.values() if r.status in FAILING})
+
+
+def _build_base(
+    config: PreflightConfig,
+    report: PreflightReport,
+    base_project,
+    profiles_dir: Path,
+    workdir: Path,
+    db_path: Path,
+    select: list[str],
+    timer: _StepTimer,
+) -> _BaseBuild | None:
+    """Build the base branch's side of the selection, then run its tests.
+
+    Tables first, tests after, in two dbt invocations rather than one `dbt build`: a test
+    that fails on the base must not skip what depends on it there either, or the tests
+    downstream of it would have no base result to be compared with.
+    """
+    base_state = Manifest.load(workdir / "base_target" / "manifest.json")
+    on_base = {base_state.node_name(u) for u in base_state.models}
+    on_base |= set(base_state.seeds.values()) | set(base_state.snapshots.values())
+    names = [n for n in select if n in on_base]
+    runner = DbtRunner(
+        base_project,
+        profiles_dir,
+        workdir / "base_build",
+        workdir / "logs",
+        config.env,
+        target=BASE_TARGET_NAME,
+    )
+    if not names:
+        runner.parse()
+        return _BaseBuild(manifest=Manifest.load(workdir / "base_build" / "manifest.json"))
+
+    hook = TranspileHook(report.dialect, db_path) if report.dialect else None
+    _say(f"   building {len(names)} models, seeds and snapshots on the base branch")
+    # `+`: the base may read an ancestor the head no longer does, which the head's
+    # selection, closed over the head's graph, would not include.
+    tables = runner.build(
+        [f"+{n}" for n in names], hook, exclude_resource_types=["test", "unit_test"]
+    )
+    if tables.error:
+        _say(f"   ⚠️  base build failed, no diff and no base test results: {tables.error}")
+        return None
+    tests = runner.build(names, hook, command="test")
+    if tests.error:
+        _say(f"   ⚠️  base tests could not run, every head failure counts: {tests.error}")
+    built = sum(1 for r in tables.results if r.status == "success")
+    results = {r.unique_id: r for r in tests.results if r.resource_type in {"test", "unit_test"}}
+    failing = sum(1 for r in results.values() if r.status in FAILING)
+    timer.mark(
+        f"   base branch: {built} nodes built, {len(results)} tests, {failing} failing there"
+    )
+    return _BaseBuild(
+        manifest=Manifest.load(workdir / "base_build" / "manifest.json"), tests=results
+    )
 
 
 def _build_and_check(
@@ -406,31 +511,46 @@ def _build_and_check(
     report: PreflightReport,
     manifest: Manifest,
     head_runner: DbtRunner,
-    project,
     select: list[str] | None,
     changed_ids: set[str],
     db_path: Path,
     project_relpath: str,
     timer: _StepTimer,
+    base: _BaseBuild | None = None,
 ) -> None:
     # 4. Build, transpiling the project's dialect to DuckDB on the way.
-    dialect = (
-        config.dialect
-        if config.dialect is not None
-        else detect_dialect(config.project_dir, project.profile)
-    )
-    hook: TranspileHook | None = None
-    if dialect and dialect not in {"duckdb", "none"}:
-        hook = TranspileHook(dialect, db_path)
-        report.dialect = dialect
-        _say(f"   transpiling model SQL from {dialect} to DuckDB")
-    outcome = head_runner.build(select, hook)
+    hook = TranspileHook(report.dialect, db_path) if report.dialect else None
+    # A test already failing on the base branch is left out of the build and run after
+    # it, on its own: inside `dbt build` its failure would skip every model downstream,
+    # so the rest of the pull request would go unchecked for something it did not do.
+    known_failing = base.failing_test_names if base is not None and select is not None else []
+    outcome = head_runner.build(select, hook, exclude=known_failing)
+    if outcome.error:
+        raise DbtError(outcome.error)
+    if known_failing:
+        later = head_runner.build(known_failing, hook, command="test")
+        if later.error:
+            raise DbtError(later.error)
+        # What `dbt build` would have done with them: a test whose model did not build is
+        # skipped, not reported, since its failure says nothing the build error does not.
+        built_nodes = {
+            r.unique_id
+            for r in outcome.results
+            if r.resource_type in {"model", "seed", "snapshot"} and r.status == "success"
+        }
+        outcome.results += [
+            r
+            for r in later.results
+            if all(
+                d in built_nodes
+                for d in r.depends_on
+                if d.split(".", 1)[0] in {"model", "seed", "snapshot"}
+            )
+        ]
     if hook is not None:
         report.untranspiled = dict(hook.unparsed)
         for name, why in hook.unparsed.items():
             _say(f"   ⚠️  {name}: could not transpile, ran as written ({why})")
-    if outcome.error:
-        raise DbtError(outcome.error)
     selected_ids = [
         r.unique_id
         for r in outcome.results
@@ -446,12 +566,24 @@ def _build_and_check(
     # once, here, and every list downstream (rows, "Also rebuilt", violations) is stable.
     selected_ids.sort(key=lambda uid: manifest.models[uid].name)
     _assemble(
-        report, manifest, outcome, changed_ids, selected_ids, project_relpath, hook is not None
+        report,
+        manifest,
+        outcome,
+        changed_ids,
+        selected_ids,
+        project_relpath,
+        hook is not None,
+        base.tests if base is not None else None,
     )
     built = [m for m in report.models if m.status == BUILT]
     timer.mark(
         f"   built {len(built)}/{len(report.models)} models, "
         f"{len(report.failing_tests)} failing tests"
+        + (
+            f" ({len(report.preexisting_tests)} more failing on base too)"
+            if report.preexisting_tests
+            else ""
+        )
     )
 
     # 5. Rows and conventions.
@@ -476,17 +608,12 @@ def _diff_against_base(
     config: PreflightConfig,
     report: PreflightReport,
     manifest: Manifest,
-    base_project,
-    profiles_dir: Path,
-    workdir: Path,
-    state_dir: Path,
+    base: _BaseBuild,
     db_path: Path,
     changed_ids: set[str],
     timer: _StepTimer,
 ) -> None:
-    """Build the changed models on the base branch, then compare columns, rows and metrics."""
-    base_state = Manifest.load(state_dir / "manifest.json")
-    base_names = {m.name for m in base_state.models.values()}
+    """Compare columns, rows and metrics of the changed models with the base branch's."""
     # The change and everything downstream of it: a metric on a mart moves when a staging
     # model upstream changes, so the mart is what has to be compared.
     built = {m.unique_id for m in report.models if m.status == BUILT}
@@ -499,35 +626,13 @@ def _diff_against_base(
         compare.add(uid)
         frontier += [c for c in manifest.child_map.get(uid, []) if c in manifest.models]
     compare_ids = sorted(uid for uid in compare if uid in built)
-    targets = [manifest.models[uid].name for uid in compare_ids]
-    to_build = [f"+{n}" for n in targets if n in base_names]
-    if not targets:
+    if not compare_ids:
         return
-
-    base_runner = DbtRunner(
-        base_project,
-        profiles_dir,
-        workdir / "base_build",
-        workdir / "logs",
-        config.env,
-        target=BASE_TARGET_NAME,
-    )
-    hook = TranspileHook(report.dialect, db_path) if report.dialect else None
-    if to_build:
-        _say(f"   building {len(to_build)} models on the base branch for the diff")
-        outcome = base_runner.build(to_build, hook, command="run")
-        if outcome.error:
-            _say(f"   ⚠️  base build failed, no diff: {outcome.error}")
-            return
-    else:
-        base_runner.parse()
-    timer.mark(f"   base branch: {len(to_build)} models built")
-    base_manifest = Manifest.load(workdir / "base_build" / "manifest.json")
 
     metric_defs = collect_metrics(manifest, config.metrics)
     report.metrics_defined = len(metric_defs)
     report.diffs = compute_diffs(
-        db_path, manifest, base_manifest, compare_ids, metric_defs, report.dialect
+        db_path, manifest, base.manifest, compare_ids, metric_defs, report.dialect
     )
     moved = sum(len(d.moved_metrics) for d in report.diffs)
     timer.mark(

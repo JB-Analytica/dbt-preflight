@@ -64,10 +64,25 @@ from your schema, and the warehouse is a DuckDB file that lives for the length o
 **Checks**
 
 - The changed models, everything downstream of them, and every model whose tests read them,
-  compile and run against a schema-faithful dataset.
+  compile and run against a schema-faithful dataset. The seeds and snapshots those models
+  read are loaded first, on both branches. A pull request that only adds or edits a test
+  runs that test, and builds what it reads.
 - Their schema, relationship and accepted-values tests pass or fail, and which rows fail.
 - Column renames, dropped `ref()`s and broken joins are caught before merge. dbt unit tests
   run too, and a failing one fails the check.
+- Whether a failing test is this change's doing. The base branch runs the same tests on the
+  same fixtures, and a test fails the check only when it is new on the pull request, passed
+  on the base branch, or fails there on fewer rows than it does now. A test that fails the
+  same way on both branches, often because synthetic data can never satisfy it, is listed
+  under *Already failing on the base branch*, folded, and the check passes with warnings.
+  It does not stop anything downstream from building either: tests that fail on the base
+  are left out of the build and run after it, so the rest of the pull request is still
+  checked. A test fails "the same way" when it returns rows on both sides and no more on
+  the pull request, or errors on both sides with the same error; a test that returned rows
+  on the base and errors on the pull request counts against it. `accepted_values` is
+  judged like every other test. A model that fails to build still skips what depends on
+  it, and so does a test failure the change caused. Without `--base-ref` there is nothing
+  to compare against, so every failing test counts, as it always has.
 - What the change did to the output. The base branch is built on the same fixtures, and the
   changed models plus everything downstream are compared: columns added, removed or
   retyped; row counts; rows whose values differ; and every metric the project defines,
@@ -186,7 +201,9 @@ Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to th
 fixtures. Other loaders can be declared under `loader_columns:` in the config.
 
 A project with no sources at all, one whose input is its seeds, needs neither: dbt loads
-the seeds during the build and preflight generates nothing.
+the seeds during the build and preflight generates nothing. On a pull request only the
+seeds the selected models read are loaded, on the base branch and on the pull request
+alike, and an edited seed counts as a change to every model that reads it.
 
 ### Your warehouse's SQL, on DuckDB
 

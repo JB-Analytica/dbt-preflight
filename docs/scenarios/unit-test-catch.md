@@ -9,7 +9,7 @@ Expected: **fail**. Got: **fail**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ❌ failed
 
-Built 4 of 7 models (1 changed) against synthetic data · 25 tests · 0 convention issues · 7.2 s
+Built 4 of 7 models (1 changed) against synthetic data · 25 tests · 0 convention issues · 8.1 s
 
 ### Changed models
 
@@ -44,12 +44,12 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `0d55e6b`.
+Compared against base `main`, head `c6a4ec0`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>
 
-**Checks:** the changed models compile and run against a schema-faithful synthetic dataset; their schema and relationship tests pass; the change follows the house conventions.
+**Checks:** the changed models compile and run against a schema-faithful synthetic dataset; their tests pass, or fail no worse than on the base branch; the change follows the house conventions.
 
 **Cannot check:** that production numbers are unchanged. A metric that does not move on synthetic data can still move on production, because the fixtures do not carry production's distribution; the diff proves the logic changed, not the size of the effect. Also outside scope: warehouse SQL that survives transpiling, and incremental behaviour across runs.
 

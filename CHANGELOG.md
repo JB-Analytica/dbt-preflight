@@ -5,6 +5,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Seeds were never loaded on a pull-request run. The selection held models only and the
+  base branch was built with `dbt run`, so a project whose models `ref()` a seed (classic
+  jaffle_shop; Tuva-style lookup seeds beside sources) built none of them, with `Table
+  raw_customers does not exist`, on a harmless one-line change. The seed-only fix of
+  11 September covered full builds alone. The selection is now closed over the seeds and
+  snapshots the selected models read, on both branches, and an edited seed counts as a
+  change to the models that read it.
+
+### Changed
+
+- A failing test is judged against the base branch. The base now runs the same tests on
+  the same fixtures, before the pull request is built, and a test fails the check only
+  when it is new, passed on the base, or fails on more rows than it did there. One that
+  fails the same way on both branches, usually because synthetic data cannot satisfy it,
+  is listed under a folded *Already failing on the base branch (N)* and the verdict is
+  `passed_with_warnings`. Such tests are left out of the build and run after it, so they
+  no longer skip every model downstream: on dbt-labs/jaffle-shop one
+  `expression_is_true` test that fails on both branches used to skip `customers`,
+  `orders` and `order_items` and list them as broken by the change. *Unchanged models
+  this change breaks* lists only models with failures the change caused. A model that
+  fails to build, and a test failure the change caused, still skip what depends on them.
+  Runs without `--base-ref` behave as before.
+- The summary JSON adds `preexisting_failing_tests`, `counts.tests.failed_on_base`,
+  per-model `tests_failed_on_base`, and `base_failures` on each failing test.
+  `failing_tests` and `counts.tests.failed` now hold only what the change answers for.
+  `schema_version` stays 1.
+- A pull request that only adds or edits a test now runs it: tests count toward
+  `state:modified`, and the model a modified test is declared on is a changed model.
+  Before, such a pull request reported that nothing had changed.
+- The base branch is built once, before the pull request, and covers the whole selection
+  rather than only what the diff compares. A pull-request run now makes one more dbt
+  invocation on the base (its tests), and one more on the head when any test already
+  fails on the base.
+
 ## [0.3.0] - 2026-09-16
 
 ### Added

@@ -70,6 +70,7 @@ def _model(m: ModelReport) -> dict[str, Any]:
         "tests_passed": m.tests_passed,
         "tests_failed": m.tests_failed,
         "tests_warned": m.tests_warned,
+        "tests_failed_on_base": m.tests_failed_on_base,
         "dialect_function": m.dialect_function,
     }
 
@@ -82,6 +83,7 @@ def _failing_test(t: FailedTest) -> dict[str, Any]:
         "model": t.model,
         "status": t.status,
         "failures": t.failures,
+        "base_failures": t.base_failures,
         "reading": reading,
     }
 
@@ -163,6 +165,7 @@ def build_summary(
                 "passed": sum(m.tests_passed for m in report.models),
                 "failed": sum(m.tests_failed for m in report.models),
                 "warned": sum(m.tests_warned for m in report.models),
+                "failed_on_base": sum(m.tests_failed_on_base for m in report.models),
             },
             "violations": {
                 "error": len(report.error_violations),
@@ -174,7 +177,10 @@ def build_summary(
             },
         },
         "models": [_model(m) for m in report.models],
-        "failing_tests": [_failing_test(t) for t in report.tests],
+        # Pre-existing failures have their own list, so `failing_tests` keeps meaning "what
+        # this change has to fix (or was warned about)" for a consumer written against it.
+        "failing_tests": [_failing_test(t) for t in report.tests if not t.preexisting],
+        "preexisting_failing_tests": [_failing_test(t) for t in report.preexisting_tests],
         "violations": [
             {
                 "rule": v.rule,

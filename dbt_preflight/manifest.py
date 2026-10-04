@@ -138,6 +138,13 @@ class TestNode:
 
 
 @dataclass
+class UnitTestNode:
+    unique_id: str
+    model_uid: str | None  # the model it exercises
+    depends_on: list[str]
+
+
+@dataclass
 class Manifest:
     sources: dict[str, SourceTable]
     models: dict[str, ModelNode]
@@ -146,46 +153,76 @@ class Manifest:
     child_map: dict[str, list[str]] = field(default_factory=dict)
     semantic_models: dict[str, SemanticModel] = field(default_factory=dict)
     metrics: dict[str, MetricNode] = field(default_factory=dict)
+    # Unique id -> name. Kept apart from `models`: they have no report row of their own,
+    # but a model that reads one cannot build until it is loaded.
+    seeds: dict[str, str] = field(default_factory=dict)
+    snapshots: dict[str, str] = field(default_factory=dict)
+    unit_tests: dict[str, UnitTestNode] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> Manifest:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return cls.from_dict(raw)
 
-    def affected_models(self, modified: set[str]) -> list[str]:
-        """The models a change to `modified` can break, closed so dbt can build them.
+    def _buildable(self, uid: str) -> bool:
+        """A node dbt materialises in the warehouse: a model, a seed or a snapshot."""
+        return uid in self.models or uid in self.seeds or uid in self.snapshots
+
+    def affected_nodes(self, modified: set[str]) -> list[str]:
+        """The models, seeds and snapshots a change to `modified` needs built, closed.
 
         Downstream models are affected directly. A model whose *test* reads a modified
         model (a `relationships` test to it) is affected too, and would be missed by
-        `state:modified+`. Then every ancestor of that set, because on a fresh DuckDB
-        file nothing exists until it is built.
+        `state:modified+`; so is a model whose own test was added or edited, since the
+        test cannot run without it. Then every ancestor of that set, because on a fresh DuckDB
+        file nothing exists until it is built: that includes the seeds and snapshots the
+        models read, which a pull-request build would otherwise never load.
         """
         affected: set[str] = {m for m in modified if m in self.models}
-        # A modified source has no row of its own but everything reading it is affected.
-        frontier = [m for m in modified if m in self.models or m in self.sources]
+        # A modified source or seed has no row of its own but everything reading it is
+        # affected. A snapshot is a table models read, so the same holds for it.
+        frontier = [m for m in modified if self._buildable(m) or m in self.sources]
+        affected |= {m for m in frontier if m in self.snapshots}
         while frontier:
             uid = frontier.pop()
             for child in self.child_map.get(uid, []):
-                if child in self.models and child not in affected:
+                if (child in self.models or child in self.snapshots) and child not in affected:
                     affected.add(child)
                     frontier.append(child)
 
+        for test in [*self.tests.values(), *self.unit_tests.values()]:
+            if test.unique_id in modified:
+                affected.update(p for p in test.depends_on if self._buildable(p))
         for test in self.tests.values():
-            parents = [p for p in test.depends_on if p in self.models]
+            parents = [p for p in test.depends_on if self._buildable(p)]
             if any(p in affected for p in parents):
-                for p in parents:
-                    if p not in affected:
-                        affected.add(p)
+                affected.update(parents)
 
         closed = set(affected)
         frontier = list(affected)
         while frontier:
             uid = frontier.pop()
             for parent in self.parent_map.get(uid, []):
-                if parent in self.models and parent not in closed:
+                if self._buildable(parent) and parent not in closed:
                     closed.add(parent)
                     frontier.append(parent)
         return sorted(closed)
+
+    def affected_models(self, modified: set[str]) -> list[str]:
+        """The models among `affected_nodes`: the rows the comment reports on."""
+        return [uid for uid in self.affected_nodes(modified) if uid in self.models]
+
+    def tested_models(self, test_ids: set[str]) -> set[str]:
+        """The models the given tests (data or unit) are declared on."""
+        out = {t.attached_node for uid, t in self.tests.items() if uid in test_ids}
+        out |= {u.model_uid for uid, u in self.unit_tests.items() if uid in test_ids}
+        return {uid for uid in out if uid in self.models}
+
+    def node_name(self, uid: str) -> str:
+        """The name dbt selects a model, seed or snapshot by."""
+        if uid in self.models:
+            return self.models[uid].name
+        return self.seeds.get(uid) or self.snapshots[uid]
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Manifest:
@@ -213,9 +250,15 @@ class Manifest:
 
         models: dict[str, ModelNode] = {}
         tests: dict[str, TestNode] = {}
+        seeds: dict[str, str] = {}
+        snapshots: dict[str, str] = {}
         for uid, node in raw.get("nodes", {}).items():
             rtype = node.get("resource_type")
-            if rtype == "model":
+            if rtype == "seed":
+                seeds[uid] = node["name"]
+            elif rtype == "snapshot":
+                snapshots[uid] = node["name"]
+            elif rtype == "model":
                 models[uid] = ModelNode(
                     unique_id=uid,
                     name=node["name"],
@@ -249,6 +292,15 @@ class Manifest:
                     kwargs=kwargs,
                     original_file_path=node.get("original_file_path", ""),
                 )
+        unit_tests: dict[str, UnitTestNode] = {}
+        model_ids = {m.name: uid for uid, m in models.items()}
+        for uid, ut in (raw.get("unit_tests") or {}).items():
+            unit_tests[uid] = UnitTestNode(
+                unique_id=uid,
+                model_uid=model_ids.get(str(ut.get("model") or "")),
+                depends_on=list((ut.get("depends_on") or {}).get("nodes") or []),
+            )
+
         semantic_models: dict[str, SemanticModel] = {}
         for uid, sm in (raw.get("semantic_models") or {}).items():
             deps = list((sm.get("depends_on") or {}).get("nodes") or [])
@@ -308,6 +360,9 @@ class Manifest:
             child_map={k: list(v) for k, v in (raw.get("child_map") or {}).items()},
             semantic_models=semantic_models,
             metrics=metrics,
+            seeds=seeds,
+            snapshots=snapshots,
+            unit_tests=unit_tests,
         )
 
     def tests_for_model(self, model_uid: str) -> list[TestNode]:

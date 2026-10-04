@@ -36,8 +36,9 @@ class ModelReport:
     message: str = ""
     dialect_function: str | None = None
     tests_passed: int = 0
-    tests_failed: int = 0
+    tests_failed: int = 0  # failures this change caused: new on head, or worse than on base
     tests_warned: int = 0
+    tests_failed_on_base: int = 0  # failing the same way on the base branch: not this change
 
 
 @dataclass
@@ -54,6 +55,12 @@ class FailedTest:
     test_name: str | None = None  # unique | not_null | accepted_values | relationships | ...
     column_name: str | None = None
     kwargs: dict[str, Any] = field(default_factory=dict)
+    unique_id: str = ""
+    # Judged against the base branch (dbt_preflight/baseline.py). `preexisting` is a test
+    # that already failed there the same way, so it does not fail the check;
+    # `base_failures` is the base branch's failing-row count when it had one to compare.
+    preexisting: bool = False
+    base_failures: int | None = None
 
 
 @dataclass
@@ -99,7 +106,13 @@ class PreflightReport:
 
     @property
     def failing_tests(self) -> list[FailedTest]:
-        return [t for t in self.tests if t.status in {"fail", "error"}]
+        """Failing tests this change answers for. Pre-existing failures are not among them."""
+        return [t for t in self.tests if t.status in {"fail", "error"} and not t.preexisting]
+
+    @property
+    def preexisting_tests(self) -> list[FailedTest]:
+        """Failing tests that already failed the same way on the base branch."""
+        return [t for t in self.tests if t.status in {"fail", "error"} and t.preexisting]
 
     @property
     def warning_tests(self) -> list[FailedTest]:
@@ -134,11 +147,16 @@ class PreflightReport:
             or self.warn_violations
             or self.warning_tests
             or self.breaking_diffs
+            or self.preexisting_tests
         )
 
 
 # How many moved metrics get their dimension breakdown shown in full; the rest fold.
 _BREAKDOWN_METRICS_SHOWN = 3
+# Pre-existing failures carry their details block (dbt name, compiled SQL) up to this many;
+# past it, one line each. A project whose fixtures fail 40 tests on every branch would
+# otherwise spend the comment's 65,536 characters on what this change did not do.
+_PREEXISTING_DETAILED = 10
 
 _STATUS_LABEL = {
     BUILT: "✅ built",
@@ -149,15 +167,20 @@ _STATUS_LABEL = {
 }
 
 
+def _tests_total(m: ModelReport) -> int:
+    return m.tests_passed + m.tests_failed + m.tests_warned + m.tests_failed_on_base
+
+
 def _tests_cell(m: ModelReport) -> str:
-    total = m.tests_passed + m.tests_failed + m.tests_warned
-    if total == 0:
+    if _tests_total(m) == 0:
         return "none"
     parts = [f"{m.tests_passed} passed"]
     if m.tests_failed:
         parts.append(f"**{m.tests_failed} failed**")
     if m.tests_warned:
         parts.append(f"{m.tests_warned} warned")
+    if m.tests_failed_on_base:
+        parts.append(f"{m.tests_failed_on_base} failing on base too")
     return ", ".join(parts)
 
 
@@ -239,18 +262,31 @@ def _test_label(t: FailedTest) -> str:
     return f"`{t.name}` on `{t.model}`"
 
 
-def _test_entry_lines(t: FailedTest) -> list[str]:
-    """The bullet for one failing or warning test, with its details block where there is one."""
-    icon = "❌" if t.status in {"fail", "error"} else "⚠️"
+def _test_detail(t: FailedTest) -> str:
+    """What went wrong, in a few words: rows failing, the error, or the unit test's verdict."""
     if t.kind == "unit_test":
-        detail = "actual output differs from the expected rows"
-    elif t.status == "error":
-        detail = _one_line_error(t.message)
-    elif t.failures is not None:
+        return "actual output differs from the expected rows"
+    if t.status == "error":
+        return _one_line_error(t.message)
+    if t.failures is not None:
         detail = f"{t.failures} failing {'row' if t.failures == 1 else 'rows'}"
+        if t.base_failures is not None and t.base_failures != t.failures:
+            detail += f" ({t.base_failures} on the base branch)"
+        return detail
+    return t.status
+
+
+def _test_entry_lines(t: FailedTest, details: bool = True) -> list[str]:
+    """The bullet for one failing or warning test, with its details block where there is one."""
+    if t.preexisting:
+        icon = "⚪"
+    elif t.status in {"fail", "error"}:
+        icon = "❌"
     else:
-        detail = t.status
-    lines = [f"- {icon} {_test_label(t)}: {detail}"]
+        icon = "⚠️"
+    lines = [f"- {icon} {_test_label(t)}: {_test_detail(t)}"]
+    if not details:
+        return lines
     if t.compiled_code or t.status == "error" or t.kind == "unit_test" or t.test_name:
         lines.append("  <details><summary>details</summary>")
         lines.append("")
@@ -338,7 +374,7 @@ def render(report: PreflightReport) -> str:
 
     built = sum(1 for m in report.models if m.status == BUILT)
     changed = len(report.changed)
-    tests_total = sum(m.tests_passed + m.tests_failed + m.tests_warned for m in report.models)
+    tests_total = sum(_tests_total(m) for m in report.models)
     scope = f"{changed} changed" if report.base_ref else "no base branch, all built"
     summary = (
         f"Built {built} of {len(report.models)} models "
@@ -426,6 +462,9 @@ def render(report: PreflightReport) -> str:
             lines.append("</details>")
         lines.append("")
 
+    if report.preexisting_tests:
+        lines += _preexisting_section(report.preexisting_tests)
+
     if report.diffs:
         lines += _diff_section(report)
 
@@ -463,6 +502,23 @@ def render(report: PreflightReport) -> str:
         lines.append("")
     lines.append(_scope_block())
     return "\n".join(lines)
+
+
+def _preexisting_section(tests: list[FailedTest]) -> list[str]:
+    """Tests that fail on the base branch too, folded: reported, but not this change's doing."""
+    lines = [
+        f"<details><summary>Already failing on the base branch ({len(tests)})</summary>",
+        "",
+        "These tests fail on the base branch as well, built on the same synthetic data, with "
+        "as many failing rows or more, so they do not fail this check and did not stop "
+        "anything downstream from building. Often the fixtures cannot satisfy them; a test "
+        "that fails here on every pull request is worth a look on its own.",
+        "",
+    ]
+    for i, t in enumerate(tests):
+        lines += _test_entry_lines(t, details=i < _PREEXISTING_DETAILED)
+    lines += ["</details>", ""]
+    return lines
 
 
 def _num(value: float | int | None) -> str:
@@ -731,8 +787,8 @@ def _scope_block() -> str:
             "<details><summary>What this checks, and what it cannot</summary>",
             "",
             "**Checks:** the changed models compile and run against a schema-faithful "
-            "synthetic dataset; their schema and relationship tests pass; the change follows "
-            "the house conventions.",
+            "synthetic dataset; their tests pass, or fail no worse than on the base branch; "
+            "the change follows the house conventions.",
             "",
             "**Cannot check:** that production numbers are unchanged. A metric that does not "
             "move on synthetic data can still move on production, because the fixtures do not "

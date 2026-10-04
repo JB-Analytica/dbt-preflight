@@ -20,7 +20,7 @@ Every flag on `run`:
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--base-ref` | none | Git ref to diff against, e.g. `origin/main`. Without it every model counts as changed and the whole project is built; no diff against a base branch is computed. |
+| `--base-ref` | none | Git ref to diff against, e.g. `origin/main`. Without it every model counts as changed and the whole project is built; no diff against a base branch is computed, and every failing test counts against the run, since there is no base to have already failed on. |
 | `--config` | `.dbt-preflight.yml` at the repo root | Path to the config file. |
 | `--repo-root` | the git root of the current directory | Repository root; the base branch is checked out relative to this. |
 | `--comment-file` | none | Write the review comment (Markdown) here instead of stdout. |
@@ -66,20 +66,42 @@ Every flag on `run`:
 | Key | Type | What it holds |
 | --- | --- | --- |
 | `schema_version` | integer | Bumped when a key's meaning or shape changes, not when a key is only added. |
-| `verdict` | string | One of `passed`, `passed_with_warnings`, `failed`, `could_not_run`, `nothing_changed`. |
+| `verdict` | string | One of `passed`, `passed_with_warnings`, `failed`, `could_not_run`, `nothing_changed`. A run whose only failing tests also fail on the base branch is `passed_with_warnings` (see below). |
 | `exit_code` | integer | What the process actually exited with (0 or 1; see above). |
 | `base_ref` | string or null | The `--base-ref` this run was given. |
 | `head` | string or null | The head commit's SHA. |
 | `elapsed_seconds` | number | Total run time. |
 | `fatal` | string or null | Set only on `could_not_run`: why preflight could not run at all. |
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
-| `counts` | object | `models` (built/failed/skipped/not_verified/no_result), `tests` (passed/failed/warned), `violations` (error/warn), `metrics` (defined/moved). |
-| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, dialect_function. |
-| `failing_tests` | array | Every failing or warning test: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, reading (a one-line plain-English reading of the DuckDB error, when there is one). |
+| `counts` | object | `models` (built/failed/skipped/not_verified/no_result), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `tests.failed` counts only failures the change answers for; `tests.failed_on_base` the ones that also fail on the base branch. |
+| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, dialect_function. |
+| `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count when the same test failed there on fewer rows; null otherwise), reading (a one-line plain-English reading of the DuckDB error, when there is one). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
+| `preexisting_failing_tests` | array | Failing tests that fail the same way, or on more rows, on the base branch: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
 | `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared, and model2data's own warnings. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
+
+### Failing tests and the base branch
+
+With `--base-ref`, the base branch runs the same tests on the same fixtures before the pull
+request is built, and each failing test is matched to its base result by dbt's unique id
+(which, for a generic test, encodes its arguments, so an edited test is a new one):
+
+| On the base branch | On the pull request | Counts against the run |
+| --- | --- | --- |
+| absent, passed or skipped | fails or errors | yes, in `failing_tests` |
+| fails on *n* rows | fails on more than *n* rows | yes, in `failing_tests`, with `base_failures: n` |
+| fails on *n* rows | fails on *n* rows or fewer | no, in `preexisting_failing_tests` |
+| errors | errors with the same error | no, in `preexisting_failing_tests` |
+| fails | errors, or the reverse | yes, in `failing_tests` |
+
+Pre-existing failures make the verdict `passed_with_warnings` rather than `passed`: they
+are a real finding about the project, only not this change's. Tests already failing on the
+base are run after the build rather than inside it, so they never skip the models
+downstream of them. This is additive to schema version 1: a consumer that reads
+`verdict`, `counts.tests.failed` or `failing_tests` keeps getting what the run blames on
+the change. A consumer that wants every failing test regardless reads both lists.
 
 ## The comment's marker
 

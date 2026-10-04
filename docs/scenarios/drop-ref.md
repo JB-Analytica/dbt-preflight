@@ -14,7 +14,7 @@ dbt parse failed: Compilation Error
 
 <details><summary>What this checks, and what it cannot</summary>
 
-**Checks:** the changed models compile and run against a schema-faithful synthetic dataset; their schema and relationship tests pass; the change follows the house conventions.
+**Checks:** the changed models compile and run against a schema-faithful synthetic dataset; their tests pass, or fail no worse than on the base branch; the change follows the house conventions.
 
 **Cannot check:** that production numbers are unchanged. A metric that does not move on synthetic data can still move on production, because the fixtures do not carry production's distribution; the diff proves the logic changed, not the size of the effect. Also outside scope: warehouse SQL that survives transpiling, and incremental behaviour across runs.
 

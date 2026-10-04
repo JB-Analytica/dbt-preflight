@@ -780,3 +780,83 @@ def test_breakdowns_past_the_third_moved_metric_fold() -> None:
         assert f"- {label} by sales_channel: web 60 → 55 (-8.3%), app 40 → 35 (-12.5%)" in folded
     # Every moved metric is still in the table above the fold.
     assert body.count("| 100 | 90 | -10.0% |") == 5
+
+
+def _expression_test(model: str, failures: int, **kw) -> FailedTest:
+    return FailedTest(
+        name=f"dbt_utils_expression_is_true_{model}",
+        model=model,
+        status="fail",
+        failures=failures,
+        message="",
+        compiled_code="select 1",
+        test_name="expression_is_true",
+        **kw,
+    )
+
+
+def test_preexisting_failure_folds_and_does_not_fail() -> None:
+    # jaffle-shop: `order_total - tax_paid = subtotal` fails on 108 rows on both branches.
+    report = PreflightReport(
+        models=[
+            _model("stg_orders", rows=100, tests_passed=2),
+            _model("orders", changed=False, rows=100, tests_passed=3, tests_failed_on_base=1),
+            _model("customers", changed=False, rows=50, tests_passed=2),
+        ],
+        tests=[_expression_test("orders", 108, preexisting=True, base_failures=108)],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert report.passed and report.has_warnings
+    assert "## 🛫 dbt preflight: ⚠️ passed with warnings" in body
+    assert "### Failing tests" not in body
+    assert "Unchanged models this change breaks" not in body
+    assert "<details><summary>Already failing on the base branch (1)</summary>" in body
+    assert "- ⚪ `expression_is_true` on `orders`: 108 failing rows\n" in body
+    assert "Also rebuilt, no new issues: `orders`, `customers`." in body
+    # Counted in the summary line's total, and named in the model's cell.
+    assert "· 8 tests ·" in body
+
+
+def test_worsened_failure_fails_and_says_how_much_worse() -> None:
+    report = PreflightReport(
+        models=[_model("orders", rows=100, tests_passed=3, tests_failed=1)],
+        tests=[_expression_test("orders", 120, base_failures=108)],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert not report.passed
+    assert (
+        "- ❌ `expression_is_true` on `orders`: 120 failing rows (108 on the base branch)" in body
+    )
+    assert "Already failing on the base branch" not in body
+
+
+def test_only_new_failures_are_blamed_on_the_change() -> None:
+    report = PreflightReport(
+        models=[
+            _model("stg_customers", tests_passed=1, tests_failed=1),
+            _model("orders", changed=False, tests_passed=2, tests_failed_on_base=1),
+            _model("customers", changed=False, tests_failed=1),
+        ],
+        tests=[
+            _expression_test("stg_customers", 3),
+            _expression_test("orders", 108, preexisting=True, base_failures=108),
+            _expression_test("customers", 5),
+        ],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    breaks = body.split("Unchanged models this change breaks:")[1].split("Also rebuilt")[0]
+    assert "- `customers` — ✅ built, 1 failing test" in breaks
+    assert "`orders`" not in breaks
+    assert "Also rebuilt, no new issues: `orders`." in body
+    assert "| `stg_customers` | ✅ built | – | 1 passed, **1 failed** |" in body
+
+
+def test_preexisting_details_are_capped() -> None:
+    tests = [_expression_test(f"m{i:02d}", 1, preexisting=True, base_failures=1) for i in range(14)]
+    report = PreflightReport(models=[_model("m00")], tests=tests, base_ref="origin/main")
+    section = render(report).split("Already failing on the base branch (14)")[1]
+    assert section.count("<summary>details</summary>") == 10
+    assert "- ⚪ `expression_is_true` on `m13`: 1 failing row" in section
