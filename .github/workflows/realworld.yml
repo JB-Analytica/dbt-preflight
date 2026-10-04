@@ -1,0 +1,36 @@
+name: Real-world suite
+
+# Runs dbt-preflight against four public dbt projects and compares with
+# scripts/realworld/baseline.json. Needs network and takes several minutes, so it is not
+# part of CI: run it by hand before a release, and weekly to catch drift.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  realworld:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      REALWORLD_CACHE: ${{ runner.temp }}/preflight-realworld
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --extra dev
+      - name: Run the suite against the baseline
+        run: uv run poe realworld --compare
+      - name: Keep the comments and summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: realworld-out
+          path: ${{ runner.temp }}/preflight-realworld/out
+          if-no-files-found: ignore

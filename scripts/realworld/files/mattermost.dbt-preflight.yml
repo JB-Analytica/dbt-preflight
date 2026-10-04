@@ -1,0 +1,5 @@
+project_dir: transform/snowflake-dbt
+dialect: snowflake
+env:
+  SNOWFLAKE_TRANSFORM_DATABASE: preflight
+  SNOWFLAKE_LOAD_DATABASE: preflight

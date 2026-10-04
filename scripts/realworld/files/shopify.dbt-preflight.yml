@@ -1,0 +1,3 @@
+project_dir: integration_tests
+dialect: bigquery
+schema: integration_tests/shopify.dbml

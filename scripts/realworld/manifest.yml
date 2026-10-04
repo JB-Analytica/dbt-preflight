@@ -1,0 +1,109 @@
+# Four public dbt projects, each pinned to a commit, each run through three kinds of change.
+#
+# Per project:
+#   repo / sha      what to fetch (shallow, by SHA, so a moving main cannot change a result)
+#   setup           applied to the pinned commit and committed as the BASE. Either a file
+#                   copied in from scripts/realworld/files/ (`copy`), or an edit.
+#   changes         applied on top of base and committed as HEAD, one per change name.
+#   expect          the 0.4.0 target. `harmless: passes` = verdict passed or
+#                   passed_with_warnings; `rename: caught` = the renamed column is reported.
+#                   Informational only; the compare exit code is driven by baseline.json.
+#   rename_column   {old, new}: what "rename detected" looks for in a summary.
+#
+# Edits:
+#   {file, prepend: "text"}              put text at the very top of the file
+#   {file, replace: {old, new}}          literal replacement; `old` must occur exactly once
+#   {copy: "<name in files/>", to: "<path in repo>"}
+# An edit with `workaround:` is a stopgap for a preflight bug; delete it once fixed.
+
+comment: &comment "-- preflight comment\n"
+
+projects:
+  jaffle_shop_classic:
+    description: dbt-labs/jaffle_shop (classic), 5 models, seeds only, no config.
+    repo: https://github.com/dbt-labs/jaffle_shop.git
+    sha: fd7bfacae4f497ff044a6a0275268676bf1b64c3
+    setup: []
+    rename_column: {old: customer_id, new: cust_id}
+    expect: {harmless: passes, rename: caught}
+    changes:
+      harmless:
+        - {file: models/staging/stg_customers.sql, prepend: *comment}
+      rename:
+        - file: models/staging/stg_customers.sql
+          replace: {old: "id as customer_id,", new: "id as cust_id,"}
+      full:
+        - {file: models/staging/stg_customers.sql, prepend: *comment}
+        - {file: models/staging/stg_orders.sql, prepend: *comment}
+        - {file: models/staging/stg_payments.sql, prepend: *comment}
+
+  jaffle_shop_current:
+    description: dbt-labs/jaffle-shop (current main, dbt 2.0 project).
+    repo: https://github.com/dbt-labs/jaffle-shop.git
+    sha: 5beb145b00f5465ec759cfcdd9745e858818cf95
+    setup:
+      # The project declares require-dbt-version >=2.0.0 and preflight runs dbt-core 1.x.
+      - file: dbt_project.yml
+        replace: {old: 'require-dbt-version: ">=2.0.0"', new: 'require-dbt-version: ">=1.0.0"'}
+    rename_column: {old: customer_id, new: cust_id}
+    expect: {harmless: passes, rename: caught}
+    changes:
+      harmless:
+        - {file: models/staging/stg_customers.sql, prepend: *comment}
+      rename:
+        - file: models/staging/stg_customers.sql
+          replace: {old: "id as customer_id,", new: "id as cust_id,"}
+      full:
+        - {file: models/staging/stg_customers.sql, prepend: *comment}
+        - {file: models/staging/stg_order_items.sql, prepend: *comment}
+        - {file: models/staging/stg_orders.sql, prepend: *comment}
+        - {file: models/staging/stg_products.sql, prepend: *comment}
+
+  mattermost:
+    description: michaelschiffmm/mattermost-data-warehouse (fork), Snowflake project in a subdirectory.
+    repo: https://github.com/michaelschiffmm/mattermost-data-warehouse.git
+    sha: 2fd40877b6dfab965b1b4cdb1dde133a884d4356
+    setup:
+      - {copy: mattermost.dbt-preflight.yml, to: .dbt-preflight.yml}
+      # Two source tables are both named `report` (ga.report and another schema's); give
+      # one a distinct identifier so fixtures can be generated for both.
+      - file: transform/snowflake-dbt/models/ga/sources.yml
+        workaround: duplicate-source-table-crash
+        remove_when: preflight no longer crashes on two source tables with the same name.
+        replace:
+          old: "      - name: report\n        description: 'Users visiting Mattermost.com"
+          new: "      - name: report\n        identifier: report_com\n        description: 'Users visiting Mattermost.com"
+    rename_column: {old: total_arr, new: arr_total}
+    expect: {harmless: passes, rename: caught}
+    changes:
+      harmless:
+        - {file: transform/snowflake-dbt/models/finance/account_util_dates.sql, prepend: *comment}
+      rename:
+        - file: transform/snowflake-dbt/models/finance/account_daily_arr.sql
+          replace:
+            old: "SUM(opportunitylineitem.totalprice)::int AS total_arr,"
+            new: "SUM(opportunitylineitem.totalprice)::int AS arr_total,"
+      full:
+        - {file: transform/snowflake-dbt/models/finance/account_daily_arr.sql, prepend: *comment}
+        - {file: transform/snowflake-dbt/models/finance/account_util_dates.sql, prepend: *comment}
+        - {file: transform/snowflake-dbt/models/finance/master_account_util_dates.sql, prepend: *comment}
+
+  shopify:
+    description: fivetran/dbt_shopify, run through its integration_tests project with a hand-written DBML schema.
+    repo: https://github.com/fivetran/dbt_shopify.git
+    sha: 03e91d7aeb83151f968105f8580d13110f5375e4
+    setup:
+      - {copy: shopify.dbt-preflight.yml, to: .dbt-preflight.yml}
+      - {copy: shopify.dbml, to: integration_tests/shopify.dbml}
+    rename_column: {old: customer_id, new: cust_id}
+    expect: {harmless: passes, rename: caught}
+    changes:
+      harmless:
+        - {file: models/rest/staging/stg_shopify__customer.sql, prepend: *comment}
+      rename:
+        - file: models/rest/staging/stg_shopify__customer.sql
+          replace: {old: "id as customer_id,", new: "id as cust_id,"}
+      full:
+        - {file: models/rest/staging/stg_shopify__order.sql, prepend: *comment}
+        - {file: models/rest/staging/stg_shopify__order_line.sql, prepend: *comment}
+        - {file: models/rest/staging/stg_shopify__product.sql, prepend: *comment}

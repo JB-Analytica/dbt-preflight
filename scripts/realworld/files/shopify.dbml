@@ -1,0 +1,1748 @@
+Table shopify_abandoned_checkout_data {
+  "id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "abandoned_checkout_url" varchar [not null]
+  "applied_discount_amount" varchar
+  "applied_discount_applicable" varchar
+  "applied_discount_description" varchar
+  "applied_discount_non_applicable_reason" varchar
+  "applied_discount_title" varchar
+  "applied_discount_value" varchar
+  "applied_discount_value_type" varchar
+  "billing_address_address_1" varchar
+  "billing_address_address_0" varchar
+  "billing_address_city" varchar
+  "billing_address_company" varchar
+  "billing_address_country" varchar
+  "billing_address_country_code" varchar
+  "billing_address_first_name" varchar
+  "billing_address_last_name" varchar
+  "billing_address_latitude" float
+  "billing_address_longitude" float
+  "billing_address_name" varchar
+  "billing_address_phone" varchar
+  "billing_address_province" varchar
+  "billing_address_province_code" varchar
+  "billing_address_zip" varchar
+  "buyer_accepts_marketing" boolean [not null]
+  "cart_token" varchar [not null]
+  "closed_at" varchar
+  "completed_at" varchar
+  "created_at" timestamp [not null]
+  "credit_card_first_name" varchar
+  "credit_card_last_name" varchar
+  "credit_card_month" varchar
+  "credit_card_number" varchar
+  "credit_card_verification_value" varchar
+  "credit_card_year" varchar
+  "currency" varchar [not null]
+  "customer_id" bigint [not null]
+  "customer_locale" varchar [not null]
+  "device_id" varchar
+  "email" varchar [not null]
+  "gateway" varchar
+  "landing_site_base_url" varchar [not null]
+  "location_id" varchar
+  "name" varchar [not null]
+  "note" varchar
+  "phone" varchar
+  "referring_site" varchar
+  "shipping_address_address_1" varchar [not null]
+  "shipping_address_address_0" varchar [not null]
+  "shipping_address_city" varchar [not null]
+  "shipping_address_company" varchar
+  "shipping_address_country" varchar [not null]
+  "shipping_address_country_code" varchar [not null]
+  "shipping_address_first_name" varchar [not null]
+  "shipping_address_last_name" varchar [not null]
+  "shipping_address_latitude" float
+  "shipping_address_longitude" float
+  "shipping_address_name" varchar [not null]
+  "shipping_address_phone" varchar [not null]
+  "shipping_address_province" varchar [not null]
+  "shipping_address_province_code" varchar [not null]
+  "shipping_address_zip" varchar [not null]
+  "shipping_line" varchar
+  "shipping_rate_id" varchar
+  "shipping_rate_price" varchar
+  "shipping_rate_title" varchar
+  "source" varchar
+  "source_identifier" varchar
+  "source_name" varchar [not null]
+  "source_url" varchar
+  "subtotal_price" float [not null]
+  "taxes_included" boolean [not null]
+  "token" varchar [not null]
+  "total_discounts" float [not null]
+  "total_line_items_price" float [not null]
+  "total_price" float [not null]
+  "total_tax" float [not null]
+  "total_weight" bigint [not null]
+  "updated_at" timestamp [not null]
+  "user_id" varchar
+  "note_attribute_littledata_updated_at" bigint
+  "note_attribute_segment_client_id" varchar
+  "billing_address_id" varchar
+  "billing_address_is_default" varchar
+  "presentment_currency" varchar
+  "shipping_address_id" varchar
+  "shipping_address_is_default" varchar
+  "total_duties" varchar
+  "note_attribute_email_client_id" varchar
+  "note_attributes" varchar
+  "note_attribute_google_client_id" varchar
+  "_fivetran_deleted" boolean [not null]
+}
+
+Table shopify_abandoned_checkout_discount_code_data {
+  "checkout_id" bigint [not null]
+  "index" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "amount" float [not null]
+  "discount_id" varchar
+  "code" varchar [not null]
+  "created_at" varchar
+  "type" varchar [not null]
+  "updated_at" varchar
+  "usage_count" varchar
+}
+
+Table shopify_abandoned_checkout_shipping_line_data {
+  "checkout_id" bigint [not null]
+  "index" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "api_client_id" varchar
+  "carrier_identifier" varchar
+  "carrier_service_id" varchar
+  "code" varchar [not null]
+  "delivery_category" varchar
+  "discounted_price" varchar
+  "id" varchar [not null]
+  "markup" float [not null]
+  "phone" varchar
+  "price" float [not null]
+  "requested_fulfillment_service_id" varchar
+  "source" varchar [not null]
+  "title" varchar [not null]
+  "validation_context" varchar
+  "delivery_expectation_range" varchar
+  "delivery_expectation_type" varchar
+  "original_shop_markup" float [not null]
+  "original_shop_price" float [not null]
+  "presentment_title" varchar [not null]
+  "delivery_expectation_range_min" varchar
+  "delivery_expectation_range_max" varchar
+}
+
+Table shopify_collection_data {
+  "id" bigint [not null]
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "handle" varchar
+  "published_at" varchar
+  "published_scope" varchar
+  "title" varchar [not null]
+  "updated_at" timestamp [not null]
+  "disjunctive" varchar
+  "rules" varchar
+  "sort_order" varchar
+  "template_suffix" varchar
+  "body_html" varchar
+}
+
+Table shopify_collection_product_data {
+  "collection_id" bigint [not null]
+  "product_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_customer_data {
+  "id" bigint [not null]
+  "first_name" varchar [not null]
+  "last_name" varchar [not null]
+  "email" varchar [not null]
+  "phone" varchar
+  "state" varchar [not null]
+  "orders_count" bigint [not null]
+  "total_spent" float [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "accepts_marketing" boolean [not null]
+  "tax_exempt" boolean [not null]
+  "verified_email" boolean [not null]
+  "default_address_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_customer_tag_data {
+  "customer_id" bigint [not null]
+  "index" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_discount_allocation_data {
+  "_fivetran_synced" timestamp [not null]
+  "amount" float [not null]
+  "amount_set_presentment_money_amount" float [not null]
+  "amount_set_presentment_money_currency_code" varchar [not null]
+  "amount_set_shop_money_amount" float [not null]
+  "amount_set_shop_money_currency_code" varchar [not null]
+  "discount_application_index" bigint [not null]
+  "index" bigint [not null]
+  "order_line_id" bigint [not null]
+}
+
+Table shopify_discount_application_data {
+  "_fivetran_synced" timestamp [not null]
+  "allocation_method" varchar [not null]
+  "code" varchar [not null]
+  "description" varchar [not null]
+  "index" bigint [not null]
+  "order_id" bigint [not null]
+  "target_selection" varchar [not null]
+  "target_type" varchar [not null]
+  "title" varchar [not null]
+  "type" varchar [not null]
+  "value" float [not null]
+  "value_type" varchar [not null]
+}
+
+Table shopify_discount_code_app_data {
+  "id" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "applies_on_one_time_purchase" boolean [not null]
+  "applies_on_subscription" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "codes_count_count" bigint [not null]
+  "codes_count_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "created_at" timestamp [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "ends_at" timestamp [not null]
+  "recurring_cycle_limit" bigint [not null]
+  "starts_at" timestamp [not null]
+  "status" varchar [not null]
+  "title" varchar [not null]
+  "total_sales_amount" float
+  "total_sales_currency_code" varchar [not null]
+  "updated_at" timestamp [not null]
+  "usage_limit" bigint [not null]
+}
+
+Table shopify_discount_code_basic_data {
+  "id" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "codes_count" bigint [not null]
+  "codes_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "created_at" timestamp [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "ends_at" timestamp [not null]
+  "recurring_cycle_limit" bigint [not null]
+  "starts_at" timestamp [not null]
+  "status" varchar [not null]
+  "total_sales_amount" float
+  "total_sales_currency_code" varchar
+  "updated_at" timestamp [not null]
+  "usage_limit" bigint
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_discount_code_bxgy_data {
+  "id" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "codes_count" bigint [not null]
+  "codes_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "created_at" timestamp [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "ends_at" timestamp [not null]
+  "starts_at" timestamp [not null]
+  "status" varchar [not null]
+  "summary" varchar [not null]
+  "title" varchar [not null]
+  "total_sales_amount" float
+  "total_sales_currency_code" varchar [not null]
+  "updated_at" timestamp [not null]
+  "usage_limit" bigint [not null]
+  "uses_per_order_limit" bigint [not null]
+}
+
+Table shopify_discount_code_free_shipping_data {
+  "id" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "applies_on_one_time_purchase" boolean [not null]
+  "applies_on_subscription" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "codes_count" bigint [not null]
+  "codes_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "created_at" timestamp [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "ends_at" timestamp [not null]
+  "recurring_cycle_limit" bigint [not null]
+  "starts_at" timestamp [not null]
+  "status" varchar [not null]
+  "title" varchar [not null]
+  "total_sales_amount" float
+  "total_sales_currency_code" varchar [not null]
+  "updated_at" timestamp [not null]
+  "usage_limit" bigint [not null]
+}
+
+Table shopify_discount_redeem_code_data {
+  "_fivetran_synced" timestamp [not null]
+  "async_usage_count" bigint [not null]
+  "code" varchar [not null]
+  "created_by_description" varchar [not null]
+  "created_by_id" bigint [not null]
+  "created_by_title" varchar [not null]
+  "discount_id" bigint [not null]
+  "discount_type" varchar [not null]
+  "id" bigint [not null]
+}
+
+Table shopify_fulfillment_data {
+  "id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "location_id" bigint [not null]
+  "order_id" bigint [not null]
+  "status" varchar [not null]
+  "tracking_company" varchar
+  "tracking_number" varchar
+  "updated_at" timestamp [not null]
+  "tracking_numbers" varchar [not null]
+  "tracking_urls" varchar [not null]
+  "shipment_status" varchar
+  "service" varchar [not null]
+  "name" varchar [not null]
+  "receipt_authorization" varchar
+}
+
+Table shopify_fulfillment_event_data {
+  "id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "address_1" varchar
+  "city" varchar
+  "country" varchar
+  "created_at" timestamp [not null]
+  "estimated_delivery_at" timestamp
+  "fulfillment_id" bigint [not null]
+  "happened_at" timestamp [not null]
+  "latitude" float
+  "longitude" float
+  "message" varchar
+  "order_id" bigint [not null]
+  "province" varchar
+  "shop_id" bigint [not null]
+  "status" varchar [not null]
+  "updated_at" timestamp [not null]
+  "zip" varchar
+  "_fivetran_deleted" boolean [not null]
+}
+
+Table shopify_gql_abandoned_checkout_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "abandoned_checkout_url" varchar [not null]
+  "billing_address_address_1" varchar [not null]
+  "billing_address_address_2" varchar
+  "billing_address_city" varchar
+  "billing_address_company" varchar
+  "billing_address_country" varchar
+  "billing_address_country_code" varchar
+  "billing_address_first_name" varchar
+  "billing_address_last_name" varchar
+  "billing_address_latitude" float
+  "billing_address_longitude" float
+  "billing_address_name" varchar
+  "billing_address_phone" bigint
+  "billing_address_province" varchar
+  "billing_address_province_code" varchar
+  "billing_address_zip" bigint
+  "created_at" timestamp [not null]
+  "completed_at" timestamp
+  "customer_id" bigint [not null]
+  "id" bigint [not null]
+  "name" varchar
+  "note" varchar
+  "shipping_address_address_1" varchar
+  "shipping_address_address_2" varchar
+  "shipping_address_city" varchar
+  "shipping_address_company" varchar
+  "shipping_address_country" varchar
+  "shipping_address_country_code" varchar
+  "shipping_address_first_name" varchar
+  "shipping_address_last_name" varchar
+  "shipping_address_latitude" float
+  "shipping_address_longitude" float
+  "shipping_address_name" varchar
+  "shipping_address_phone" bigint
+  "shipping_address_province" varchar
+  "shipping_address_province_code" varchar [not null]
+  "shipping_address_zip" bigint [not null]
+  "subtotal_price_set_pres_amount" float [not null]
+  "subtotal_price_set_pres_currency_code" varchar [not null]
+  "subtotal_price_set_shop_amount" float [not null]
+  "subtotal_price_set_shop_currency_code" varchar [not null]
+  "taxes_included" boolean [not null]
+  "total_discount_set_pres_amount" float [not null]
+  "total_discount_set_pres_currency_code" varchar [not null]
+  "total_discount_set_shop_amount" float [not null]
+  "total_discount_set_shop_currency_code" varchar [not null]
+  "total_duties_set_pres_amount" float [not null]
+  "total_duties_set_pres_currency_code" varchar [not null]
+  "total_duties_set_shop_amount" float [not null]
+  "total_duties_set_shop_currency_code" varchar [not null]
+  "total_line_items_price_set_pres_amount" float [not null]
+  "total_line_items_price_set_pres_currency_code" varchar [not null]
+  "total_line_items_price_set_shop_amount" float [not null]
+  "total_line_items_price_set_shop_currency_code" varchar [not null]
+  "total_price_set_pres_amount" float [not null]
+  "total_price_set_pres_currency_code" varchar [not null]
+  "total_price_set_shop_amount" float [not null]
+  "total_price_set_shop_currency_code" varchar [not null]
+  "total_tax_set_pres_amount" float [not null]
+  "total_tax_set_pres_currency_code" varchar [not null]
+  "total_tax_set_shop_amount" float [not null]
+  "total_tax_set_shop_currency_code" varchar [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_abandoned_checkout_discount_code_data {
+  "_fivetran_synced" timestamp [not null]
+  "checkout_id" bigint [not null]
+  "code" varchar [not null]
+  "index" bigint [not null]
+}
+
+Table shopify_gql_collection_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "applied_disjunctively" boolean [not null]
+  "handle" varchar [not null]
+  "id" bigint [not null]
+  "sort_order" varchar [not null]
+  "title" varchar [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_collection_product_data {
+  "_fivetran_synced" timestamp [not null]
+  "collection_id" bigint [not null]
+  "product_id" bigint [not null]
+}
+
+Table shopify_gql_collection_rule_data {
+  "_fivetran_synced" timestamp [not null]
+  "collection_id" bigint [not null]
+  "index" bigint [not null]
+  "condition" varchar [not null]
+  "relation" varchar [not null]
+  "columns" varchar [not null]
+}
+
+Table shopify_gql_customer_address_data {
+  "_fivetran_synced" timestamp [not null]
+  "customer_id" bigint [not null]
+  "id" bigint [not null]
+  "address_1" varchar [not null]
+  "address_2" varchar [not null]
+  "city" varchar [not null]
+  "company" varchar [not null]
+  "country" varchar [not null]
+  "country_code" varchar [not null]
+  "first_name" varchar [not null]
+  "is_default" boolean [not null]
+  "last_name" varchar [not null]
+  "latitude" float [not null]
+  "longitude" float [not null]
+  "name" varchar [not null]
+  "phone" bigint [not null]
+  "province" varchar [not null]
+  "province_code" varchar [not null]
+  "zip" varchar [not null]
+  "validation_result_summary" varchar [not null]
+  "timezone" varchar [not null]
+  "coordinates_validated" boolean [not null]
+}
+
+Table shopify_gql_customer_data {
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "currency" varchar [not null]
+  "email" varchar [not null]
+  "email_marketing_consent_opt_in_level" varchar
+  "email_marketing_consent_state" varchar [not null]
+  "email_marketing_consent_updated_at" timestamp [not null]
+  "first_name" varchar [not null]
+  "id" bigint [not null]
+  "last_name" varchar [not null]
+  "note" varchar
+  "orders_count" bigint [not null]
+  "phone" bigint [not null]
+  "state" varchar [not null]
+  "tax_exempt" boolean [not null]
+  "total_spent" float [not null]
+  "updated_at" timestamp [not null]
+  "verified_email" boolean [not null]
+}
+
+Table shopify_gql_customer_tag_data {
+  "_fivetran_synced" timestamp [not null]
+  "index" bigint [not null]
+  "customer_id" bigint [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_gql_customer_visit_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "order_id" bigint [not null]
+  "type" varchar [not null]
+  "landing_page" varchar [not null]
+  "landing_page_html" varchar [not null]
+  "occurred_at" timestamp [not null]
+  "referral_code" varchar [not null]
+  "referral_info_html" varchar [not null]
+  "referrer_url" varchar [not null]
+  "source" varchar [not null]
+  "source_description" varchar [not null]
+  "source_type" varchar [not null]
+  "utm_parameters_campaign" varchar
+  "utm_parameters_content" varchar
+  "utm_parameters_medium" varchar [not null]
+  "utm_parameters_source" varchar
+  "utm_parameters_term" varchar
+}
+
+Table shopify_gql_discount_allocation_data {
+  "_fivetran_synced" timestamp [not null]
+  "allocated_amount_set_pres_amount" float [not null]
+  "allocated_amount_set_pres_currency_code" varchar [not null]
+  "allocated_amount_set_shop_amount" float [not null]
+  "allocated_amount_set_shop_currency_code" varchar [not null]
+  "discount_application_index" bigint [not null]
+  "index" bigint [not null]
+  "order_line_id" bigint [not null]
+}
+
+Table shopify_gql_discount_application_data {
+  "_fivetran_synced" timestamp [not null]
+  "allocation_method" varchar [not null]
+  "index" bigint [not null]
+  "order_id" bigint [not null]
+  "target_selection" varchar [not null]
+  "target_type" varchar [not null]
+  "value_amount" float [not null]
+  "value_currency_code" varchar [not null]
+  "value_percentage" float [not null]
+  "code" varchar [not null]
+}
+
+Table shopify_gql_discount_code_app_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "title" varchar [not null]
+  "status" varchar [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "starts_at" timestamp [not null]
+  "ends_at" timestamp [not null]
+  "recurring_cycle_limit" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "usage_limit" bigint [not null]
+  "codes_count_count" bigint [not null]
+  "codes_count_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "total_sales_amount" float [not null]
+  "total_sales_currency_code" varchar [not null]
+}
+
+Table shopify_gql_discount_code_basic_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "status" varchar [not null]
+  "title" varchar [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "starts_at" timestamp [not null]
+  "ends_at" timestamp [not null]
+  "recurring_cycle_limit" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "usage_limit" bigint [not null]
+  "codes_count" bigint [not null]
+  "codes_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "total_sales_amount" float [not null]
+  "total_sales_currency_code" varchar [not null]
+}
+
+Table shopify_gql_discount_code_bxgy_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "title" varchar [not null]
+  "status" varchar [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "starts_at" timestamp [not null]
+  "ends_at" timestamp [not null]
+  "applies_once_per_customer" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "usage_limit" bigint [not null]
+  "codes_count" bigint [not null]
+  "codes_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "total_sales_amount" float [not null]
+  "total_sales_currency_code" varchar [not null]
+}
+
+Table shopify_gql_discount_code_free_shipping_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "status" varchar [not null]
+  "title" varchar [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "starts_at" timestamp [not null]
+  "ends_at" timestamp [not null]
+  "recurring_cycle_limit" bigint [not null]
+  "applies_once_per_customer" boolean [not null]
+  "async_usage_count" bigint [not null]
+  "usage_limit" bigint [not null]
+  "codes_count" bigint [not null]
+  "codes_precision" varchar [not null]
+  "combines_with_order_discounts" boolean [not null]
+  "combines_with_product_discounts" boolean [not null]
+  "combines_with_shipping_discounts" boolean [not null]
+  "customer_selection_all_customers" boolean [not null]
+  "total_sales_amount" float [not null]
+  "total_sales_currency_code" varchar [not null]
+}
+
+Table shopify_gql_discount_redeem_code_data {
+  "_fivetran_synced" timestamp [not null]
+  "async_usage_count" bigint [not null]
+  "code" varchar [not null]
+  "created_by_description" varchar [not null]
+  "created_by_id" bigint [not null]
+  "created_by_title" varchar [not null]
+  "discount_id" bigint [not null]
+  "discount_type" varchar [not null]
+  "id" bigint [not null]
+}
+
+Table shopify_gql_fulfillment_data {
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "display_status" varchar [not null]
+  "id" bigint [not null]
+  "location_id" bigint [not null]
+  "name" varchar [not null]
+  "order_id" bigint [not null]
+  "service_id" varchar [not null]
+  "status" varchar [not null]
+  "total_quantity" bigint [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_fulfillment_event_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "address_1" varchar [not null]
+  "city" varchar [not null]
+  "country" varchar [not null]
+  "created_at" timestamp [not null]
+  "estimated_delivery_at" timestamp [not null]
+  "fulfillment_id" bigint [not null]
+  "happened_at" timestamp [not null]
+  "id" bigint [not null]
+  "latitude" float [not null]
+  "longitude" float [not null]
+  "message" varchar [not null]
+  "province" varchar [not null]
+  "status" varchar [not null]
+  "zip" varchar [not null]
+}
+
+Table shopify_gql_fulfillment_order_line_item_data {
+  "_fivetran_synced" timestamp [not null]
+  "fulfillment_order_id" bigint [not null]
+  "id" bigint [not null]
+  "image_alt_text" varchar [not null]
+  "image_height" bigint [not null]
+  "image_id" bigint [not null]
+  "image_url" varchar [not null]
+  "image_width" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "order_line_item_id" bigint [not null]
+  "product_title" varchar [not null]
+  "product_variant_id" bigint [not null]
+  "remaining_quantity" bigint [not null]
+  "requires_shipping" boolean [not null]
+  "sku" varchar [not null]
+  "total_quantity" bigint [not null]
+  "variant_title" varchar [not null]
+  "vendor" varchar [not null]
+  "weight_unit" varchar [not null]
+  "weight_value" float [not null]
+}
+
+Table shopify_gql_fulfillment_tracking_info_data {
+  "_fivetran_synced" timestamp [not null]
+  "company" varchar [not null]
+  "fulfillment_id" bigint [not null]
+  "index" bigint [not null]
+  "number" varchar [not null]
+  "url" varchar [not null]
+}
+
+Table shopify_gql_inventory_item_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "country_code_of_origin" varchar [not null]
+  "created_at" timestamp [not null]
+  "duplicate_sku_count" bigint [not null]
+  "harmonized_system_code" varchar [not null]
+  "id" bigint [not null]
+  "inventory_history_url" varchar [not null]
+  "legacy_resource_id" bigint [not null]
+  "measurement_id" bigint [not null]
+  "measurement_weight_unit" varchar [not null]
+  "measurement_weight_value" float [not null]
+  "province_code_of_origin" varchar [not null]
+  "requires_shipping" boolean [not null]
+  "sku" varchar [not null]
+  "tracked" boolean [not null]
+  "tracked_editable_locked" boolean [not null]
+  "tracked_editable_reason" varchar [not null]
+  "unit_cost_amount" float [not null]
+  "unit_cost_currency_code" varchar [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_inventory_level_data {
+  "_fivetran_synced" timestamp [not null]
+  "can_deactivate" boolean [not null]
+  "created_at" timestamp [not null]
+  "deactivation_alert" varchar [not null]
+  "id" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "location_id" bigint [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_inventory_quantity_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "inventory_level_id" bigint [not null]
+  "name" varchar [not null]
+  "quantity" bigint [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_location_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "address_1" varchar
+  "address_2" varchar
+  "city" varchar
+  "country" varchar
+  "country_code" varchar
+  "created_at" timestamp
+  "id" bigint [not null]
+  "is_active" boolean [not null]
+  "is_fulfillment_service" boolean [not null]
+  "name" varchar [not null]
+  "phone" bigint [not null]
+  "province" varchar
+  "province_code" varchar
+  "updated_at" timestamp [not null]
+  "zip" bigint [not null]
+}
+
+Table shopify_gql_media_data {
+  "_fivetran_synced" timestamp [not null]
+  "alt" varchar [not null]
+  "created_at" timestamp [not null]
+  "file_status" varchar [not null]
+  "id" bigint [not null]
+  "media_content_type" varchar [not null]
+  "preview_image_alt_text" varchar [not null]
+  "preview_image_height" bigint [not null]
+  "preview_image_id" bigint [not null]
+  "preview_image_url" varchar [not null]
+  "preview_image_width" bigint [not null]
+  "preview_status" varchar [not null]
+  "status" varchar [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_media_image_data {
+  "media_id" bigint [not null]
+  "image_id" bigint [not null]
+  "image_alt_text" varchar [not null]
+  "image_height" bigint [not null]
+  "image_url" varchar [not null]
+  "image_width" bigint [not null]
+}
+
+Table shopify_gql_metafield_data {
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "description" varchar [not null]
+  "id" bigint [not null]
+  "key" varchar [not null]
+  "namespace" varchar [not null]
+  "owner_id" bigint [not null]
+  "owner_resource" varchar [not null]
+  "type" varchar [not null]
+  "value_type" varchar [not null]
+  "updated_at" timestamp [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_gql_order_adjustment_data {
+  "id" bigint [not null]
+  "refund_id" bigint [not null]
+  "amount_set_pres_amount" float [not null]
+  "amount_set_pres_currency_code" varchar [not null]
+  "amount_set_shop_amount" float [not null]
+  "amount_set_shop_currency_code" varchar [not null]
+  "reason" varchar [not null]
+  "tax_amount_set_pres_amount" float [not null]
+  "tax_amount_set_pres_currency_code" varchar [not null]
+  "tax_amount_set_shop_amount" float [not null]
+  "tax_amount_set_shop_currency_code" varchar [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_gql_order_custom_attribute_data {
+  "_fivetran_synced" timestamp [not null]
+  "name" varchar
+  "key" varchar
+  "order_id" bigint [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_gql_order_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "app_id" bigint [not null]
+  "billing_address_address_1" varchar [not null]
+  "billing_address_address_2" varchar
+  "billing_address_city" varchar
+  "billing_address_company" varchar
+  "billing_address_country" varchar
+  "billing_address_country_code" varchar
+  "billing_address_first_name" varchar
+  "billing_address_last_name" varchar
+  "billing_address_latitude" float
+  "billing_address_longitude" float
+  "billing_address_name" varchar
+  "billing_address_phone" bigint
+  "billing_address_province" varchar
+  "billing_address_province_code" varchar
+  "billing_address_zip" varchar [not null]
+  "cancel_reason" varchar
+  "cancelled_at" timestamp
+  "client_ip" varchar [not null]
+  "closed_at" timestamp [not null]
+  "confirmed" boolean [not null]
+  "created_at" timestamp [not null]
+  "currency_code" varchar [not null]
+  "customer_accepts_marketing" boolean [not null]
+  "customer_id" bigint [not null]
+  "customer_locale" varchar [not null]
+  "display_financial_status" varchar [not null]
+  "display_fulfillment_status" varchar [not null]
+  "email" varchar [not null]
+  "id" bigint [not null]
+  "location_id" bigint [not null]
+  "name" varchar [not null]
+  "note" varchar
+  "number" bigint [not null]
+  "presentment_currency_code" varchar
+  "processed_at" timestamp
+  "shipping_address_address_1" varchar
+  "shipping_address_address_2" varchar
+  "shipping_address_city" varchar
+  "shipping_address_company" varchar
+  "shipping_address_country" varchar
+  "shipping_address_country_code" varchar
+  "shipping_address_first_name" varchar
+  "shipping_address_last_name" varchar
+  "shipping_address_latitude" float
+  "shipping_address_longitude" float
+  "shipping_address_name" varchar
+  "shipping_address_phone" bigint
+  "shipping_address_province" varchar [not null]
+  "shipping_address_province_code" varchar [not null]
+  "shipping_address_zip" bigint [not null]
+  "source_name" varchar [not null]
+  "staff_member_id" bigint [not null]
+  "status_page_url" varchar [not null]
+  "subtotal_price_set_pres_amount" float [not null]
+  "subtotal_price_set_pres_currency_code" varchar [not null]
+  "subtotal_price_set_shop_amount" float [not null]
+  "subtotal_price_set_shop_currency_code" varchar [not null]
+  "taxes_included" boolean [not null]
+  "test" boolean [not null]
+  "total_discounts_set_pres_amount" float [not null]
+  "total_discounts_set_pres_currency_code" varchar [not null]
+  "total_discounts_set_shop_amount" float [not null]
+  "total_discounts_set_shop_currency_code" varchar [not null]
+  "total_price_set_pres_amount" float [not null]
+  "total_price_set_pres_currency_code" varchar [not null]
+  "total_price_set_shop_amount" float [not null]
+  "total_price_set_shop_currency_code" varchar [not null]
+  "total_shipping_price_set_pres_amount" float [not null]
+  "total_shipping_price_set_pres_currency_code" varchar [not null]
+  "total_shipping_price_set_shop_amount" float [not null]
+  "total_shipping_price_set_shop_currency_code" varchar [not null]
+  "total_tax_set_pres_amount" float [not null]
+  "total_tax_set_pres_currency_code" varchar [not null]
+  "total_tax_set_shop_amount" float [not null]
+  "total_tax_set_shop_currency_code" varchar [not null]
+  "total_tip_received_set_pres_amount" float [not null]
+  "total_tip_received_set_pres_currency_code" varchar [not null]
+  "total_tip_received_set_shop_amount" float [not null]
+  "total_tip_received_set_shop_currency_code" varchar [not null]
+  "total_weight" varchar
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_order_discount_code_data {
+  "_fivetran_synced" timestamp [not null]
+  "code" varchar [not null]
+  "index" bigint [not null]
+  "order_id" bigint [not null]
+}
+
+Table shopify_gql_order_line_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "is_gift_card" boolean [not null]
+  "name" varchar [not null]
+  "order_id" bigint [not null]
+  "original_total_set_pres_amount" float [not null]
+  "original_total_set_pres_currency_code" varchar [not null]
+  "original_total_set_shop_amount" float [not null]
+  "original_total_set_shop_currency_code" varchar [not null]
+  "original_unit_price_set_shop_amount" float [not null]
+  "original_unit_price_set_shop_currency_code" varchar [not null]
+  "product_id" bigint [not null]
+  "quantity" bigint [not null]
+  "requires_shipping" boolean [not null]
+  "sku" varchar [not null]
+  "taxable" boolean [not null]
+  "title" varchar [not null]
+  "total_discount_set_pres_amount" float [not null]
+  "total_discount_set_pres_currency_code" varchar [not null]
+  "total_discount_set_shop_amount" float [not null]
+  "total_discount_set_shop_currency_code" varchar [not null]
+  "unfulfilled_quantity" bigint [not null]
+  "variant_id" bigint [not null]
+  "variant_title" varchar [not null]
+  "vendor" varchar [not null]
+}
+
+Table shopify_gql_order_line_refund_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "location_id" bigint [not null]
+  "order_line_id" bigint [not null]
+  "quantity" float [not null]
+  "refund_id" bigint [not null]
+  "restock_type" varchar [not null]
+  "subtotal_set_pres_amount" float [not null]
+  "subtotal_set_pres_currency_code" varchar [not null]
+  "subtotal_set_shop_amount" float [not null]
+  "subtotal_set_shop_currency_code" varchar [not null]
+  "total_tax_set_pres_amount" float [not null]
+  "total_tax_set_pres_currency_code" varchar [not null]
+  "total_tax_set_shop_amount" float [not null]
+  "total_tax_set_shop_currency_code" varchar [not null]
+}
+
+Table shopify_gql_order_line_tax_line_data {
+  "_fivetran_synced" timestamp [not null]
+  "index" bigint [not null]
+  "order_line_id" bigint [not null]
+  "price_set_pres_amount" float [not null]
+  "price_set_pres_currency_code" varchar [not null]
+  "price_set_shop_amount" float [not null]
+  "price_set_shop_currency_code" varchar [not null]
+  "rate" float [not null]
+  "title" varchar [not null]
+}
+
+Table shopify_gql_order_note_attribute_data {
+  "_fivetran_synced" timestamp [not null]
+  "name" varchar [not null]
+  "order_id" bigint [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_gql_order_shipping_line_data {
+  "_fivetran_synced" timestamp [not null]
+  "carrier_identifier" varchar [not null]
+  "code" varchar [not null]
+  "current_discounted_price_set_pres_amount" float [not null]
+  "current_discounted_price_set_pres_currency_code" varchar [not null]
+  "current_discounted_price_set_shop_amount" float [not null]
+  "current_discounted_price_set_shop_currency_code" varchar [not null]
+  "custom" boolean [not null]
+  "delivery_category" varchar [not null]
+  "discounted_price_set_pres_amount" float [not null]
+  "discounted_price_set_pres_currency_code" varchar [not null]
+  "discounted_price_set_shop_amount" float [not null]
+  "discounted_price_set_shop_currency_code" varchar [not null]
+  "id" bigint [not null]
+  "is_removed" boolean [not null]
+  "order_id" bigint [not null]
+  "original_price_set_pres_amount" float [not null]
+  "original_price_set_pres_currency_code" varchar [not null]
+  "original_price_set_shop_amount" float [not null]
+  "original_price_set_shop_currency_code" varchar [not null]
+  "phone" varchar [not null]
+  "shipping_rate_handle" varchar [not null]
+  "source" varchar [not null]
+  "title" varchar [not null]
+}
+
+Table shopify_gql_order_shipping_tax_line_data {
+  "_fivetran_synced" timestamp [not null]
+  "index" bigint [not null]
+  "order_shipping_line_id" bigint [not null]
+  "price_set_pres_amount" float [not null]
+  "price_set_pres_currency_code" varchar [not null]
+  "price_set_shop_amount" float [not null]
+  "price_set_shop_currency_code" varchar [not null]
+  "rate" float [not null]
+  "source" varchar [not null]
+  "title" varchar [not null]
+}
+
+Table shopify_gql_order_tag_data {
+  "_fivetran_synced" timestamp [not null]
+  "index" bigint [not null]
+  "order_id" bigint [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_gql_product_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "handle" varchar [not null]
+  "id" bigint [not null]
+  "product_type" varchar [not null]
+  "published_at" timestamp [not null]
+  "status" varchar [not null]
+  "title" varchar [not null]
+  "updated_at" timestamp [not null]
+  "vendor" varchar [not null]
+}
+
+Table shopify_gql_product_media_data {
+  "_fivetran_synced" timestamp [not null]
+  "media_id" bigint [not null]
+  "product_id" bigint [not null]
+}
+
+Table shopify_gql_product_tag_data {
+  "_fivetran_synced" timestamp [not null]
+  "index" bigint [not null]
+  "product_id" bigint [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_gql_product_variant_data {
+  "_fivetran_synced" timestamp [not null]
+  "available_for_sale" boolean [not null]
+  "barcode" varchar [not null]
+  "compare_at_price" float [not null]
+  "created_at" timestamp [not null]
+  "display_name" varchar [not null]
+  "id" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "inventory_policy" varchar [not null]
+  "inventory_quantity" bigint [not null]
+  "legacy_resource_id" bigint [not null]
+  "position" bigint [not null]
+  "price" float [not null]
+  "product_id" bigint [not null]
+  "requires_components" boolean [not null]
+  "sellable_online_quantity" bigint [not null]
+  "sku" varchar [not null]
+  "tax_code" varchar [not null]
+  "taxable" boolean [not null]
+  "title" varchar [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_product_variant_media_data {
+  "product_variant_id" bigint [not null]
+  "media_id" bigint [not null]
+}
+
+Table shopify_gql_refund_data {
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "id" bigint [not null]
+  "note" varchar [not null]
+  "order_id" bigint [not null]
+  "return_id" bigint [not null]
+  "staff_member_id" bigint [not null]
+  "total_refunded_set_pres_amount" float [not null]
+  "total_refunded_set_pres_currency_code" varchar [not null]
+  "total_refunded_set_shop_amount" float [not null]
+  "total_refunded_set_shop_currency_code" varchar [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_gql_refund_line_item_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "location_id" bigint [not null]
+  "order_line_id" bigint [not null]
+  "price_set_pres_amount" float [not null]
+  "price_set_pres_currency_code" varchar [not null]
+  "price_set_shop_amount" float [not null]
+  "price_set_shop_currency_code" varchar [not null]
+  "quantity" float [not null]
+  "refund_id" bigint [not null]
+  "restocked" boolean [not null]
+  "restock_type" varchar [not null]
+  "subtotal_set_pres_amount" float [not null]
+  "subtotal_set_pres_currency_code" varchar [not null]
+  "subtotal_set_shop_amount" float [not null]
+  "subtotal_set_shop_currency_code" varchar [not null]
+  "total_tax_set_pres_amount" float [not null]
+  "total_tax_set_pres_currency_code" varchar [not null]
+  "total_tax_set_shop_amount" float [not null]
+  "total_tax_set_shop_currency_code" varchar [not null]
+}
+
+Table shopify_gql_return_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "order_id" bigint [not null]
+  "name" varchar [not null]
+  "status" varchar [not null]
+  "decline_reason" varchar
+  "decline_note" varchar
+  "total_quantity" bigint [not null]
+}
+
+Table shopify_gql_return_line_item_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "return_id" bigint [not null]
+  "order_line_id" bigint [not null]
+  "customer_note" varchar
+  "quantity" bigint [not null]
+  "refundable_quantity" bigint [not null]
+  "refunded_quantity" bigint [not null]
+  "return_reason_note" varchar
+}
+
+Table shopify_gql_return_shipping_fee_data {
+  "_fivetran_synced" timestamp [not null]
+  "id" bigint [not null]
+  "return_id" bigint [not null]
+  "amount_set_presentment_money_amount" float [not null]
+  "amount_set_presentment_money_currency_code" varchar [not null]
+  "amount_set_shop_money_amount" float [not null]
+  "amount_set_shop_money_currency_code" varchar [not null]
+}
+
+Table shopify_gql_shop_data {
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "billing_address_address_1" varchar
+  "billing_address_address_2" varchar
+  "billing_address_city" varchar
+  "billing_address_country" varchar
+  "billing_address_country_code_v_2" varchar [not null]
+  "billing_address_latitude" float [not null]
+  "billing_address_longitude" float [not null]
+  "billing_address_phone" bigint [not null]
+  "billing_address_province" varchar
+  "billing_address_province_code" varchar
+  "billing_address_zip" bigint
+  "checkout_api_supported" boolean [not null]
+  "contact_email" varchar [not null]
+  "created_at" timestamp [not null]
+  "currency_code" varchar [not null]
+  "currency_formats_money_format" varchar [not null]
+  "currency_formats_money_in_emails_format" varchar [not null]
+  "currency_formats_money_with_currency_format" varchar [not null]
+  "currency_formats_money_with_currency_in_emails_format" varchar [not null]
+  "email" varchar [not null]
+  "enabled_presentment_currencies" varchar [not null]
+  "features_storefront" boolean [not null]
+  "iana_timezone" varchar [not null]
+  "id" bigint [not null]
+  "myshopify_domain" varchar [not null]
+  "name" varchar [not null]
+  "password_enabled" boolean [not null]
+  "plan_display_name" varchar [not null]
+  "primary_domain_host" varchar [not null]
+  "primary_domain_localization_default_locale" varchar [not null]
+  "setup_required" boolean [not null]
+  "shop_owner_name" varchar [not null]
+  "tax_shipping" boolean [not null]
+  "taxes_included" boolean [not null]
+  "timezone_abbreviation" varchar [not null]
+  "timezone_offset" varchar [not null]
+  "timezone_offset_minutes" bigint [not null]
+  "updated_at" timestamp [not null]
+  "weight_unit" varchar [not null]
+}
+
+Table shopify_gql_tax_line_data {
+  "_fivetran_synced" timestamp [not null]
+  "index" bigint [not null]
+  "order_line_id" bigint [not null]
+  "price_set_pres_amount" float [not null]
+  "price_set_pres_currency_code" varchar [not null]
+  "price_set_shop_amount" float [not null]
+  "price_set_shop_currency_code" varchar [not null]
+  "rate" float [not null]
+  "title" varchar [not null]
+}
+
+Table shopify_gql_tender_transaction_data {
+  "_fivetran_synced" timestamp [not null]
+  "amount" float [not null]
+  "currency_code" varchar [not null]
+  "id" bigint [not null]
+  "order_id" bigint [not null]
+  "payment_method" varchar [not null]
+  "processed_at" timestamp [not null]
+  "remote_reference" varchar [not null]
+  "test" boolean [not null]
+  "user_id" bigint [not null]
+}
+
+Table shopify_gql_transaction_data {
+  "_fivetran_synced" timestamp [not null]
+  "amount_set_pres_amount" float [not null]
+  "amount_set_pres_currency_code" varchar [not null]
+  "amount_set_shop_amount" float [not null]
+  "amount_set_shop_currency_code" varchar [not null]
+  "authorization_code" varchar [not null]
+  "authorization_expires_at" timestamp [not null]
+  "created_at" timestamp [not null]
+  "error_code" varchar
+  "gateway" varchar [not null]
+  "id" bigint [not null]
+  "kind" varchar [not null]
+  "order_id" bigint [not null]
+  "parent_id" bigint
+  "payment_avs_result_code" varchar [not null]
+  "payment_credit_card_bin" bigint [not null]
+  "payment_credit_card_company" varchar [not null]
+  "payment_credit_card_number" varchar [not null]
+  "payment_cvv_result_code" varchar [not null]
+  "processed_at" timestamp [not null]
+  "refund_id" bigint
+  "staff_member_id" bigint [not null]
+  "status" varchar [not null]
+  "test" boolean [not null]
+  "device_id" varchar [not null]
+  "currency_exchange_id" varchar
+  "currency_exchange_adjustment" varchar
+  "currency_exchange_original_amount" varchar
+  "currency_exchange_final_amount" varchar
+  "currency_exchange_currency" varchar
+}
+
+Table shopify_inventory_item_data {
+  "id" bigint [not null]
+  "country_code_of_origin" varchar
+  "created_at" timestamp [not null]
+  "duplicate_sku_count" bigint [not null]
+  "harmonized_system_code" varchar
+  "inventory_history_url" varchar [not null]
+  "legacy_resource_id" bigint [not null]
+  "measurement_id" bigint [not null]
+  "measurement_weight_value" bigint [not null]
+  "measurement_weight_unit" varchar [not null]
+  "province_code_of_origin" varchar
+  "requires_shipping" boolean [not null]
+  "sku" varchar [not null]
+  "tracked" boolean [not null]
+  "tracked_editable_locked" varchar
+  "tracked_editable_reason" varchar
+  "unit_cost_amount" varchar
+  "unit_cost_currency_code" varchar
+  "updated_at" varchar
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_inventory_level_data {
+  "id" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "location_id" bigint [not null]
+  "can_deactivate" boolean [not null]
+  "created_at" timestamp [not null]
+  "deactivation_alert" varchar [not null]
+  "updated_at" timestamp [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_inventory_quantity_data {
+  "id" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "inventory_level_id" bigint [not null]
+  "name" varchar [not null]
+  "quantity" bigint [not null]
+  "updated_at" timestamp [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_location_data {
+  "id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "active" boolean [not null]
+  "address_1" varchar
+  "address_2" varchar
+  "city" varchar
+  "country" varchar [not null]
+  "created_at" timestamp [not null]
+  "legacy" boolean [not null]
+  "name" varchar [not null]
+  "phone" varchar
+  "province" varchar
+  "updated_at" timestamp [not null]
+  "zip" varchar
+  "country_code" varchar [not null]
+  "country_name" varchar [not null]
+  "localized_country_name" varchar [not null]
+  "localized_province_name" varchar
+  "province_code" varchar
+  "_fivetran_deleted" boolean [not null]
+}
+
+Table shopify_media_data {
+  "id" bigint [not null]
+  "status" varchar [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+}
+
+Table shopify_media_image_data {
+  "media_id" bigint [not null]
+  "image_id" bigint [not null]
+  "image_alt_text" varchar
+  "image_height" bigint [not null]
+  "image_url" varchar [not null]
+  "image_width" bigint [not null]
+}
+
+Table shopify_metafield_data {
+  "id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "created_at" timestamp [not null]
+  "description" varchar
+  "key" varchar [not null]
+  "namespace" varchar [not null]
+  "owner_id" bigint [not null]
+  "owner_resource" varchar [not null]
+  "updated_at" timestamp [not null]
+  "value" varchar [not null]
+  "value_type" varchar
+  "type" varchar [not null]
+}
+
+Table shopify_order_adjustment_data {
+  "id" bigint [not null]
+  "order_id" bigint [not null]
+  "refund_id" bigint [not null]
+  "amount" bigint [not null]
+  "tax_amount" float [not null]
+  "kind" varchar [not null]
+  "reason" varchar [not null]
+  "amount_set" varchar
+  "tax_amount_set" varchar
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_order_data {
+  "id" bigint [not null]
+  "note" varchar
+  "email" varchar [not null]
+  "taxes_included" boolean [not null]
+  "currency" varchar [not null]
+  "subtotal_price" float [not null]
+  "total_tax" float [not null]
+  "total_price" float [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "name" varchar [not null]
+  "shipping_address_name" varchar
+  "shipping_address_first_name" varchar
+  "shipping_address_last_name" varchar
+  "shipping_address_company" varchar
+  "shipping_address_phone" varchar
+  "shipping_address_address_1" varchar
+  "shipping_address_address_2" varchar
+  "shipping_address_city" varchar
+  "shipping_address_country" varchar
+  "shipping_address_country_code" varchar
+  "shipping_address_province" varchar
+  "shipping_address_province_code" varchar
+  "shipping_address_zip" varchar
+  "shipping_address_latitude" varchar
+  "shipping_address_longitude" varchar
+  "billing_address_name" varchar
+  "billing_address_first_name" varchar
+  "billing_address_last_name" varchar
+  "billing_address_company" varchar
+  "billing_address_phone" varchar
+  "billing_address_address_1" varchar
+  "billing_address_address_2" varchar
+  "billing_address_city" varchar
+  "billing_address_country" varchar
+  "billing_address_country_code" varchar
+  "billing_address_province" varchar
+  "billing_address_province_code" varchar
+  "billing_address_zip" varchar
+  "billing_address_latitude" varchar
+  "billing_address_longitude" varchar
+  "customer_id" bigint [not null]
+  "location_id" bigint
+  "user_id" bigint
+  "number" bigint [not null]
+  "order_number" bigint [not null]
+  "financial_status" varchar [not null]
+  "fulfillment_status" varchar
+  "processed_at" timestamp [not null]
+  "processing_method" varchar
+  "referring_site" varchar
+  "cancel_reason" varchar
+  "cancelled_at" varchar
+  "closed_at" timestamp
+  "total_discounts" float [not null]
+  "total_line_items_price" float [not null]
+  "total_weight" bigint [not null]
+  "source_name" varchar [not null]
+  "browser_ip" varchar
+  "buyer_accepts_marketing" boolean [not null]
+  "token" varchar [not null]
+  "cart_token" varchar
+  "checkout_token" varchar
+  "test" boolean [not null]
+  "landing_site_base_url" varchar
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_order_discount_code_data {
+  "index" bigint [not null]
+  "order_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "amount" float [not null]
+  "code" varchar [not null]
+  "type" varchar [not null]
+}
+
+Table shopify_order_line_data {
+  "order_id" bigint [not null]
+  "id" bigint [not null]
+  "product_id" bigint [not null]
+  "variant_id" bigint [not null]
+  "name" varchar [not null]
+  "title" varchar [not null]
+  "vendor" varchar [not null]
+  "price" float [not null]
+  "quantity" bigint [not null]
+  "grams" bigint [not null]
+  "sku" varchar [not null]
+  "fulfillable_quantity" bigint [not null]
+  "fulfillment_service" varchar [not null]
+  "gift_card" boolean [not null]
+  "requires_shipping" boolean [not null]
+  "taxable" boolean [not null]
+  "index" bigint [not null]
+  "total_discount" bigint [not null]
+  "pre_tax_price" varchar
+  "fulfillment_status" varchar
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_order_line_refund_data {
+  "id" bigint [not null]
+  "location_id" bigint
+  "refund_id" bigint [not null]
+  "restock_type" varchar [not null]
+  "quantity" bigint [not null]
+  "order_line_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "subtotal" bigint [not null]
+  "total_tax_set" varchar
+  "subtotal_set" varchar
+  "total_tax" float [not null]
+}
+
+Table shopify_order_note_attribute_data {
+  "name" varchar [not null]
+  "order_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_order_shipping_line_data {
+  "id" bigint [not null]
+  "order_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "carrier_identifier" varchar
+  "code" varchar [not null]
+  "delivery_category" varchar
+  "discounted_price" float [not null]
+  "phone" varchar
+  "price" float [not null]
+  "requested_fulfillment_service_id" varchar
+  "source" varchar [not null]
+  "title" varchar [not null]
+  "discounted_price_set" varchar [not null]
+  "price_set" varchar [not null]
+}
+
+Table shopify_order_shipping_tax_line_data {
+  "index" bigint [not null]
+  "order_shipping_line_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "price" float [not null]
+  "rate" float [not null]
+  "title" varchar [not null]
+  "price_set" varchar [not null]
+}
+
+Table shopify_order_tag_data {
+  "index" bigint [not null]
+  "order_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_order_url_tag_data {
+  "key" varchar [not null]
+  "order_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_product_data {
+  "id" bigint [not null]
+  "title" varchar [not null]
+  "handle" varchar [not null]
+  "product_type" varchar [not null]
+  "vendor" varchar [not null]
+  "created_at" timestamp [not null]
+  "updated_at" timestamp [not null]
+  "published_at" timestamp [not null]
+  "published_scope" varchar [not null]
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_product_media_data {
+  "product_id" bigint [not null]
+  "media_id" bigint [not null]
+}
+
+Table shopify_product_tag_data {
+  "index" bigint [not null]
+  "product_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "value" varchar [not null]
+}
+
+Table shopify_product_variant_data {
+  "product_id" bigint [not null]
+  "id" bigint [not null]
+  "inventory_item_id" bigint [not null]
+  "available_for_sale" boolean [not null]
+  "barcode" varchar
+  "compare_at_price" varchar
+  "created_at" timestamp [not null]
+  "display_name" varchar [not null]
+  "inventory_policy" varchar [not null]
+  "inventory_quantity" bigint [not null]
+  "legacy_resource_id" bigint [not null]
+  "metafield" varchar
+  "position" bigint [not null]
+  "price" float [not null]
+  "requires_components" boolean [not null]
+  "sellable_online_quantity" bigint [not null]
+  "sku" varchar [not null]
+  "tax_code" varchar
+  "taxable" boolean [not null]
+  "title" varchar [not null]
+  "updated_at" timestamp [not null]
+  "_fivetran_synced" timestamp [not null]
+}
+
+Table shopify_product_variant_media_data {
+  "product_variant_id" bigint [not null]
+  "media_id" bigint [not null]
+}
+
+Table shopify_refund_data {
+  "id" bigint [not null]
+  "created_at" timestamp [not null]
+  "processed_at" timestamp [not null]
+  "note" varchar
+  "restock" boolean [not null]
+  "user_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "total_duties_set" varchar
+  "order_id" bigint [not null]
+}
+
+Table shopify_shop_data {
+  "id" bigint [not null]
+  "_fivetran_deleted" boolean [not null]
+  "_fivetran_synced" timestamp [not null]
+  "address_1" varchar [not null]
+  "address_2" varchar [not null]
+  "auto_configure_tax_inclusivity" varchar
+  "checkout_api_supported" boolean [not null]
+  "city" varchar [not null]
+  "cookie_consent_level" varchar [not null]
+  "country" varchar [not null]
+  "country_code" varchar [not null]
+  "country_name" varchar [not null]
+  "county_taxes" boolean [not null]
+  "created_at" timestamp [not null]
+  "currency" varchar [not null]
+  "customer_email" varchar [not null]
+  "domain" varchar [not null]
+  "eligible_for_card_reader_giveaway" boolean [not null]
+  "eligible_for_payments" boolean [not null]
+  "email" varchar [not null]
+  "enabled_presentment_currencies" varchar [not null]
+  "force_ssl" boolean [not null]
+  "google_apps_domain" varchar
+  "google_apps_login_enabled" varchar
+  "has_discounts" boolean [not null]
+  "has_gift_cards" boolean [not null]
+  "has_storefront" boolean [not null]
+  "iana_timezone" varchar [not null]
+  "latitude" float [not null]
+  "longitude" float [not null]
+  "money_format" varchar [not null]
+  "money_in_emails_format" varchar [not null]
+  "money_with_currency_format" varchar [not null]
+  "money_with_currency_in_emails_format" varchar [not null]
+  "multi_location_enabled" boolean [not null]
+  "myshopify_domain" varchar [not null]
+  "name" varchar [not null]
+  "password_enabled" boolean [not null]
+  "phone" bigint [not null]
+  "plan_display_name" varchar [not null]
+  "plan_name" varchar [not null]
+  "pre_launch_enabled" boolean [not null]
+  "primary_locale" varchar [not null]
+  "primary_location_id" bigint [not null]
+  "province" varchar [not null]
+  "province_code" varchar [not null]
+  "requires_extra_payments_agreement" boolean [not null]
+  "setup_required" boolean [not null]
+  "shop_owner" varchar [not null]
+  "source" varchar
+  "tax_shipping" varchar
+  "taxes_included" boolean [not null]
+  "timezone" varchar [not null]
+  "updated_at" timestamp [not null]
+  "visitor_tracking_consent_preference" varchar [not null]
+  "weight_unit" varchar [not null]
+  "zip" bigint [not null]
+}
+
+Table shopify_tax_line_data {
+  "index" bigint [not null]
+  "order_line_id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "price" float [not null]
+  "rate" float [not null]
+  "title" varchar [not null]
+  "price_set" varchar [not null]
+}
+
+Table shopify_tender_transaction_data {
+  "id" bigint [not null]
+  "_fivetran_synced" timestamp [not null]
+  "amount" float [not null]
+  "currency" varchar [not null]
+  "order_id" bigint [not null]
+  "payment_details_credit_card_company" varchar
+  "payment_details_credit_card_number" varchar
+  "payment_method" varchar [not null]
+  "processed_at" timestamp [not null]
+  "remote_reference" varchar
+  "test" boolean [not null]
+  "user_id" varchar
+}
+
+Table shopify_transaction_data {
+  "id" bigint [not null]
+  "order_id" bigint [not null]
+  "refund_id" varchar
+  "amount" float [not null]
+  "authorization" varchar [not null]
+  "created_at" timestamp [not null]
+  "processed_at" timestamp [not null]
+  "device_id" varchar
+  "gateway" varchar [not null]
+  "source_name" varchar [not null]
+  "message" varchar [not null]
+  "currency" varchar [not null]
+  "location_id" varchar
+  "parent_id" varchar
+  "payment_avs_result_code" varchar
+  "kind" varchar [not null]
+  "currency_exchange_id" varchar
+  "currency_exchange_adjustment" varchar
+  "currency_exchange_original_amount" varchar
+  "currency_exchange_final_amount" varchar
+  "currency_exchange_currency" varchar
+  "error_code" varchar
+  "status" varchar [not null]
+  "test" boolean [not null]
+  "user_id" varchar
+  "_fivetran_synced" timestamp [not null]
+  "payment_credit_card_bin" varchar
+  "payment_cvv_result_code" varchar
+  "payment_credit_card_number" varchar
+  "payment_credit_card_company" varchar
+  "receipt" varchar
+}

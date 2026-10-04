@@ -95,4 +95,7 @@ fix = "ruff check . --fix --exit-zero"
 format = "ruff format ."
 type = "ty check dbt_preflight/"
 test-quick = "pytest -q --no-header -p no:warnings"
+# Needs network and minutes; deliberately not part of `check`. Extra flags pass through:
+# `uv run poe realworld --compare`, `--project shopify --change rename`, `--write-baseline`.
+realworld = "python scripts/realworld/run.py"
 check = ["fix", "format", "lint", "type", "test-quick"]
