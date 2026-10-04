@@ -10,26 +10,31 @@ from dbt_preflight.conventions import ERROR, OFF, WARN, ConventionError, from_co
 from dbt_preflight.manifest import Manifest
 
 
-def test_default_is_the_house_preset() -> None:
-    c = from_config(None)
+def test_opting_in_gets_the_house_preset_at_full_strength() -> None:
+    c = from_config({"preset": "jba"})
+    assert c == jba()
     assert c.severity("naming") == ERROR and c.severity("description") == WARN
     assert c.source_layer == "staging"
     assert c.pattern("marts") and c.pattern("marts").match("fct_orders")
     assert c.any_enabled
 
 
-def test_without_a_config_file_the_house_rules_only_warn() -> None:
-    c = from_config(None, configured=False)
+def test_without_a_conventions_block_the_house_rules_only_warn() -> None:
+    c = from_config(None)
     assert c.severity("naming") == WARN and c.severity("primary_key") == WARN
     assert c.severity("description") == WARN
     assert c.layers == jba().layers
 
 
-def test_config_file_without_conventions_block_keeps_full_strength(tmp_path: Path) -> None:
+def test_a_config_file_alone_does_not_opt_in_to_the_house_rules(tmp_path: Path) -> None:
+    # A config file usually exists for a path or a dialect. On 4 Oct 2026 one written only
+    # for `project_dir` and `dialect` turned fivetran/dbt_shopify into 263 convention errors.
     (tmp_path / "dbt_project.yml").write_text("name: p\nprofile: p\n")
     assert load_config(tmp_path).conventions.severity("naming") == WARN  # no file at all
     (tmp_path / CONFIG_FILENAME).write_text("rows: 50\n")
-    assert load_config(tmp_path).conventions.severity("naming") == ERROR  # a file, no block
+    assert load_config(tmp_path).conventions.severity("naming") == WARN  # a file, no block
+    (tmp_path / CONFIG_FILENAME).write_text("rows: 50\nconventions:\n  preset: jba\n")
+    assert load_config(tmp_path).conventions.severity("naming") == ERROR  # opted in
 
 
 def test_none_preset_switches_everything_off() -> None:

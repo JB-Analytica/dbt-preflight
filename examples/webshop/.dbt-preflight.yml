@@ -12,3 +12,6 @@ locale: nl_BE
 env:
   # sources.yml reads the database from GCP_PROJECT; preflight names its DuckDB catalog after it.
   GCP_PROJECT: preflight
+conventions:
+  # Opt in to the JB Analytica house rules at full strength; without this block they only warn.
+  preset: jba

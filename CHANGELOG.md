@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The house conventions are opt-in.** A `.dbt-preflight.yml` no longer turns the `jba`
+  preset on at full strength by itself: without a `conventions:` block the rules run as
+  warnings, exactly as they do with no config file at all. Add `conventions: {preset: jba}`
+  to keep them as errors. A config file written only for `project_dir` and `dialect` had
+  turned fivetran/dbt_shopify into 263 convention errors.
+
 ## [0.3.0] - 2026-09-16
 
 ### Added
