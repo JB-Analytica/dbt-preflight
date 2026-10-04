@@ -35,9 +35,11 @@ def is_preexisting(
 ) -> bool:
     """Whether a failing head test failed the same way, or worse, on the base branch.
 
-    Tests are matched by dbt's unique id, which for a generic test encodes its arguments:
-    a test that is new on head, or whose definition changed, has no base result and so
-    always counts against the pull request. Otherwise:
+    Tests are matched by dbt's unique id. A test that is new on head has no base result,
+    and always counts. The unique id survives an edit to a singular test's SQL, a unit
+    test's rows or a generic test's config, so the caller drops the base result of every
+    test `state:modified` selects before asking: an edited test is judged as new.
+    Otherwise:
 
     - failed on both: pre-existing unless the head returns *more* failing rows. The same
       test returning more rows is the change making things worse, and counts.

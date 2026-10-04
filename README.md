@@ -79,9 +79,10 @@ from your schema, and the warehouse is a DuckDB file that lives for the length o
   are left out of the build and run after it, so the rest of the pull request is still
   checked. A test fails "the same way" when it returns rows on both sides and no more on
   the pull request, or errors on both sides with the same error; a test that returned rows
-  on the base and errors on the pull request counts against it. `accepted_values` is
-  judged like every other test. A model that fails to build still skips what depends on
-  it, and so does a test failure the change caused. Without `--base-ref` there is nothing
+  on the base and errors on the pull request counts against it, and so does any test the
+  pull request added or edited. `accepted_values` is judged like every other test. A model
+  that fails to build still skips what depends on it, and so does a test failure the
+  change caused, including one that fails worse than on the base. Without `--base-ref` there is nothing
   to compare against, so every failing test counts, as it always has.
 - What the change did to the output. The base branch is built on the same fixtures, and the
   changed models plus everything downstream are compared: columns added, removed or

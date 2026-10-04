@@ -1,3 +1,5 @@
+from conftest import _generic_test
+
 from dbt_preflight.manifest import Manifest
 
 
@@ -105,3 +107,48 @@ def test_unit_tests_are_read_with_the_model_they_exercise(raw_manifest: dict) ->
     manifest = Manifest.from_dict(raw_manifest)
     assert manifest.tested_models({"unit_test.p.dim_customers.sums"}) == {"model.p.dim_customers"}
     assert "model.p.dim_customers" in manifest.affected_models({"unit_test.p.dim_customers.sums"})
+
+
+def test_selector_pins_one_node_even_when_a_test_shares_a_models_name(raw_manifest: dict) -> None:
+    # A singular test named `dim_customers`: a bare-name selector would also match the model.
+    raw_manifest["nodes"]["model.p.dim_customers"]["fqn"] = ["p", "marts", "dim_customers"]
+    raw_manifest["nodes"]["test.p.dim_customers"] = {
+        "resource_type": "test",
+        "name": "dim_customers",
+        "fqn": ["p", "dim_customers"],
+        "depends_on": {"nodes": ["model.p.dim_customers"]},
+    }
+    manifest = Manifest.from_dict(raw_manifest)
+    assert manifest.selector("test.p.dim_customers") == "resource_type:test,fqn:p.dim_customers"
+    assert manifest.selector("model.p.dim_customers") == (
+        "resource_type:model,fqn:p.marts.dim_customers"
+    )
+
+
+def test_a_test_added_on_a_seed_selects_the_seed(raw_manifest: dict) -> None:
+    _with_seed_and_snapshot(raw_manifest)
+    raw_manifest["nodes"]["test.p.seed_check"] = _generic_test(
+        "accepted_values_country_codes_code",
+        "accepted_values",
+        "code",
+        "seed.p.country_codes",
+        ["seed.p.country_codes"],
+    )
+    manifest = Manifest.from_dict(raw_manifest)
+    assert manifest.affected_nodes({"test.p.seed_check"}) == ["seed.p.country_codes"]
+    assert manifest.affected_models({"test.p.seed_check"}) == []
+
+
+def test_snapshots_with_a_fixed_target_schema_are_marked(raw_manifest: dict) -> None:
+    raw_manifest["nodes"]["snapshot.p.legacy"] = {
+        "resource_type": "snapshot",
+        "name": "legacy",
+        "config": {"target_schema": "snapshots"},
+    }
+    raw_manifest["nodes"]["snapshot.p.modern"] = {
+        "resource_type": "snapshot",
+        "name": "modern",
+        "config": {"target_schema": None, "schema": "snapshots"},
+    }
+    manifest = Manifest.from_dict(raw_manifest)
+    assert manifest.fixed_schema_snapshots == {"snapshot.p.legacy"}

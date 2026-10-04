@@ -75,8 +75,8 @@ Every flag on `run`:
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
 | `counts` | object | `models` (built/failed/skipped/not_verified/no_result), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `tests.failed` counts only failures the change answers for; `tests.failed_on_base` the ones that also fail on the base branch. |
 | `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, dialect_function. |
-| `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count when the same test failed there on fewer rows; null otherwise), reading (a one-line plain-English reading of the DuckDB error, when there is one). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
-| `preexisting_failing_tests` | array | Failing tests that fail the same way, or on more rows, on the base branch: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
+| `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count whenever the same, unedited test also failed there with rows; null when it passed, errored or is new or edited. In this list a non-null value is always smaller than `failures`: the test got worse), reading (a one-line plain-English reading of the DuckDB error, when there is one). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
+| `preexisting_failing_tests` | array | Failing tests that fail on the base branch the same way, on at least as many rows: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
 | `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared, and model2data's own warnings. |
@@ -85,8 +85,10 @@ Every flag on `run`:
 ### Failing tests and the base branch
 
 With `--base-ref`, the base branch runs the same tests on the same fixtures before the pull
-request is built, and each failing test is matched to its base result by dbt's unique id
-(which, for a generic test, encodes its arguments, so an edited test is a new one):
+request is built, and each failing test is matched to its base result by dbt's unique id. A test the pull
+request added or edited never is: the unique id survives an edit to a singular test's SQL,
+a unit test's rows or a generic test's config (`where`, `severity`, `error_if`, ...), so a
+test that `state:modified` selects is always judged as new. Otherwise:
 
 | On the base branch | On the pull request | Counts against the run |
 | --- | --- | --- |
@@ -98,8 +100,13 @@ request is built, and each failing test is matched to its base result by dbt's u
 
 Pre-existing failures make the verdict `passed_with_warnings` rather than `passed`: they
 are a real finding about the project, only not this change's. Tests already failing on the
-base are run after the build rather than inside it, so they never skip the models
-downstream of them. This is additive to schema version 1: a consumer that reads
+base are run after the build rather than inside it, so a pre-existing failure never skips
+the models downstream of it. One that turns out worse on the pull request is the change's
+failure, and is reported the way a single `dbt build` would have: the models downstream of
+what it tests show as skipped.
+
+Rows are what dbt reports as `failures`, so for a test that counts groups rather than rows
+(`accepted_values` counts distinct rejected values) "more rows" means more of those. This is additive to schema version 1: a consumer that reads
 `verdict`, `counts.tests.failed` or `failing_tests` keeps getting what the run blames on
 the change. A consumer that wants every failing test regardless reads both lists.
 
