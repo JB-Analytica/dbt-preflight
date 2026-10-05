@@ -87,6 +87,16 @@ def paths_changed(
     return changed
 
 
+def file_at(repo_root: Path, ref: str, path: Path) -> str | None:
+    """The contents of `path` at `ref`, or None when it does not exist there."""
+    try:
+        rel = str(path.resolve().relative_to(repo_root.resolve()))
+    except ValueError:
+        return None
+    result = _git(repo_root, "show", f"{ref}:{rel}", check=False)
+    return result.stdout if result.returncode == 0 else None
+
+
 def git_root(start: Path) -> Path:
     """The repository root containing `start`, or `start` itself outside any repository."""
     result = _git(start, "rev-parse", "--show-toplevel", check=False)
