@@ -91,7 +91,10 @@ from your schema, and the warehouse is a DuckDB file that lives for the length o
   on main too*, with its error, the models it skipped on both branches, and a line
   pointing at any tests that already fail there. The check passes with warnings. A model
   the change modified, added, or reaches from upstream, one that built on the base, or
-  one that fails there with a different error still fails the check. A model skipped on
+  one that fails there with a different error still fails the check. One that fails the
+  same way on the base but sits below something the change touched still fails it, under
+  *Could not be checked*: DuckDB reports only the first error, so a new one could hide
+  behind the old, but the change is not known to have broken it either. A model skipped on
   the pull request is put down to a broken model only when it was skipped on the base
   too and the change neither touched it nor broke anything else above it; otherwise it
   counts as broken by the change.

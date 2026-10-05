@@ -163,6 +163,8 @@ class Manifest:
     # Snapshots with a legacy `target_schema`: the schema is fixed, not derived from the
     # target, so the base branch and the pull request would write the same table.
     fixed_schema_snapshots: set[str] = field(default_factory=set)
+    # (schema, alias) of every seed and snapshot, lowercased; see `relations`.
+    load_relations: set[tuple[str, str]] = field(default_factory=set)
 
     @classmethod
     def load(cls, path: Path) -> Manifest:
@@ -245,6 +247,17 @@ class Manifest:
                     frontier.append(child)
         return out
 
+    def relations(self) -> set[tuple[str, str]]:
+        """(schema, table) of every relation the project builds or reads, lowercased.
+
+        Models, seeds and snapshots by their configured schema and alias, sources by their
+        schema and identifier: what a "table does not exist" error can be checked against.
+        """
+        out = {(m.schema.lower(), m.alias.lower()) for m in self.models.values()}
+        out |= {(s.schema.lower(), s.identifier.lower()) for s in self.sources.values()}
+        out |= self.load_relations
+        return out
+
     def node_name(self, uid: str) -> str:
         """The name dbt selects a model, seed or snapshot by."""
         if uid in self.models:
@@ -280,6 +293,11 @@ class Manifest:
         seeds: dict[str, str] = {}
         snapshots: dict[str, str] = {}
         fixed_schema_snapshots: set[str] = set()
+        load_relations: set[tuple[str, str]] = {
+            (str(node.get("schema") or "").lower(), str(node.get("alias") or node["name"]).lower())
+            for node in raw.get("nodes", {}).values()
+            if node.get("resource_type") in {"seed", "snapshot"}
+        }
         fqns: dict[str, list[str]] = {
             uid: [str(part) for part in node["fqn"]]
             for section in ("nodes", "unit_tests")
@@ -401,6 +419,7 @@ class Manifest:
             unit_tests=unit_tests,
             fqns=fqns,
             fixed_schema_snapshots=fixed_schema_snapshots,
+            load_relations=load_relations,
         )
 
     def tests_for_model(self, model_uid: str) -> list[TestNode]:

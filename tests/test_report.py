@@ -922,3 +922,56 @@ def test_a_base_given_as_a_sha_is_shortened() -> None:
         base_ref="f5be0aa00a761305ad769cfce04801f62d7d745a",
     )
     assert "### ⚠️ Broken on f5be0aa too" in render(report)
+
+
+def test_a_missing_table_nothing_builds_reads_as_hard_coded() -> None:
+    from dbt_preflight.report import _human_reading
+
+    message = (
+        'Catalog Error: Table with name "finance.account_daily_arr" does not exist because '
+        'schema "finance" does not exist.'
+    )
+    relations = {("preflight_finance", "account_daily_arr")}
+    assert _human_reading(message, relations) == (
+        "reads `finance.account_daily_arr`, which no model, seed or source in this project "
+        "builds (a hard-coded table?)"
+    )
+    built = 'Catalog Error: Table with name "preflight_finance"."account_daily_arr" does not exist'
+    assert "was not built, it failed or was skipped upstream" in (
+        _human_reading(built, relations) or ""
+    )
+    assert "was not built" in (_human_reading("Table with name stg_x does not exist", None) or "")
+
+
+def test_a_model_the_change_reaches_is_not_checked_rather_than_broken() -> None:
+    unverified = _model(
+        "account_daily_arr_deltas",
+        status=FAILED,
+        changed=False,
+        message="Runtime Error\n  Catalog Error: Table with name finance.x does not exist!",
+        unverified_broken_on_base=True,
+        reached_from=["account_util_dates"],
+    )
+    report = PreflightReport(
+        models=[
+            _model("account_util_dates", rows=0, tests_passed=1),
+            unverified,
+            _model("account_monthly", status=SKIPPED, changed=False, skipped_by_unverified=True),
+            _model("fct_genuinely_broken", status=FAILED, changed=False, message="Binder Error: x"),
+        ],
+        base_ref="origin/main",
+        relations=set(),
+    )
+    body = render(report)
+    assert not report.passed  # still counts against the pull request
+    section = body.split("### ❓ Could not be checked (1)")[1].split("###")[0]
+    assert (
+        "- `account_daily_arr_deltas` — fails on `main` too, and this change reaches it from "
+        "upstream (`account_util_dates`): Catalog Error: Table with name finance.x does not exist!"
+    ) in section
+    assert "Skipped because of it: `account_monthly`." in section
+    breaks = body.split("Unchanged models this change breaks:")[1].split("###")[0]
+    assert "`fct_genuinely_broken`" in breaks  # built on base, fails on head: today's wording
+    assert "account_daily_arr_deltas" not in breaks and "account_monthly" not in breaks
+    errors = body.split("### Build errors")[1]
+    assert "fct_genuinely_broken" in errors and "account_daily_arr_deltas" not in errors

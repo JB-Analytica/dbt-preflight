@@ -58,6 +58,7 @@ def _model_counts(models: list[ModelReport]) -> dict[str, int]:
         "no_result": 0,
         "failed_on_base": 0,
         "skipped_by_base": 0,
+        "unverified_broken_on_base": 0,
     }
     by_status = {
         BUILT: "built",
@@ -67,6 +68,10 @@ def _model_counts(models: list[ModelReport]) -> dict[str, int]:
         NO_RESULT: "no_result",
     }
     for m in models:
+        # Counted as failed too: it fails the run. This says how many of those failures
+        # are a base error the change reaches rather than one it is known to have caused.
+        if m.unverified_broken_on_base:
+            counts["unverified_broken_on_base"] += 1
         if m.broken_on_base:
             counts["failed_on_base"] += 1
             continue
@@ -92,12 +97,16 @@ def _model(m: ModelReport) -> dict[str, Any]:
         "tests_failed_on_base": m.tests_failed_on_base,
         "broken_on_base": m.broken_on_base,
         "skipped_by_base": m.skipped_by_base,
+        "unverified_broken_on_base": m.unverified_broken_on_base,
+        "skipped_by_unverified": m.skipped_by_unverified,
         "dialect_function": m.dialect_function,
     }
 
 
-def _failing_test(t: FailedTest) -> dict[str, Any]:
-    reading = _human_reading(t.message) if t.status == "error" and t.message.strip() else None
+def _failing_test(t: FailedTest, relations: set[tuple[str, str]] | None = None) -> dict[str, Any]:
+    reading = (
+        _human_reading(t.message, relations) if t.status == "error" and t.message.strip() else None
+    )
     return {
         "name": t.name,
         "readable_name": _generic_test_label(t) if t.test_name else None,
@@ -200,8 +209,12 @@ def build_summary(
         "models": [_model(m) for m in report.models],
         # Pre-existing failures have their own list, so `failing_tests` keeps meaning "what
         # this change has to fix (or was warned about)" for a consumer written against it.
-        "failing_tests": [_failing_test(t) for t in report.tests if not t.preexisting],
-        "preexisting_failing_tests": [_failing_test(t) for t in report.preexisting_tests],
+        "failing_tests": [
+            _failing_test(t, report.relations) for t in report.tests if not t.preexisting
+        ],
+        "preexisting_failing_tests": [
+            _failing_test(t, report.relations) for t in report.preexisting_tests
+        ],
         "broken_on_base_models": [
             {
                 "name": m.name,
@@ -209,6 +222,15 @@ def build_summary(
                 "error": broken_on_base_error(m),
             }
             for m in report.broken_on_base_models
+        ],
+        "unverified_broken_on_base_models": [
+            {
+                "name": m.name,
+                "unique_id": m.unique_id,
+                "error": broken_on_base_error(m),
+                "reached_from": list(m.reached_from),
+            }
+            for m in report.unverified_broken_models
         ],
         "violations": [
             {

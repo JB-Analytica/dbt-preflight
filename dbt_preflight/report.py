@@ -44,6 +44,12 @@ class ModelReport:
     # like that upstream of it failed. Neither fails the check.
     broken_on_base: bool = False
     skipped_by_base: bool = False
+    # Fails on the base the same way, but the change reaches it from upstream, so a new
+    # error could hide behind the old one: it counts, as "could not be checked". What it
+    # alone skips is `skipped_by_unverified`, and counts too.
+    unverified_broken_on_base: bool = False
+    reached_from: list[str] = field(default_factory=list)  # what the change modified upstream
+    skipped_by_unverified: bool = False
 
     @property
     def not_this_change(self) -> bool:
@@ -91,6 +97,9 @@ class PreflightReport:
     untranspiled: dict[str, str] = field(default_factory=dict)  # model -> why sqlglot gave up
     # Snapshots with a legacy fixed `target_schema`, built for the pull request only.
     shared_snapshots: list[str] = field(default_factory=list)
+    # (schema, table) of every relation the project builds or reads, from the manifest;
+    # None when unknown. See `_missing_table_reading`.
+    relations: set[tuple[str, str]] | None = None
     diffs: list[ModelDiff] = field(default_factory=list)  # base vs head, for changed models
     metrics_defined: int = 0  # how many metric definitions the project has, across sources
 
@@ -107,6 +116,16 @@ class PreflightReport:
     def broken_on_base_models(self) -> list[ModelReport]:
         """Models that fail to build on the base branch too, the same way."""
         return [m for m in self.models if m.broken_on_base]
+
+    @property
+    def unverified_broken_models(self) -> list[ModelReport]:
+        """Models broken on the base too that this change reaches: counted, not checked."""
+        return [m for m in self.models if m.unverified_broken_on_base]
+
+    @property
+    def build_error_models(self) -> list[ModelReport]:
+        """Failed models whose errors are shown as this change's: not the unverified ones."""
+        return [m for m in self.failed_models if not m.unverified_broken_on_base]
 
     @property
     def skipped_by_base_models(self) -> list[ModelReport]:
@@ -235,10 +254,6 @@ _ERROR_READINGS: list[tuple[re.Pattern[str], str]] = [
         "this model has no column `{0}`: renamed or dropped upstream?",
     ),
     (
-        re.compile(r"Table with name (\S+) does not exist"),
-        "`{0}` was not built, it failed or was skipped upstream",
-    ),
-    (
         re.compile(r"Scalar Function with name (\w+) does not exist"),
         "`{0}` is not a DuckDB function",
     ),
@@ -246,9 +261,45 @@ _ERROR_READINGS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def _human_reading(message: str) -> str | None:
-    """A one-line plain-English reading of a DuckDB error, or None for a shape not covered."""
-    for pattern, template in _ERROR_READINGS:
+_MISSING_TABLE = re.compile(r"Table with name (\S+) does not exist")
+
+
+def _missing_table_reading(name: str, relations: set[tuple[str, str]] | None) -> str:
+    """What a missing table means: a node that did not build, or one nothing builds.
+
+    Only a relation the project builds or declares (a model, seed, snapshot or source)
+    can have "failed or been skipped upstream". Anything else is read from outside dbt,
+    usually a table hard-coded in the SQL, which no branch of this project will create.
+    """
+    shown = name.strip('"')
+    parts = [part.strip('"').lower() for part in shown.split(".") if part]
+    known = relations is None or (
+        any(parts[-1] == table for _, table in relations)
+        if len(parts) == 1
+        else (parts[-2], parts[-1]) in relations
+    )
+    if known:
+        return f"`{shown}` was not built, it failed or was skipped upstream"
+    return (
+        f"reads `{shown}`, which no model, seed or source in this project builds "
+        "(a hard-coded table?)"
+    )
+
+
+def _human_reading(message: str, relations: set[tuple[str, str]] | None = None) -> str | None:
+    """A one-line plain-English reading of a DuckDB error, or None for a shape not covered.
+
+    `relations` (the project's own, see `Manifest.relations`) tells a model that did not
+    build from a table nothing builds; without it a missing table reads as the former.
+    """
+    for pattern, template in _ERROR_READINGS[:2]:
+        m = pattern.search(message or "")
+        if m:
+            return template.format(*m.groups())
+    missing = _MISSING_TABLE.search(message or "")
+    if missing:
+        return _missing_table_reading(missing.group(1), relations)
+    for pattern, template in _ERROR_READINGS[2:]:
         m = pattern.search(message or "")
         if m:
             return template.format(*m.groups())
@@ -301,7 +352,9 @@ def _test_detail(t: FailedTest) -> str:
     return t.status
 
 
-def _test_entry_lines(t: FailedTest, details: bool = True) -> list[str]:
+def _test_entry_lines(
+    t: FailedTest, details: bool = True, relations: set[tuple[str, str]] | None = None
+) -> list[str]:
     """The bullet for one failing or warning test, with its details block where there is one."""
     if t.preexisting:
         icon = "⚪"
@@ -320,7 +373,7 @@ def _test_entry_lines(t: FailedTest, details: bool = True) -> list[str]:
             lines.append(f"  dbt test name: `{t.name}`")
             lines.append("")
         if t.status == "error" and t.message.strip():
-            reading = _human_reading(t.message)
+            reading = _human_reading(t.message, relations)
             if reading:
                 lines.append(f"  {reading}")
                 lines.append("")
@@ -338,11 +391,11 @@ def _test_entry_lines(t: FailedTest, details: bool = True) -> list[str]:
     return lines
 
 
-def _build_error_lines(m: ModelReport) -> list[str]:
+def _build_error_lines(m: ModelReport, relations: set[tuple[str, str]] | None = None) -> list[str]:
     """One model's build error: its path, a plain-English reading when there is one, then
     the raw message."""
     lines = [f"**`{m.name}`** — {m.path}", ""]
-    reading = _human_reading(m.message)
+    reading = _human_reading(m.message, relations)
     if reading:
         lines.append(reading)
         lines.append("")
@@ -437,6 +490,8 @@ def render(report: PreflightReport) -> str:
         build_cell = _STATUS_LABEL.get(m.status, m.status)
         if m.broken_on_base:
             build_cell = f"⚠️ fails on {_base_name(report)} too"
+        elif m.unverified_broken_on_base:
+            build_cell = "❓ could not be checked"
         elif m.skipped_by_base:
             build_cell += f" (broken on {_base_name(report)} upstream)"
         if m.status == NOT_VERIFIED and m.dialect_function:
@@ -444,8 +499,17 @@ def render(report: PreflightReport) -> str:
         lines.append(f"| `{m.name}` | {build_cell} | {rows_cell} | {_tests_cell(m)} |")
     lines.append("")
 
+    lines += _unverified_section(report)
+
     # Models broken on the base branch, and what they skip, are in the section above.
-    around = [m for m in report.models if not m.changed and not m.not_this_change]
+    around = [
+        m
+        for m in report.models
+        if not m.changed
+        and not m.not_this_change
+        and not m.unverified_broken_on_base
+        and not m.skipped_by_unverified
+    ]
     if around and report.base_ref:
         broken = [m for m in around if m.status in {FAILED, SKIPPED} or m.tests_failed]
         if broken:
@@ -474,11 +538,11 @@ def render(report: PreflightReport) -> str:
             lines.append(f"Also rebuilt, no new issues: {', '.join(shown)}{tail}.")
             lines.append("")
 
-    if report.failed_models:
+    if report.build_error_models:
         lines.append("### Build errors")
         lines.append("")
-        for i, m in enumerate(report.failed_models):
-            entry = _build_error_lines(m)
+        for i, m in enumerate(report.build_error_models):
+            entry = _build_error_lines(m, report.relations)
             if i == 0:
                 lines += entry
             else:
@@ -495,17 +559,17 @@ def render(report: PreflightReport) -> str:
         all_tests = report.failing_tests + report.warning_tests
         shown_tests, rest_tests = all_tests[:3], all_tests[3:]
         for t in shown_tests:
-            lines += _test_entry_lines(t)
+            lines += _test_entry_lines(t, relations=report.relations)
         if rest_tests:
             lines.append(f"<details><summary>{len(rest_tests)} more failing tests</summary>")
             lines.append("")
             for t in rest_tests:
-                lines += _test_entry_lines(t)
+                lines += _test_entry_lines(t, relations=report.relations)
             lines.append("</details>")
         lines.append("")
 
     if report.preexisting_tests:
-        lines += _preexisting_section(report.preexisting_tests)
+        lines += _preexisting_section(report.preexisting_tests, report.relations)
 
     if report.diffs:
         lines += _diff_section(report)
@@ -555,6 +619,52 @@ def broken_on_base_error(m: ModelReport) -> str:
     `finance.account_daily_arr`, and the raw line says so.
     """
     return _one_line_error(m.message)
+
+
+def _unverified_section(report: PreflightReport) -> list[str]:
+    """Models that fail on the base too, but that the change reaches: counted, unchecked.
+
+    Not "broken by this change", which is not established, and not "broken on main too",
+    which would let a new error hide behind the old one: DuckDB reports only the first.
+    """
+    unverified = report.unverified_broken_models
+    if not unverified:
+        return []
+    base = _base_name(report)
+    lines = [
+        f"### ❓ Could not be checked ({len(unverified)})",
+        "",
+        f"{'This model fails' if len(unverified) == 1 else 'These models fail'} on `{base}` "
+        "too, the same way, but this change reaches "
+        f"{'it' if len(unverified) == 1 else 'them'} from upstream. DuckDB reports only the "
+        "first error in a statement, so a new one could be hiding behind the old one, and "
+        f"{'it counts' if len(unverified) == 1 else 'they count'} against this pull request "
+        "until that error is fixed.",
+        "",
+    ]
+    skipped = [m for m in report.models if m.skipped_by_unverified]
+    for m in unverified:
+        via = ", ".join(f"`{n}`" for n in m.reached_from) or "upstream"
+        lines.append(
+            f"- `{m.name}` — fails on `{base}` too, and this change reaches it from upstream "
+            f"({via}): {broken_on_base_error(m)}"
+        )
+    if skipped:
+        names = [f"`{m.name}`" for m in skipped]
+        shown, rest = names[:_SKIPPED_BY_BASE_SHOWN], names[_SKIPPED_BY_BASE_SHOWN:]
+        lines += [
+            "",
+            f"Skipped because of {'it' if len(unverified) == 1 else 'them'}: {', '.join(shown)}.",
+        ]
+        if rest:
+            lines += [
+                f"<details><summary>{len(rest)} more skipped</summary>",
+                "",
+                ", ".join(rest) + ".",
+                "</details>",
+            ]
+    lines.append("")
+    return lines
 
 
 def _base_name(report: PreflightReport) -> str:
@@ -615,7 +725,9 @@ def _broken_on_base_section(report: PreflightReport) -> list[str]:
     return lines
 
 
-def _preexisting_section(tests: list[FailedTest]) -> list[str]:
+def _preexisting_section(
+    tests: list[FailedTest], relations: set[tuple[str, str]] | None = None
+) -> list[str]:
     """Tests that fail on the base branch too, folded: reported, but not this change's doing."""
     lines = [
         f"<details><summary>Already failing on the base branch ({len(tests)})</summary>",
@@ -627,7 +739,7 @@ def _preexisting_section(tests: list[FailedTest]) -> list[str]:
         "",
     ]
     for i, t in enumerate(tests):
-        lines += _test_entry_lines(t, details=i < _PREEXISTING_DETAILED)
+        lines += _test_entry_lines(t, details=i < _PREEXISTING_DETAILED, relations=relations)
     lines += ["</details>", ""]
     return lines
 

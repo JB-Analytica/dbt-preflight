@@ -614,3 +614,47 @@ def test_a_lock_file_rewritten_by_dbt_deps_is_not_a_change(tmp_path: Path) -> No
     assert paths_changed(repo, "main", [lock], committed_only=True) == []
     _git(repo, "commit", "-qam", "bump the lock")
     assert paths_changed(repo, "main", [lock], committed_only=True) == [lock]
+
+
+HARD_CODED = "select final.* from final cross join finance.fx_rates"
+
+
+def test_a_model_broken_on_base_that_the_change_reaches_could_not_be_checked(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # fct_orders reads a table nothing builds, on main already. The change edits staging
+    # orders, upstream of it: the same error on both sides could hide a new one, so it
+    # counts, but it is reported as unchecked, not as broken by the change.
+    _edit(webshop, "dbt/models/marts/fct_orders.sql", "select * from final", HARD_CODED)
+    _commit_base_then_branch(webshop)
+    _edit(webshop, STG_ORDERS, "with source as", "-- a harmless comment\nwith source as")
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["verdict"] == "failed"
+    [unchecked] = summary["unverified_broken_on_base_models"]
+    assert unchecked["name"] == "fct_orders"
+    assert unchecked["reached_from"] == ["stg_webshop__orders"]
+    assert summary["counts"]["models"]["unverified_broken_on_base"] == 1
+    assert summary["broken_on_base_models"] == []
+    section = body.split("### ❓ Could not be checked (1)")[1].split("###")[0]
+    assert "- `fct_orders` — fails on `main` too, and this change reaches it from upstream" in (
+        section
+    )
+    assert "(`stg_webshop__orders`)" in section
+    if "Unchanged models this change breaks" in body:
+        breaks = body.split("Unchanged models this change breaks")[1].split("###")[0]
+        assert "`fct_orders`" not in breaks
+    assert "### Build errors" not in body
+
+
+def test_a_new_hard_coded_table_reads_as_one(webshop: Path, tmp_path: Path) -> None:
+    _commit_base_then_branch(webshop)
+    _edit(webshop, "dbt/models/marts/fct_orders.sql", "select * from final", HARD_CODED)
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert (
+        "reads `finance.fx_rates`, which no model, seed or source in this project builds "
+        "(a hard-coded table?)"
+    ) in body.split("### Build errors")[1]

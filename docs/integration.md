@@ -73,10 +73,11 @@ Every flag on `run`:
 | `elapsed_seconds` | number | Total run time. |
 | `fatal` | string or null | Set only on `could_not_run`: why preflight could not run at all. |
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
-| `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, and `tests.failed_on_base` the tests that also fail on the base branch. |
-| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, dialect_function. `status` stays dbt's (`failed`, `skipped`); the two booleans say it is not this change's doing. |
+| `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base/unverified_broken_on_base), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, and `tests.failed_on_base` the tests that also fail on the base branch. |
+| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, unverified_broken_on_base, skipped_by_unverified, dialect_function. `status` stays dbt's (`failed`, `skipped`); the two booleans say it is not this change's doing. |
 | `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count whenever the same, unedited test also failed there with rows; null when it passed, errored or is new or edited. In this list a non-null value is always smaller than `failures`: the test got worse), reading (a one-line plain-English reading of the DuckDB error, when there is one). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
 | `preexisting_failing_tests` | array | Failing tests that fail on the base branch the same way, on at least as many rows: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
+| `unverified_broken_on_base_models` | array | Models that fail on the base branch the same way, but that the change reaches from upstream, so they could not be checked: name, unique_id, error, reached_from (what the change modified upstream of it). They do fail the run, and are counted in `counts.models.failed`. Empty without `--base-ref`. |
 | `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
@@ -137,6 +138,16 @@ model failing only on head, a seed or snapshot that failed, or a test the change
 fail). Anything else skipped counts. The comment lists broken models and what they skip
 in an unfolded *Broken on main too* section above *Changed models*, and points there at
 the tests already failing on the base, whose details stay folded further down.
+
+A model that fails on the base the same way but has something the change modified upstream
+of it is neither (below a source whose fixtures changed the base ran on the change's data,
+so there the error is the change's own and reads as such): it counts against the run (`status: failed`, in `counts.models.failed`),
+but the comment does not claim the change broke it. It is listed under *Could not be
+checked*, naming what the change modified upstream, with `unverified_broken_on_base: true`
+in the summary and in `counts.models.unverified_broken_on_base`. What only it skips is
+listed there as skipped because of it (`skipped_by_unverified: true`), still counted in
+`counts.models.skipped`. A model that built on the base and fails on the pull request keeps
+the plain *Unchanged models this change breaks* and *Build errors* wording.
 
 ### When the base is not used at all
 
