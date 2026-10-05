@@ -5,22 +5,26 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from dbt_preflight import __version__
+from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
 from dbt_preflight.config import ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
     DbtError,
     DbtRunner,
+    NodeResult,
     RunOutcome,
     read_project,
     write_profiles,
@@ -42,7 +46,7 @@ from dbt_preflight.report import (
     PreflightReport,
     render,
 )
-from dbt_preflight.schema import SchemaError, resolve_schema
+from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema
 from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
 
@@ -118,8 +122,13 @@ def _assemble(
     selected_ids: list[str],
     project_relpath: str,
     strict_syntax: bool = False,
+    base_tests: dict[str, NodeResult] | None = None,
 ) -> None:
-    """Fold dbt's run results into the report's per-model and per-test rows."""
+    """Fold dbt's run results into the report's per-model and per-test rows.
+
+    With `base_tests` (the same tests' results on the base branch), a failure that was
+    already there is counted and listed apart, and does not fail the check.
+    """
     by_model: dict[str, ModelReport] = {}
     for uid in selected_ids:
         node = manifest.models[uid]
@@ -164,18 +173,34 @@ def _assemble(
             if model_uid is None:
                 model_uid = next((d for d in r.depends_on if d in by_model), None)
             m = by_model.get(model_uid or "")
+            base = (base_tests or {}).get(r.unique_id)
+            preexisting = is_preexisting(r, base)
             if m is not None:
                 if r.status == "pass":
                     m.tests_passed += 1
                 elif r.status == "warn":
                     m.tests_warned += 1
-                elif r.status in {"fail", "error"}:
+                elif preexisting:
+                    m.tests_failed_on_base += 1
+                elif r.status in FAILING:
                     m.tests_failed += 1
             if r.status in {"fail", "error", "warn"}:
+                if m is not None:
+                    owner = m.name
+                elif test is not None and (
+                    test.attached_node in manifest.models
+                    or test.attached_node in manifest.seeds
+                    or test.attached_node in manifest.snapshots
+                ):
+                    # A seed's or snapshot's own test, or one on an ephemeral model: none
+                    # of them has a row of its own.
+                    owner = manifest.node_name(test.attached_node)
+                else:
+                    owner = "(unknown)"
                 report.tests.append(
                     FailedTest(
                         name=r.name,
-                        model=m.name if m else "(unknown)",
+                        model=owner,
                         status=r.status,
                         failures=r.failures,
                         message=r.message,
@@ -184,6 +209,11 @@ def _assemble(
                         test_name=test.test_name if test else None,
                         column_name=test.column_name if test else None,
                         kwargs=test.kwargs if test else {},
+                        unique_id=r.unique_id,
+                        preexisting=preexisting,
+                        base_failures=base.failures
+                        if base is not None and base.status == "fail" and r.status == "fail"
+                        else None,
                     )
                 )
 
@@ -288,6 +318,7 @@ def _run(
     head_runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
     head_runner.deps()
     manifest = Manifest.load(head_runner.parse())
+    report.relations = manifest.relations()
     timer.mark(f"   parsed {len(manifest.models)} models, {len(manifest.sources)} sources")
 
     # DuckDB names its catalog after the file. Rename the file so `database` in the
@@ -318,10 +349,18 @@ def _run(
         timer.mark("   no sources declared: the project's seeds are the only input")
 
     # 3. Base manifest, for state:modified. The worktree stays checked out until the end of
-    # the run: after the head build, the base is built too, into its own schemas, for the diff.
-    state_dir: Path | None = None
+    # the run: before the head build, the base is built too, into its own schemas, on the
+    # same fixtures, so its test results and its tables can be compared with the head's.
+    dialect = (
+        config.dialect
+        if config.dialect is not None
+        else detect_dialect(config.project_dir, project.profile)
+    )
+    if dialect and dialect not in {"duckdb", "none"}:
+        report.dialect = dialect
+        _say(f"   transpiling model SQL from {dialect} to DuckDB")
     changed_ids: set[str] = set()
-    base_project = None
+    base: _BaseBuild | None = None
     with contextlib.ExitStack() as stack:
         if base_ref:
             base_root = stack.enter_context(
@@ -346,27 +385,93 @@ def _run(
                     f"{names} changed, so every source counts as modified and all models ran."
                 )
                 modified |= set(manifest.sources)
-            affected = manifest.affected_models(modified)
-            # "Changed" rows in the comment: modified models, plus models that read a
-            # modified source directly (the staging layer of a schema change).
+            # With no DBML file the fixtures are derived from the project itself, and a
+            # staging model's casts or tests shape them: a source whose derived table
+            # differs from the base's is as changed as an edited sources.yml.
+            if config.schema is None and manifest.sources:
+                reshaped = _reshaped_sources(manifest, Manifest.load(state_dir / "manifest.json"))
+                if reshaped - modified:
+                    names = ", ".join(
+                        f"`{manifest.sources[u].identifier}`" for u in sorted(reshaped - modified)
+                    )
+                    _say(f"   derived fixtures differ from the base for {names}")
+                    modified |= reshaped
+            # dbt's state comparison does not see vars or package versions. When a file
+            # that can change what every model does changed, nothing is judged by the base.
+            project_files = [config.project_dir / n for n in _PROJECT_FILES]
+            moved = paths_changed(config.repo_root, base_ref, project_files)
+            # `dbt deps` has just rewritten the lock file in the working tree on both
+            # sides; only a committed change to it is the pull request's.
+            moved += paths_changed(
+                config.repo_root,
+                base_ref,
+                [config.project_dir / "package-lock.yml"],
+                committed_only=True,
+            )
+            judge = not moved
+            if moved:
+                names = ", ".join(f"`{_relative(p, config.repo_root)}`" for p in moved)
+                extra = (
+                    f"{names} changed, so nothing was judged against the base branch: every "
+                    "failing test and model counts."
+                )
+                report.note = f"{report.note} {extra}" if report.note else extra
+            # Models, plus the seeds and snapshots they read: a pull-request build that
+            # selected models alone never loaded a seed, so a project whose staging layer
+            # reads `ref('raw_customers')` failed on every model.
+            affected_nodes = manifest.affected_nodes(modified)
+            affected = [uid for uid in affected_nodes if uid in manifest.models]
+            inputs = {**manifest.sources, **manifest.seeds, **manifest.snapshots}
+            # "Changed" rows in the comment: modified models, models that read a modified
+            # source, seed or snapshot directly (the staging layer of a schema change), and
+            # models whose own tests were added or edited.
             changed_ids = {
                 uid
                 for uid in affected
                 if uid in modified
-                or any(
-                    p in modified and p in manifest.sources
-                    for p in manifest.parent_map.get(uid, [])
-                )
-            }
+                or any(p in modified and p in inputs for p in manifest.parent_map.get(uid, []))
+            } | manifest.tested_models(modified)
+            n_models = len([m for m in modified if m in manifest.models])
+            n_inputs = len([m for m in modified if m in inputs])
+            n_tests = len([m for m in modified if m.split(".", 1)[0] in {"test", "unit_test"}])
             _say(
-                f"   {len([m for m in modified if m in manifest.models])} models and "
-                f"{len([m for m in modified if m in manifest.sources])} sources changed against {base_ref}"
+                f"   {n_models} models, {n_inputs} sources/seeds/snapshots and {n_tests} tests "
+                f"changed against {base_ref}"
             )
-            if not affected:
+            # Not just models: a test added on a seed, or an edited snapshot nothing reads,
+            # still has something to build and run.
+            if not affected_nodes:
                 report.nothing_changed = True
                 return
-            select: list[str] | None = [manifest.models[uid].name for uid in affected]
-            _say(f"   building {len(select)} models the change can reach")
+            select: list[str] | None = [manifest.node_name(uid) for uid in affected_nodes]
+            loads = len(affected_nodes) - len(affected)
+            _say(
+                f"   building {len(affected)} models the change can reach"
+                + (f", and the {loads} seeds/snapshots they read" if loads else "")
+            )
+            report.shared_snapshots = sorted(
+                manifest.node_name(u)
+                for u in affected_nodes
+                if u in manifest.fixed_schema_snapshots
+            )
+            untrusted = modified | _fixture_bound(manifest, modified)
+            base = _build_base(
+                config,
+                report,
+                base_project,
+                profiles_dir,
+                workdir,
+                db_path,
+                select,
+                _Trust(
+                    modified=modified,
+                    fixture_bound=_fixture_bound(manifest, modified),
+                    untrusted=untrusted,
+                    changed_upstream=untrusted | manifest.descendants(untrusted),
+                    judge=judge,
+                ),
+                timer,
+            )
         else:
             changed_ids = set(manifest.models)
             select = None
@@ -377,28 +482,199 @@ def _run(
             report,
             manifest,
             head_runner,
-            project,
             select,
             changed_ids,
             db_path,
             project_relpath,
             timer,
+            base,
         )
 
-        # 6. The base, built on the same fixtures, and the diff.
-        if base_ref and base_project is not None and state_dir is not None:
-            _diff_against_base(
-                config,
-                report,
-                manifest,
-                base_project,
-                profiles_dir,
-                workdir,
-                state_dir,
-                db_path,
-                changed_ids,
-                timer,
-            )
+        # 6. The diff, against the base built before the head.
+        if base is not None:
+            _diff_against_base(config, report, manifest, base, db_path, changed_ids, timer)
+
+
+# Project-level files whose change can alter every model without dbt's state comparison
+# noticing: vars, package versions, selectors, a checked-in profile. `package-lock.yml`
+# too, compared by commit (see `_run`).
+_PROJECT_FILES = (
+    "dbt_project.yml",
+    "packages.yml",
+    "dependencies.yml",
+    "selectors.yml",
+    "profiles.yml",
+)
+
+_DBML_BLOCK = re.compile(r"^(Table|Enum) (\S+) \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
+
+
+def _dbml_tables(text: str) -> dict[str, str]:
+    """Each table of a derived DBML file, with the enums its columns use, as text."""
+    tables: dict[str, str] = {}
+    enums: dict[str, str] = {}
+    for kind, name, body in _DBML_BLOCK.findall(text):
+        (tables if kind == "Table" else enums)[name] = body
+    out: dict[str, str] = {}
+    for name, body in tables.items():
+        used = [enums[t] for t in re.findall(r"^\s+\S+ (\S+)", body, re.MULTILINE) if t in enums]
+        out[name] = body + "".join(used)
+    return out
+
+
+def _reshaped_sources(head: Manifest, base: Manifest) -> set[str]:
+    """Head sources whose derived fixture table differs from the one the base derives.
+
+    Columns, types, keys, refs and enum values all come from the project's own YAML and
+    staging SQL when there is no DBML file, so a pull request that edits a cast or a test
+    in one staging model changes the data every reader of that source gets. When the base
+    cannot be derived at all, every source counts.
+    """
+    try:
+        head_text, _ = derive_dbml(head)
+    except SchemaError:
+        return set()  # the head run reports this itself
+    try:
+        base_text, _ = derive_dbml(base)
+    except SchemaError:
+        return set(head.sources)
+    head_tables, base_tables = _dbml_tables(head_text), _dbml_tables(base_text)
+    return {
+        uid
+        for uid, src in head.sources.items()
+        if head_tables.get(src.identifier) != base_tables.get(src.identifier)
+    }
+
+
+def _fixture_bound(manifest: Manifest, modified: set[str]) -> set[str]:
+    """The modified sources and everything downstream of them.
+
+    The base is built on the head's fixtures, so once a source changed (a renamed column
+    in the DBML, an edited `sources.yml`) the base reads data its own code was not written
+    for, and fails for the change's reasons, not its own. Nothing here is judged by its
+    base result: not its builds, and not the tests that read it.
+    """
+    sources = {uid for uid in modified if uid in manifest.sources}
+    return sources | manifest.descendants(sources)
+
+
+@dataclass
+class _Trust:
+    """What the base branch's results may be used for, given what the change touched."""
+
+    modified: set[str]
+    # Modified sources and everything downstream: the base reads the head's fixtures there.
+    fixture_bound: set[str]
+    # `modified` plus `fixture_bound`: never skipped "because of the base".
+    untrusted: set[str]
+    # `untrusted` and everything downstream of it: never broken on the base, and no test
+    # reading it is pre-existing on an error, since one error can hide another.
+    changed_upstream: set[str]
+    # False when a project-level file changed: nothing is judged by the base at all.
+    judge: bool = True
+
+
+@dataclass
+class _BaseBuild:
+    """The base branch, built on the same fixtures before the head."""
+
+    manifest: Manifest
+    # Test and unit-test results on the base branch, by unique id. Empty when its tests
+    # could not run, which leaves every head failure counted, exactly as before.
+    tests: dict[str, NodeResult] = field(default_factory=dict)
+    # Model, seed and snapshot results on the base branch, by unique id.
+    tables: dict[str, NodeResult] = field(default_factory=dict)
+    trust: _Trust | None = None  # None: nothing is judged by the base
+
+    def failing_test_selectors(self, head: Manifest) -> list[str]:
+        """Exact selectors for the head's copies of the tests that fail on the base."""
+        return sorted(
+            head.selector(uid)
+            for uid, r in self.tests.items()
+            if r.status in FAILING and uid in head.fqns
+        )
+
+
+def _build_base(
+    config: PreflightConfig,
+    report: PreflightReport,
+    base_project,
+    profiles_dir: Path,
+    workdir: Path,
+    db_path: Path,
+    select: list[str],
+    trust: _Trust,
+    timer: _StepTimer,
+) -> _BaseBuild | None:
+    """Build the base branch's side of the selection, then run its tests.
+
+    Tables first, tests after, in two dbt invocations rather than one `dbt build`: a test
+    that fails on the base must not skip what depends on it there either, or the tests
+    downstream of it would have no base result to be compared with.
+
+    A test the pull request modified keeps no base result: its unique id survives an
+    edit to a singular test's SQL, a unit test's rows or a generic test's config, so the
+    base result would describe a different test. Neither does a test that reads anything
+    the base ran on foreign fixtures for, a test that errored on the base and reads
+    anything the change reached (`_Trust`), nor, when `judge` is false, any test at all. Snapshots with a fixed `target_schema`
+    are left out, with everything downstream of them: building them here would leave the
+    pull request merging its snapshot onto the base's rows in the same table.
+    """
+    base_state = Manifest.load(workdir / "base_target" / "manifest.json")
+    shared = {u for u in base_state.fixed_schema_snapshots if base_state.snapshots[u] in select}
+    excluded = shared | base_state.descendants(shared)
+    exclude = [base_state.selector(u) for u in sorted(excluded) if u in base_state.fqns]
+    on_base = {base_state.node_name(u) for u in base_state.models}
+    on_base |= set(base_state.seeds.values()) | set(base_state.snapshots.values())
+    names = [n for n in select if n in on_base]
+    runner = DbtRunner(
+        base_project,
+        profiles_dir,
+        workdir / "base_build",
+        workdir / "logs",
+        config.env,
+        target=BASE_TARGET_NAME,
+    )
+    if not names:
+        runner.parse()
+        return _BaseBuild(manifest=Manifest.load(workdir / "base_build" / "manifest.json"))
+
+    hook = TranspileHook(report.dialect, db_path) if report.dialect else None
+    _say(f"   building {len(names)} models, seeds and snapshots on the base branch")
+    # `+`: the base may read an ancestor the head no longer does, which the head's
+    # selection, closed over the head's graph, would not include.
+    tables = runner.build(
+        [f"+{n}" for n in names],
+        hook,
+        exclude=exclude,
+        exclude_resource_types=["test", "unit_test"],
+    )
+    if tables.error:
+        _say(f"   ⚠️  base build failed, no diff and no base test results: {tables.error}")
+        return None
+    tests = runner.build(names, hook, command="test", exclude=exclude)
+    if tests.error:
+        _say(f"   ⚠️  base tests could not run, every head failure counts: {tests.error}")
+    built = sum(1 for r in tables.results if r.status == "success")
+    results = {
+        r.unique_id: r
+        for r in tests.results
+        if trust.judge
+        and r.resource_type in {"test", "unit_test"}
+        and r.unique_id not in trust.modified
+        and not trust.fixture_bound.intersection(r.depends_on)
+        and not (r.status == "error" and trust.changed_upstream.intersection(r.depends_on))
+    }
+    failing = sum(1 for r in results.values() if r.status in FAILING)
+    timer.mark(
+        f"   base branch: {built} nodes built, {len(results)} tests, {failing} failing there"
+    )
+    return _BaseBuild(
+        manifest=Manifest.load(workdir / "base_build" / "manifest.json"),
+        tests=results,
+        tables={r.unique_id: r for r in tables.results if r.resource_type in _TABLE_KINDS},
+        trust=trust if trust.judge else None,
+    )
 
 
 def _build_and_check(
@@ -406,31 +682,33 @@ def _build_and_check(
     report: PreflightReport,
     manifest: Manifest,
     head_runner: DbtRunner,
-    project,
     select: list[str] | None,
     changed_ids: set[str],
     db_path: Path,
     project_relpath: str,
     timer: _StepTimer,
+    base: _BaseBuild | None = None,
 ) -> None:
     # 4. Build, transpiling the project's dialect to DuckDB on the way.
-    dialect = (
-        config.dialect
-        if config.dialect is not None
-        else detect_dialect(config.project_dir, project.profile)
+    hook = TranspileHook(report.dialect, db_path) if report.dialect else None
+    # A test already failing on the base branch is left out of the build and run after
+    # it, on its own: inside `dbt build` its failure would skip every model downstream,
+    # so the rest of the pull request would go unchecked for something it did not do.
+    known_failing = (
+        base.failing_test_selectors(manifest) if base is not None and select is not None else []
     )
-    hook: TranspileHook | None = None
-    if dialect and dialect not in {"duckdb", "none"}:
-        hook = TranspileHook(dialect, db_path)
-        report.dialect = dialect
-        _say(f"   transpiling model SQL from {dialect} to DuckDB")
-    outcome = head_runner.build(select, hook)
+    outcome = head_runner.build(select, hook, exclude=known_failing)
+    if outcome.error:
+        raise DbtError(outcome.error)
+    if base is not None and known_failing:
+        later = head_runner.build(known_failing, hook, command="test")
+        if later.error:
+            raise DbtError(later.error)
+        _fold_in_later_tests(manifest, outcome, later.results, base)
     if hook is not None:
         report.untranspiled = dict(hook.unparsed)
         for name, why in hook.unparsed.items():
             _say(f"   ⚠️  {name}: could not transpile, ran as written ({why})")
-    if outcome.error:
-        raise DbtError(outcome.error)
     selected_ids = [
         r.unique_id
         for r in outcome.results
@@ -446,12 +724,26 @@ def _build_and_check(
     # once, here, and every list downstream (rows, "Also rebuilt", violations) is stable.
     selected_ids.sort(key=lambda uid: manifest.models[uid].name)
     _assemble(
-        report, manifest, outcome, changed_ids, selected_ids, project_relpath, hook is not None
+        report,
+        manifest,
+        outcome,
+        changed_ids,
+        selected_ids,
+        project_relpath,
+        hook is not None,
+        base.tests if base is not None else None,
     )
+    if base is not None:
+        _judge_builds(report, manifest, outcome, base)
     built = [m for m in report.models if m.status == BUILT]
     timer.mark(
         f"   built {len(built)}/{len(report.models)} models, "
         f"{len(report.failing_tests)} failing tests"
+        + (
+            f" ({len(report.preexisting_tests)} more failing on base too)"
+            if report.preexisting_tests
+            else ""
+        )
     )
 
     # 5. Rows and conventions.
@@ -472,21 +764,167 @@ def _build_and_check(
     timer.mark(f"   {len(report.violations)} convention issues")
 
 
+_TABLE_KINDS = {"model", "seed", "snapshot"}
+
+
+def _fold_in_later_tests(
+    manifest: Manifest, outcome: RunOutcome, later: list[NodeResult], base: _BaseBuild
+) -> None:
+    """Merge the tests run after the build into its results, as `dbt build` would have.
+
+    A test whose model did not build is dropped: dbt build would have skipped it, and its
+    failure says nothing the build error does not. An ephemeral model never has a result
+    of its own, so one counts as built when everything it reads did.
+
+    A test that fails worse than on the base is the change's doing, and inside one
+    `dbt build` it would have skipped everything downstream of the models it reads. That
+    is replayed here: those models are reported as skipped, and their tests dropped, so
+    the comment says what a single build would have said.
+    """
+    status = {r.unique_id: r.status for r in outcome.results if r.resource_type in _TABLE_KINDS}
+
+    def built(uid: str) -> bool:
+        if uid in status:
+            return status[uid] == "success"
+        model = manifest.models.get(uid)
+        if model is None or model.materialized != "ephemeral":
+            return False  # not in this build at all
+        # Inlined into whatever reads it: as good as the nodes it reads.
+        return all(built(d) for d in model.depends_on if d.split(".", 1)[0] in _TABLE_KINDS)
+
+    def parents(r: NodeResult) -> set[str]:
+        return {d for d in r.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
+
+    kept = [r for r in later if all(built(d) for d in parents(r))]
+    worse = [
+        r
+        for r in kept
+        if r.status in FAILING and not is_preexisting(r, base.tests.get(r.unique_id))
+    ]
+    skipped: set[str] = set()
+    for r in worse:
+        skipped |= manifest.descendants(parents(r))
+    outcome.results += kept
+    if not skipped:
+        return
+    results: list[NodeResult] = []
+    for r in outcome.results:
+        if r.resource_type in _TABLE_KINDS and r.unique_id in skipped:
+            r.status = "skipped"
+            r.message = "an upstream test failed"
+        elif r.resource_type in {"test", "unit_test"} and parents(r) & skipped:
+            continue
+        results.append(r)
+    outcome.results = results
+
+
+def _judge_builds(
+    report: PreflightReport, manifest: Manifest, outcome: RunOutcome, base: _BaseBuild
+) -> None:
+    """Mark the models that fail to build on the base branch too, and what that skips.
+
+    A model broken on the base the same way, with nothing the change touched upstream of
+    it, is flagged rather than failed (dbt_preflight/baseline.py). A model skipped on
+    head is put down to it only when it was skipped on the base too, the change did not
+    modify or add it or reshape its fixtures, and nothing else the change did is upstream
+    of it: a model that fails only on head, a seed or snapshot that failed, or a test the
+    change made fail. Anything else skipped still counts, exactly as before.
+    """
+    trust = base.trust
+    if trust is None:
+        return
+    head = {r.unique_id: r for r in outcome.results if r.resource_type in _TABLE_KINDS}
+    for m in report.models:
+        r = head.get(m.unique_id)
+        on_base = base.tables.get(m.unique_id)
+        if m.status != FAILED or r is None:
+            continue
+        m.broken_on_base = is_broken_on_base(r, on_base, trust.changed_upstream)
+        if (
+            not m.broken_on_base
+            # Not what the change modified, nor what reads fixtures it changed: there the
+            # base ran on the change's data, so its error is the change's too.
+            and m.unique_id not in trust.untrusted
+            and on_base is not None
+            and on_base.status == "error"
+            and same_error(r.message, on_base.message)
+        ):
+            # The same error on main, but the change reaches the model from upstream and
+            # DuckDB reports only the first error: it counts, as "could not be checked",
+            # not as something this change is known to have broken.
+            m.unverified_broken_on_base = True
+            m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
+    broken = {m.unique_id for m in report.models if m.broken_on_base}
+    unverified = {m.unique_id for m in report.models if m.unverified_broken_on_base}
+    if not broken and not unverified:
+        return
+
+    roots = {
+        m.unique_id
+        for m in report.models
+        if m.status in {FAILED, NOT_VERIFIED} and not m.broken_on_base
+    }
+    roots |= {
+        uid
+        for uid, r in head.items()
+        if r.resource_type != "model" and r.status not in {"success", "skipped"}
+    }
+    for t in report.failing_tests:
+        test = manifest.tests.get(t.unique_id) or manifest.unit_tests.get(t.unique_id)
+        if test is not None:
+            roots |= {d for d in test.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
+    from_change = manifest.descendants(roots)
+    from_base = manifest.descendants(broken)
+    # What only an unverified model is upstream of is skipped "because of it": still
+    # counted, but not said to be broken by the change.
+    from_unverified = manifest.descendants(unverified)
+    from_known = manifest.descendants(roots - unverified)
+    for m in report.models:
+        m.skipped_by_unverified = (
+            m.status == SKIPPED and m.unique_id in from_unverified and m.unique_id not in from_known
+        )
+        on_base = base.tables.get(m.unique_id)
+        m.skipped_by_base = (
+            m.status == SKIPPED
+            and m.unique_id in from_base
+            and m.unique_id not in from_change
+            # Something the change made or edited answers for itself, even downstream of
+            # a broken model; and "skipped on both branches" has to be true.
+            and m.unique_id not in trust.untrusted
+            and on_base is not None
+            and on_base.status == "skipped"
+        )
+
+
+def _changed_ancestors(manifest: Manifest, uid: str, modified: set[str]) -> list[str]:
+    """The names of what the change modified upstream of `uid`, nearest first."""
+    seen: set[str] = set()
+    out: list[str] = []
+    frontier = list(manifest.parent_map.get(uid, []))
+    while frontier:
+        parent = frontier.pop(0)
+        if parent in seen:
+            continue
+        seen.add(parent)
+        if parent in modified:
+            source = manifest.sources.get(parent)
+            out.append(
+                f"{source.source_name}.{source.name}" if source else manifest.node_name(parent)
+            )
+        frontier += manifest.parent_map.get(parent, [])
+    return out
+
+
 def _diff_against_base(
     config: PreflightConfig,
     report: PreflightReport,
     manifest: Manifest,
-    base_project,
-    profiles_dir: Path,
-    workdir: Path,
-    state_dir: Path,
+    base: _BaseBuild,
     db_path: Path,
     changed_ids: set[str],
     timer: _StepTimer,
 ) -> None:
-    """Build the changed models on the base branch, then compare columns, rows and metrics."""
-    base_state = Manifest.load(state_dir / "manifest.json")
-    base_names = {m.name for m in base_state.models.values()}
+    """Compare columns, rows and metrics of the changed models with the base branch's."""
     # The change and everything downstream of it: a metric on a mart moves when a staging
     # model upstream changes, so the mart is what has to be compared.
     built = {m.unique_id for m in report.models if m.status == BUILT}
@@ -498,36 +936,21 @@ def _diff_against_base(
             continue
         compare.add(uid)
         frontier += [c for c in manifest.child_map.get(uid, []) if c in manifest.models]
-    compare_ids = sorted(uid for uid in compare if uid in built)
-    targets = [manifest.models[uid].name for uid in compare_ids]
-    to_build = [f"+{n}" for n in targets if n in base_names]
-    if not targets:
+    # Downstream of a snapshot with a fixed schema there is no base build to compare with.
+    shared = {
+        u
+        for u in manifest.fixed_schema_snapshots
+        if manifest.snapshots[u] in report.shared_snapshots
+    }
+    unshared = manifest.descendants(shared)
+    compare_ids = sorted(uid for uid in compare if uid in built and uid not in unshared)
+    if not compare_ids:
         return
-
-    base_runner = DbtRunner(
-        base_project,
-        profiles_dir,
-        workdir / "base_build",
-        workdir / "logs",
-        config.env,
-        target=BASE_TARGET_NAME,
-    )
-    hook = TranspileHook(report.dialect, db_path) if report.dialect else None
-    if to_build:
-        _say(f"   building {len(to_build)} models on the base branch for the diff")
-        outcome = base_runner.build(to_build, hook, command="run")
-        if outcome.error:
-            _say(f"   ⚠️  base build failed, no diff: {outcome.error}")
-            return
-    else:
-        base_runner.parse()
-    timer.mark(f"   base branch: {len(to_build)} models built")
-    base_manifest = Manifest.load(workdir / "base_build" / "manifest.json")
 
     metric_defs = collect_metrics(manifest, config.metrics)
     report.metrics_defined = len(metric_defs)
     report.diffs = compute_diffs(
-        db_path, manifest, base_manifest, compare_ids, metric_defs, report.dialect
+        db_path, manifest, base.manifest, compare_ids, metric_defs, report.dialect
     )
     moved = sum(len(d.moved_metrics) for d in report.diffs)
     timer.mark(

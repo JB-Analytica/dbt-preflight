@@ -780,3 +780,198 @@ def test_breakdowns_past_the_third_moved_metric_fold() -> None:
         assert f"- {label} by sales_channel: web 60 → 55 (-8.3%), app 40 → 35 (-12.5%)" in folded
     # Every moved metric is still in the table above the fold.
     assert body.count("| 100 | 90 | -10.0% |") == 5
+
+
+def _expression_test(model: str, failures: int, **kw) -> FailedTest:
+    return FailedTest(
+        name=f"dbt_utils_expression_is_true_{model}",
+        model=model,
+        status="fail",
+        failures=failures,
+        message="",
+        compiled_code="select 1",
+        test_name="expression_is_true",
+        **kw,
+    )
+
+
+def test_preexisting_failure_folds_and_does_not_fail() -> None:
+    # jaffle-shop: `order_total - tax_paid = subtotal` fails on 108 rows on both branches.
+    report = PreflightReport(
+        models=[
+            _model("stg_orders", rows=100, tests_passed=2),
+            _model("orders", changed=False, rows=100, tests_passed=3, tests_failed_on_base=1),
+            _model("customers", changed=False, rows=50, tests_passed=2),
+        ],
+        tests=[_expression_test("orders", 108, preexisting=True, base_failures=108)],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert report.passed and report.has_warnings
+    assert "## 🛫 dbt preflight: ⚠️ passed with warnings" in body
+    assert "### Failing tests" not in body
+    assert "Unchanged models this change breaks" not in body
+    assert "<details><summary>Already failing on the base branch (1)</summary>" in body
+    assert "- ⚪ `expression_is_true` on `orders`: 108 failing rows\n" in body
+    assert "Also rebuilt, no new issues: `orders`, `customers`." in body
+    # Counted in the summary line's total, and named in the model's cell.
+    assert "· 8 tests ·" in body
+
+
+def test_worsened_failure_fails_and_says_how_much_worse() -> None:
+    report = PreflightReport(
+        models=[_model("orders", rows=100, tests_passed=3, tests_failed=1)],
+        tests=[_expression_test("orders", 120, base_failures=108)],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert not report.passed
+    assert (
+        "- ❌ `expression_is_true` on `orders`: 120 failing rows (108 on the base branch)" in body
+    )
+    assert "Already failing on the base branch" not in body
+
+
+def test_only_new_failures_are_blamed_on_the_change() -> None:
+    report = PreflightReport(
+        models=[
+            _model("stg_customers", tests_passed=1, tests_failed=1),
+            _model("orders", changed=False, tests_passed=2, tests_failed_on_base=1),
+            _model("customers", changed=False, tests_failed=1),
+        ],
+        tests=[
+            _expression_test("stg_customers", 3),
+            _expression_test("orders", 108, preexisting=True, base_failures=108),
+            _expression_test("customers", 5),
+        ],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    breaks = body.split("Unchanged models this change breaks:")[1].split("Also rebuilt")[0]
+    assert "- `customers` — ✅ built, 1 failing test" in breaks
+    assert "`orders`" not in breaks
+    assert "Also rebuilt, no new issues: `orders`." in body
+    assert "| `stg_customers` | ✅ built | – | 1 passed, **1 failed** |" in body
+
+
+def test_preexisting_details_are_capped() -> None:
+    tests = [_expression_test(f"m{i:02d}", 1, preexisting=True, base_failures=1) for i in range(14)]
+    report = PreflightReport(models=[_model("m00")], tests=tests, base_ref="origin/main")
+    section = render(report).split("Already failing on the base branch (14)")[1]
+    assert section.count("<summary>details</summary>") == 10
+    assert "- ⚪ `expression_is_true` on `m13`: 1 failing row" in section
+
+
+def test_snapshots_with_a_fixed_schema_are_named() -> None:
+    report = PreflightReport(
+        models=[_model("dim_customers")], base_ref="origin/main", shared_snapshots=["orders_snap"]
+    )
+    assert (
+        "`orders_snap` writes to a fixed `target_schema` that both branches would share, so it "
+        "was built for this pull request only" in render(report)
+    )
+
+
+def test_broken_on_base_section_leads_and_does_not_fail() -> None:
+    broken = _model(
+        "int_orders",
+        status=FAILED,
+        changed=False,
+        message='Runtime Error\n  Referenced column "discount" not found in FROM clause!',
+        broken_on_base=True,
+    )
+    skipped = [
+        _model(f"mart_{i}", status=SKIPPED, changed=False, skipped_by_base=True) for i in range(7)
+    ]
+    report = PreflightReport(
+        models=[_model("stg_orders", tests_passed=1), broken, *skipped],
+        tests=[_expression_test("stg_orders", 3, preexisting=True, base_failures=3)],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert report.passed and report.has_warnings
+    top = body.split("### ⚠️ Broken on main too (1)\n")[1].split("### Changed models")[0]
+    assert "These models also fail on `main`, without this change:" in top
+    assert '- `int_orders` — Referenced column "discount" not found in FROM clause!' in top
+    assert "Skipped because of it: `mart_0`, `mart_1`, `mart_2`, `mart_3`, `mart_4`." in top
+    assert "<details><summary>2 more skipped</summary>" in top
+    assert "And 1 test already fails on `main` (details below)." in top
+    assert "Unchanged models this change breaks" not in body
+    assert "### Build errors" not in body
+    assert "`mart_0`" not in body.split("### Changed models")[1]
+
+
+def test_preexisting_tests_alone_still_get_the_top_line() -> None:
+    report = PreflightReport(
+        models=[_model("orders", tests_failed_on_base=2)],
+        tests=[
+            _expression_test("orders", 3, preexisting=True, base_failures=3),
+            _expression_test("orders", 4, preexisting=True, base_failures=4),
+        ],
+        base_ref="main",
+    )
+    body = render(report)
+    assert "### ⚠️ Broken on main too\n\n2 tests already fail on `main` (details below).\n" in body
+    assert body.index("### ⚠️ Broken on main too") < body.index("### Changed models")
+
+
+def test_a_base_given_as_a_sha_is_shortened() -> None:
+    report = PreflightReport(
+        models=[_model("orders", tests_failed_on_base=1)],
+        tests=[_expression_test("orders", 3, preexisting=True, base_failures=3)],
+        base_ref="f5be0aa00a761305ad769cfce04801f62d7d745a",
+    )
+    assert "### ⚠️ Broken on f5be0aa too" in render(report)
+
+
+def test_a_missing_table_nothing_builds_reads_as_hard_coded() -> None:
+    from dbt_preflight.report import _human_reading
+
+    message = (
+        'Catalog Error: Table with name "finance.account_daily_arr" does not exist because '
+        'schema "finance" does not exist.'
+    )
+    relations = {("preflight_finance", "account_daily_arr")}
+    assert _human_reading(message, relations) == (
+        "reads `finance.account_daily_arr`, which no model, seed or source in this project "
+        "builds (a hard-coded table?)"
+    )
+    built = 'Catalog Error: Table with name "preflight_finance"."account_daily_arr" does not exist'
+    assert "was not built, it failed or was skipped upstream" in (
+        _human_reading(built, relations) or ""
+    )
+    assert "was not built" in (_human_reading("Table with name stg_x does not exist", None) or "")
+
+
+def test_a_model_the_change_reaches_is_not_checked_rather_than_broken() -> None:
+    unverified = _model(
+        "account_daily_arr_deltas",
+        status=FAILED,
+        changed=False,
+        message="Runtime Error\n  Catalog Error: Table with name finance.x does not exist!",
+        unverified_broken_on_base=True,
+        reached_from=["account_util_dates"],
+    )
+    report = PreflightReport(
+        models=[
+            _model("account_util_dates", rows=0, tests_passed=1),
+            unverified,
+            _model("account_monthly", status=SKIPPED, changed=False, skipped_by_unverified=True),
+            _model("fct_genuinely_broken", status=FAILED, changed=False, message="Binder Error: x"),
+        ],
+        base_ref="origin/main",
+        relations=set(),
+    )
+    body = render(report)
+    assert not report.passed  # still counts against the pull request
+    section = body.split("### ❓ Could not be checked (1)")[1].split("###")[0]
+    assert (
+        "- `account_daily_arr_deltas` — fails on `main` too, and this change reaches it from "
+        "upstream (`account_util_dates`): Catalog Error: Table with name finance.x does not exist!"
+    ) in section
+    assert "Skipped because of it: `account_monthly`." in section
+    breaks = body.split("Unchanged models this change breaks:")[1].split("###")[0]
+    assert "`fct_genuinely_broken`" in breaks  # built on base, fails on head: today's wording
+    assert "account_daily_arr_deltas" not in breaks and "account_monthly" not in breaks
+    errors = body.split("### Build errors")[1]
+    assert "fct_genuinely_broken" in errors and "account_daily_arr_deltas" not in errors

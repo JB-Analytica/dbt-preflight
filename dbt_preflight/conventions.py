@@ -97,15 +97,16 @@ class ConventionError(ValueError):
     pass
 
 
-def from_config(raw: object, configured: bool = True) -> ConventionSet:
+def from_config(raw: object) -> ConventionSet:
     """A ConventionSet from the `conventions:` block of the config file (or None).
 
-    `configured` is whether a config file exists at all. A project that never wrote one did
-    not sign up for anyone's conventions, so the house rules run as warnings there; a
-    project with a config file gets them at full strength unless it says otherwise.
+    No block means the project never signed up for anyone's conventions, so the house rules
+    run as warnings: advice, never a failed check. That holds whether or not a config file
+    exists, since most config files are there for a path or a dialect, not for the rules.
+    Writing a `conventions:` block is the opt-in, and gets its preset at full strength.
     """
     if raw is None:
-        return jba() if configured else soften(jba())
+        return soften(jba())
     if not isinstance(raw, dict):
         raise ConventionError("`conventions` must be a mapping.")
     unknown = sorted(set(raw) - {"preset", "rules", "layers", "source_layer"})

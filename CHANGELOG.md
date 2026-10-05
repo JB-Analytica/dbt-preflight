@@ -5,6 +5,101 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05
+
+### Added
+
+- A real-world regression suite (`scripts/realworld/`, `uv run poe realworld --compare`):
+  four public dbt projects pinned to a commit, each run through a harmless change, a
+  column rename and a wider change, compared with a committed baseline. Not part of
+  `poe check`, since it needs network; a weekly workflow runs it.
+
+### Fixed
+
+- Seeds were never loaded on a pull-request run. The selection held models only and the
+  base branch was built with `dbt run`, so a project whose models `ref()` a seed (classic
+  jaffle_shop; Tuva-style lookup seeds beside sources) built none of them, with `Table
+  raw_customers does not exist`, on a harmless one-line change. The seed-only fix of
+  11 September covered full builds alone. The selection is now closed over the seeds and
+  snapshots the selected models read, on both branches, and an edited seed counts as a
+  change to the models that read it.
+- Three schema-derivation bugs found on a real Snowflake project: two sources declaring the
+  same table name crashed the run (the clash now gets `<source>__<identifier>`), a bare
+  `date` column was guessed as a foreign key to a `dates` table, and in a model reading
+  several sources every unqualified column was attributed to every source. A model2data
+  error while reading the derived schema is now a readable `SchemaError`. On a fork of
+  mattermost-data-warehouse a run went from 0 of 10 models built to 7.
+
+### Changed
+
+- **The house conventions are opt-in.** A `.dbt-preflight.yml` no longer turns the `jba`
+  preset on at full strength by itself: without a `conventions:` block the rules run as
+  warnings, exactly as they do with no config file at all. Add `conventions: {preset: jba}`
+  to keep them as errors. A config file written only for `project_dir` and `dialect` had
+  turned fivetran/dbt_shopify into 263 convention errors.
+- A model that fails to build is judged against the base branch too. One that fails on
+  the base with the same error message, and has nothing the change touched upstream of
+  it, no longer fails the check: it leads the comment in an unfolded *Broken on main too
+  (N)* section, with its error, the models it skipped on both branches, and a pointer to
+  any tests already failing there, and the verdict is `passed_with_warnings`. A model the
+  change modified, added or reaches from upstream, one that built on the base, or one
+  that fails there differently still fails. A skipped model is put down to a broken one
+  only when the base skipped it too and the change did not touch it. Found on mattermost
+  (`account_daily_arr_deltas` reads a hard-coded `finance.account_daily_arr`) and
+  fivetran shopify (two marts that cannot cast fixture values).
+- A model that fails on the base the same way, but that the change reaches from upstream,
+  is reported as *Could not be checked*, naming what the change modified upstream,
+  instead of under *Unchanged models this change breaks*. It still fails the run. The
+  summary adds `unverified_broken_on_base_models`, per-model `unverified_broken_on_base`
+  and `skipped_by_unverified`, and `counts.models.unverified_broken_on_base`.
+- A "table does not exist" error reads as "was not built, it failed or was skipped
+  upstream" only when the table is a model, seed, snapshot or source of the project; a
+  table nothing in the project builds reads as a hard-coded table.
+- When in doubt, a failure counts against the pull request. Errors are compared as whole
+  messages (an enforced contract always opens with the same line), and an error is never
+  pre-existing when anything upstream changed, since DuckDB reports only the first error
+  in a statement. Downstream of a source whose fixtures changed nothing is judged against
+  the base, tests included; with no DBML file that covers a staging model's cast or test
+  that changes the schema preflight derives, compared against the one derived from the
+  base. A change to `dbt_project.yml`, `packages.yml`, `dependencies.yml`,
+  a committed `package-lock.yml`, `selectors.yml` or a checked-in `profiles.yml` turns
+  the base comparison off.
+- Summary JSON `schema_version` is 2. `failing_tests`, `counts.tests.failed`,
+  `counts.models.failed` and `counts.models.skipped` now hold only what the change answers
+  for; `preexisting_failing_tests`, `broken_on_base_models`, `counts.tests.failed_on_base`,
+  `counts.models.failed_on_base`, `counts.models.skipped_by_base`, per-model
+  `tests_failed_on_base`, `broken_on_base` and `skipped_by_base`, and `base_failures` are
+  new. See docs/integration.md for the full list.
+- A failing test is judged against the base branch. The base now runs the same tests on
+  the same fixtures, before the pull request is built, and a test fails the check only
+  when it is new, passed on the base, or fails on more rows than it did there. One that
+  fails the same way on both branches, usually because synthetic data cannot satisfy it,
+  is listed under a folded *Already failing on the base branch (N)* and the verdict is
+  `passed_with_warnings`. Such tests are left out of the build and run after it, so they
+  no longer skip every model downstream: on dbt-labs/jaffle-shop one
+  `expression_is_true` test that fails on both branches used to skip `customers`,
+  `orders` and `order_items` and list them as broken by the change. *Unchanged models
+  this change breaks* lists only models with failures the change caused. A model that
+  fails to build, and a test failure the change caused (new, edited, or worse than on the
+  base), still skip what depends on them. A test the pull request edited is never
+  compared with its base result, since dbt keeps its unique id through an edit to a
+  singular test's SQL, a unit test's rows or a generic test's config.
+  Runs without `--base-ref` behave as before.
+- A pull request that only adds or edits a test now runs it: tests count toward
+  `state:modified`, and the model a modified test is declared on is a changed model.
+  Before, such a pull request reported that nothing had changed. The same holds for a test
+  added on a seed and for an edited snapshot no model reads.
+- A snapshot with a legacy `target_schema` writes to the same table on both branches, so
+  it is no longer built on the base: it, and every model reading it, is built for the pull
+  request only, not compared with the base, and the comment says so.
+- The base branch is built once, before the pull request, and covers the whole selection
+  rather than only what the diff compares. A pull-request run now makes one more dbt
+  invocation on the base (its tests), and one more on the head when any test already
+  fails on the base.
+- Requires model2data 1.10.3 or newer, the first release that promises byte-identical
+  output for the same schema and seed, and the lock now tests against 1.11.0 (it had stayed
+  on 1.7.1, while a fresh install already resolved the newest release).
+
 ## [0.3.0] - 2026-09-16
 
 ### Added

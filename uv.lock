@@ -535,7 +535,7 @@ wheels = [
 
 [[package]]
 name = "dbt-preflight"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "dbt-core" },
@@ -565,7 +565,7 @@ requires-dist = [
     { name = "dbt-core", specifier = ">=1.11,<2" },
     { name = "dbt-duckdb", specifier = ">=1.11" },
     { name = "duckdb", specifier = ">=1.1" },
-    { name = "model2data", specifier = ">=1.3.1" },
+    { name = "model2data", specifier = ">=1.10.3" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "poethepoet", marker = "extra == 'dev'", specifier = ">=0.38.0" },
     { name = "pre-commit", marker = "extra == 'dev'" },
@@ -934,20 +934,22 @@ wheels = [
 
 [[package]]
 name = "model2data"
-version = "1.7.1"
+version = "1.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dbt-core" },
     { name = "dbt-duckdb" },
     { name = "faker" },
+    { name = "jsonschema" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pyparsing" },
     { name = "pyyaml" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a2/85/e67ca549b6696f6a9c9f78a4a525dd13fdcc94492cb981c8ffde67d25a58/model2data-1.7.1.tar.gz", hash = "sha256:1b873a459382a8872aca65efdba7edc9a233c6d46425fc8ec752798ee6c3c8cb", size = 131591, upload-time = "2026-09-08T19:42:08.741Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/38/93d8b517669a7c8a4b13fc95d62d91ebc3975b842e50def2c6bc5a196734/model2data-1.11.0.tar.gz", hash = "sha256:ce02ea1cfe5ab52eae0db3b2f2961e720bbe32e40f15c92d61c8338d91a7c7c3", size = 371838, upload-time = "2026-10-02T20:49:21.859Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/54/7b5044002dd36bf0cf09e5f15ecd957ff1fe736a6003b3ad2d5ad32e0d9d/model2data-1.7.1-py3-none-any.whl", hash = "sha256:e0714121d4a3ec9465c1cc5c88148b41782ff1604d868c74b65831d95bc4ea4f", size = 66584, upload-time = "2026-09-08T19:42:07.822Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/d3/dbd2ba80b5031da52e847f0c3cdabe607835c03f291c387de51ade5bceff/model2data-1.11.0-py3-none-any.whl", hash = "sha256:81e7d143e45aeeb334f10f434344a2796e879ad1269084f85f2018eb7b7fc557", size = 254120, upload-time = "2026-10-02T20:49:20.677Z" },
 ]
 
 [[package]]
@@ -1713,6 +1715,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329, upload-time = "2026-08-17T08:02:48.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
+]
+
+[[package]]
+name = "pyparsing"
+version = "3.3.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
 ]
 
 [[package]]

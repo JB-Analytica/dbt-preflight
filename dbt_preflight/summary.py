@@ -9,6 +9,8 @@ test, a moved metric or a removed column means.
 Keys are snake_case; every value is a plain string, number, boolean, list or dict, never a
 dataclass. `schema_version` is bumped when a key's meaning or shape changes, not when a key
 is only added.
+Version 2 (0.4.0) narrowed the failure keys to what the change answers for; see
+docs/integration.md.
 """
 
 from __future__ import annotations
@@ -28,10 +30,11 @@ from dbt_preflight.report import (
     PreflightReport,
     _generic_test_label,
     _human_reading,
+    broken_on_base_error,
 )
 from dbt_preflight.schema import InferredSource
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _verdict(report: PreflightReport) -> str:
@@ -45,7 +48,18 @@ def _verdict(report: PreflightReport) -> str:
 
 
 def _model_counts(models: list[ModelReport]) -> dict[str, int]:
-    counts = {"built": 0, "failed": 0, "skipped": 0, "not_verified": 0, "no_result": 0}
+    """Models by status. `failed` and `skipped` count only what the change answers for;
+    a model broken on the base branch too, and what it skipped, are counted apart."""
+    counts = {
+        "built": 0,
+        "failed": 0,
+        "skipped": 0,
+        "not_verified": 0,
+        "no_result": 0,
+        "failed_on_base": 0,
+        "skipped_by_base": 0,
+        "unverified_broken_on_base": 0,
+    }
     by_status = {
         BUILT: "built",
         FAILED: "failed",
@@ -54,6 +68,16 @@ def _model_counts(models: list[ModelReport]) -> dict[str, int]:
         NO_RESULT: "no_result",
     }
     for m in models:
+        # Counted as failed too: it fails the run. This says how many of those failures
+        # are a base error the change reaches rather than one it is known to have caused.
+        if m.unverified_broken_on_base:
+            counts["unverified_broken_on_base"] += 1
+        if m.broken_on_base:
+            counts["failed_on_base"] += 1
+            continue
+        if m.skipped_by_base:
+            counts["skipped_by_base"] += 1
+            continue
         key = by_status.get(m.status)
         if key:
             counts[key] += 1
@@ -70,18 +94,26 @@ def _model(m: ModelReport) -> dict[str, Any]:
         "tests_passed": m.tests_passed,
         "tests_failed": m.tests_failed,
         "tests_warned": m.tests_warned,
+        "tests_failed_on_base": m.tests_failed_on_base,
+        "broken_on_base": m.broken_on_base,
+        "skipped_by_base": m.skipped_by_base,
+        "unverified_broken_on_base": m.unverified_broken_on_base,
+        "skipped_by_unverified": m.skipped_by_unverified,
         "dialect_function": m.dialect_function,
     }
 
 
-def _failing_test(t: FailedTest) -> dict[str, Any]:
-    reading = _human_reading(t.message) if t.status == "error" and t.message.strip() else None
+def _failing_test(t: FailedTest, relations: set[tuple[str, str]] | None = None) -> dict[str, Any]:
+    reading = (
+        _human_reading(t.message, relations) if t.status == "error" and t.message.strip() else None
+    )
     return {
         "name": t.name,
         "readable_name": _generic_test_label(t) if t.test_name else None,
         "model": t.model,
         "status": t.status,
         "failures": t.failures,
+        "base_failures": t.base_failures,
         "reading": reading,
     }
 
@@ -163,6 +195,7 @@ def build_summary(
                 "passed": sum(m.tests_passed for m in report.models),
                 "failed": sum(m.tests_failed for m in report.models),
                 "warned": sum(m.tests_warned for m in report.models),
+                "failed_on_base": sum(m.tests_failed_on_base for m in report.models),
             },
             "violations": {
                 "error": len(report.error_violations),
@@ -174,7 +207,31 @@ def build_summary(
             },
         },
         "models": [_model(m) for m in report.models],
-        "failing_tests": [_failing_test(t) for t in report.tests],
+        # Pre-existing failures have their own list, so `failing_tests` keeps meaning "what
+        # this change has to fix (or was warned about)" for a consumer written against it.
+        "failing_tests": [
+            _failing_test(t, report.relations) for t in report.tests if not t.preexisting
+        ],
+        "preexisting_failing_tests": [
+            _failing_test(t, report.relations) for t in report.preexisting_tests
+        ],
+        "broken_on_base_models": [
+            {
+                "name": m.name,
+                "unique_id": m.unique_id,
+                "error": broken_on_base_error(m),
+            }
+            for m in report.broken_on_base_models
+        ],
+        "unverified_broken_on_base_models": [
+            {
+                "name": m.name,
+                "unique_id": m.unique_id,
+                "error": broken_on_base_error(m),
+                "reached_from": list(m.reached_from),
+            }
+            for m in report.unverified_broken_models
+        ],
         "violations": [
             {
                 "rule": v.rule,

@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from dbt_preflight.manifest import Manifest, SourceTable
-from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema
+from dbt_preflight.schema import (
+    SchemaError,
+    _model_source_columns,
+    derive_dbml,
+    resolve_schema,
+)
 
 
 def test_derived_dbml_carries_types_keys_and_refs(manifest: Manifest) -> None:
@@ -813,5 +818,183 @@ def test_generated_fixtures_only_hold_the_accepted_values(tmp_path: Path) -> Non
     path.write_text(dbml, encoding="utf-8")
     tables, refs = parse_dbml(path)
     generated = generate_data_from_dbml(tables=tables, refs=refs, base_rows=50, seed=42)
-    produced = set(generated["posts"]["lifecycle_state"])
+    # dbt's accepted_values lets nulls through (`null not in (...)` is never true), and
+    # newer model2data releases leave nulls in a nullable enum column, so only the values count.
+    produced = set(generated["posts"]["lifecycle_state"].dropna())
     assert produced <= {"PUBLISHED", "DRAFT"} and produced
+
+
+# --- schema-derivation regressions from a real Snowflake project (4 Oct 2026) ---
+
+
+def test_same_table_name_in_two_sources_gets_two_tables(tmp_path: Path) -> None:
+    from dbt_preflight.config import PreflightConfig
+    from dbt_preflight.fixtures import build_fixtures
+
+    org, com = "source.p.ga_traffic_org.report", "source.p.ga_traffic_com.report"
+    a = _source("ga_traffic_org", "report", schema="ga_org")
+    a["columns"] = {"views": {"name": "views", "data_type": "int64"}}
+    b = _source("ga_traffic_com", "report", schema="ga_com")
+    b["columns"] = {"sessions": {"name": "sessions", "data_type": "int64"}}
+    manifest = Manifest.from_dict(
+        {"sources": {org: a, com: b}, "nodes": {}, "parent_map": {}, "child_map": {}}
+    )
+
+    schema = resolve_schema(None, manifest, tmp_path / "work")
+    assert len(schema.tables) == 2
+    config = PreflightConfig(repo_root=tmp_path, project_dir=tmp_path, rows=4, seed=1)
+    db = tmp_path / "db.duckdb"
+    summary = build_fixtures(config, schema, list(manifest.sources.values()), db)
+    assert summary.unmatched_sources == []
+
+    import duckdb
+
+    con = duckdb.connect(str(db))
+    try:
+        cols_org = [r[0] for r in con.execute('describe "ga_org"."report"').fetchall()]
+        cols_com = [r[0] for r in con.execute('describe "ga_com"."report"').fetchall()]
+    finally:
+        con.close()
+    assert cols_org == ["views"]
+    assert cols_com == ["sessions"]
+
+
+def test_unique_identifiers_keep_their_plain_table_name(manifest: Manifest) -> None:
+    dbml, _ = derive_dbml(manifest)
+    assert "Table customers {" in dbml and "__" not in dbml
+
+
+def test_model2data_errors_become_a_schema_error(tmp_path: Path, monkeypatch) -> None:
+    import dbt_preflight.schema as schema_mod
+
+    def boom(_path: Path):
+        raise RuntimeError("cannot read the DBML: nope")
+
+    manifest = _single_model_manifest("p", "t", "select id from {{ source('p', 't') }}")
+    monkeypatch.setattr(schema_mod, "parse_dbml", boom)
+    with pytest.raises(SchemaError, match="cannot read the DBML"):
+        resolve_schema(None, manifest, tmp_path)
+
+
+def test_bare_date_column_is_not_a_foreign_key_to_dates() -> None:
+    dates = "source.p.shop.dates"
+    events = "source.p.shop.events"
+    stg = "model.p.stg_events"
+    d = _source("shop", "dates")
+    d["columns"] = {"day": {"name": "day", "data_type": "date"}}  # no `id`
+    sql = "select id as event_id, date, created_date from {{ source('shop', 'events') }}"
+    raw = {
+        "sources": {dates: d, events: _source("shop", "events")},
+        "nodes": {stg: _staging_model("stg_events", "staging/stg_events.sql", [events], sql)},
+        "parent_map": {stg: [events]},
+        "child_map": {events: [stg]},
+    }
+    dbml, _ = derive_dbml(Manifest.from_dict(raw))
+    assert "  date date" in dbml
+    assert "date int" not in dbml and "ref:" not in dbml
+
+
+def test_date_column_stays_unreffed_even_if_dates_has_an_id() -> None:
+    dates = "source.p.shop.dates"
+    events = "source.p.shop.events"
+    stg = "model.p.stg_events"
+    d = _source("shop", "dates")
+    d["columns"] = {"id": {"name": "id", "data_type": "int64"}}
+    sql = "select date from {{ source('shop', 'events') }}"
+    raw = {
+        "sources": {dates: d, events: _source("shop", "events")},
+        "nodes": {stg: _staging_model("stg_events", "staging/stg_events.sql", [events], sql)},
+        "parent_map": {stg: [events]},
+        "child_map": {events: [stg]},
+    }
+    dbml, _ = derive_dbml(Manifest.from_dict(raw))
+    assert "ref:" not in dbml
+
+
+def test_fk_guess_needs_a_target_with_an_id() -> None:
+    customers = "source.p.shop.customers"
+    orders = "source.p.shop.orders"
+    stg = "model.p.stg_orders"
+    c = _source("shop", "customers")
+    c["columns"] = {"email": {"name": "email", "data_type": "string"}}
+    sql = "select customer_id from {{ source('shop', 'orders') }}"
+    raw = {
+        "sources": {customers: c, orders: _source("shop", "orders")},
+        "nodes": {stg: _staging_model("stg_orders", "staging/stg_orders.sql", [orders], sql)},
+        "parent_map": {stg: [orders]},
+        "child_map": {orders: [stg]},
+    }
+    dbml, _ = derive_dbml(Manifest.from_dict(raw))
+    assert "  customer_id int" in dbml and "ref:" not in dbml
+
+
+def test_unqualified_columns_of_a_multi_source_model_are_not_shared() -> None:
+    sql = """
+    with account as (
+        select id, name from {{ source('sf', 'account') }}
+    ),
+    joined as (
+        select
+            a.id as account_id,
+            o.amount,
+            sfid,
+            iswon,
+            d.fiscal_year
+        from account a
+        join {{ source('sf', 'opportunity') }} o on o.account_id = a.id
+        join {{ source('sf', 'dates') }} d on d.date = o.close_date
+    )
+    select * from joined
+    """
+    found_opp = _model_source_columns(sql, "sf", "opportunity")
+    found_dates = _model_source_columns(sql, "sf", "dates")
+    found_acct = _model_source_columns(sql, "sf", "account")
+    assert found_opp is not None and found_dates is not None and found_acct is not None
+    # Qualified columns go to their own table...
+    assert set(found_opp) == {"amount", "account_id", "close_date"}
+    assert set(found_dates) == {"fiscal_year", "date"}
+    # ...ambiguous ones (sfid, iswon) and CTE-defined ones (account_id) go to nobody.
+    assert "sfid" not in found_opp | found_dates | found_acct
+    assert "iswon" not in found_opp | found_dates | found_acct
+    assert set(found_acct) == {"id", "name"}
+
+
+def test_single_source_model_still_attributes_unqualified_columns() -> None:
+    sql = """
+    with source as (select * from {{ source('s', 't') }}),
+    renamed as (select id as t_id, name, amount from source)
+    select * from renamed
+    """
+    assert set(_model_source_columns(sql, "s", "t") or {}) == {"id", "name", "amount"}
+
+
+def test_columns_defined_in_a_cte_are_not_source_columns() -> None:
+    sql = """
+    with source as (select * from {{ source('s', 't') }}),
+    renamed as (select id as t_id, name from source)
+    select t_id, name from renamed
+    """
+    assert set(_model_source_columns(sql, "s", "t") or {}) == {"id", "name"}
+
+
+def test_columns_qualified_by_the_bare_table_name_are_attributed() -> None:
+    """`from {{ source('l', 'licenses') }}` with no alias is referred to as `licenses.x`."""
+    sql = """
+    select licenses.licenseid, account.name as account_name, licenses.email
+    from {{ source('l', 'licenses') }}
+    left join {{ source('orgm', 'account') }} on account.sfid = licenses.accountid
+    """
+    assert set(_model_source_columns(sql, "l", "licenses") or {}) == {
+        "licenseid",
+        "email",
+        "accountid",
+    }
+    assert set(_model_source_columns(sql, "orgm", "account") or {}) == {"name", "sfid"}
+
+
+def test_bare_predicate_column_is_boolean() -> None:
+    manifest = _single_model_manifest(
+        "sf", "opportunity", "select amount from {{ source('sf', 'opportunity') }} where iswon"
+    )
+    dbml, _ = derive_dbml(manifest)
+    assert "  iswon boolean" in dbml

@@ -56,6 +56,9 @@ def test_verdict_passed() -> None:
         "skipped": 0,
         "not_verified": 0,
         "no_result": 0,
+        "failed_on_base": 0,
+        "skipped_by_base": 0,
+        "unverified_broken_on_base": 0,
     }
 
 
@@ -177,3 +180,60 @@ def test_fixtures_none_when_report_has_none() -> None:
     report = PreflightReport(models=[_model("m")], base_ref="main")
     summary = build_summary(report, exit_code=0, comment_file=None)
     assert summary["fixtures"] is None
+
+
+def test_preexisting_failures_have_their_own_list() -> None:
+    new = FailedTest(
+        name="unique_x", model="x", status="fail", failures=2, message="", test_name="unique"
+    )
+    old = FailedTest(
+        name="expr_y",
+        model="y",
+        status="fail",
+        failures=108,
+        message="",
+        preexisting=True,
+        base_failures=108,
+    )
+    report = PreflightReport(
+        models=[
+            _model("x", tests_passed=1, tests_failed=1),
+            _model("y", changed=False, tests_failed_on_base=1),
+        ],
+        tests=[new, old],
+        base_ref="origin/main",
+    )
+    summary = build_summary(report, exit_code=1, comment_file=None)
+    assert summary["verdict"] == "failed"
+    assert [t["name"] for t in summary["failing_tests"]] == ["unique_x"]
+    assert summary["failing_tests"][0]["base_failures"] is None
+    assert summary["preexisting_failing_tests"] == [
+        {
+            "name": "expr_y",
+            "readable_name": None,
+            "model": "y",
+            "status": "fail",
+            "failures": 108,
+            "base_failures": 108,
+            "reading": None,
+        }
+    ]
+    assert summary["counts"]["tests"] == {
+        "passed": 1,
+        "failed": 1,
+        "warned": 0,
+        "failed_on_base": 1,
+    }
+    assert summary["models"][1]["tests_failed_on_base"] == 1
+
+
+def test_preexisting_failures_alone_pass_with_warnings() -> None:
+    old = FailedTest(
+        name="expr_y", model="y", status="fail", failures=3, message="", preexisting=True
+    )
+    report = PreflightReport(
+        models=[_model("y", tests_failed_on_base=1)], tests=[old], base_ref="origin/main"
+    )
+    assert build_summary(report, exit_code=0, comment_file=None)["verdict"] == (
+        "passed_with_warnings"
+    )

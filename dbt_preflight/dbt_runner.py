@@ -226,7 +226,12 @@ class DbtRunner:
         return manifest
 
     def modified_nodes(self, state_dir: Path) -> list[str]:
-        """Unique ids of the models and sources `state:modified` selects against `state_dir`."""
+        """Unique ids of what `state:modified` selects against `state_dir`.
+
+        Models and sources, plus seeds and snapshots: an edited seed CSV changes every
+        model that reads it as surely as an edited source does. And tests, so a pull
+        request that only adds or tightens a test still runs it.
+        """
         res = self._invoke(
             self._args(
                 "ls",
@@ -238,6 +243,18 @@ class DbtRunner:
                 "model",
                 "--resource-type",
                 "source",
+                "--resource-type",
+                "seed",
+                "--resource-type",
+                "snapshot",
+                "--resource-type",
+                "test",
+                "--resource-type",
+                "unit_test",
+                # Only tests that are themselves modified: by default `ls` also selects
+                # every test attached to a modified model, which says nothing new.
+                "--indirect-selection",
+                "empty",
                 "--output",
                 "json",
                 "--output-keys",
@@ -261,20 +278,30 @@ class DbtRunner:
         select: list[str] | None,
         transpile: TranspileHook | None = None,
         command: str = "build",
+        exclude: list[str] | None = None,
+        exclude_resource_types: list[str] | None = None,
     ) -> RunOutcome:
-        """Build (and test) the given models, or everything when `select` is None.
+        """Build (and test) the given nodes, or everything when `select` is None.
 
-        Tests run under `cautious` indirect selection: only when every model they read is
-        in the selection. The caller closes the selection over those models, so a test
+        Tests run under `cautious` indirect selection: only when every node they read is
+        in the selection. The caller closes the selection over those nodes, so a test
         that is skipped here is one that nothing in the change can affect.
+
+        `exclude` drops nodes by name (tests already known to fail, run on their own so
+        they cannot skip what depends on them); `exclude_resource_types` drops whole
+        kinds, e.g. every test, for a build that only has to materialise tables.
         """
         extra: list[str] = []
         if select is not None:
             if not select:
                 return RunOutcome(success=True)
             extra += ["--select", *select]
-            if command == "build":
+            if command in {"build", "test"}:
                 extra += ["--indirect-selection", "cautious"]
+        if exclude:
+            extra += ["--exclude", *exclude]
+        for rtype in exclude_resource_types or []:
+            extra += ["--exclude-resource-type", rtype]
         if transpile is not None:
             transpile.install()
         try:
