@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05
+
 ### Added
 
 - A real-world regression suite (`scripts/realworld/`, `uv run poe realworld --compare`):
