@@ -56,6 +56,32 @@ def is_preexisting(
         if head.failures is None or base.failures is None:
             return True
         return head.failures <= base.failures
-    return _first_error_line(head.message, base_schema, head_schema) == _first_error_line(
-        base.message, base_schema, head_schema
+    return same_error(head.message, base.message, base_schema, head_schema)
+
+
+def same_error(
+    head_message: str,
+    base_message: str,
+    base_schema: str = "preflight_base",
+    head_schema: str = "preflight",
+) -> bool:
+    """Whether two dbt errors say the same thing, once the base's schema reads as the head's."""
+    return _first_error_line(head_message, base_schema, head_schema) == _first_error_line(
+        base_message, base_schema, head_schema
     )
+
+
+def is_broken_on_base(head: NodeResult, base: NodeResult | None, untrusted: set[str]) -> bool:
+    """Whether a model that failed to build on head fails the same way on the base branch.
+
+    Only a model the pull request did not touch, which errored on the base with the same
+    error. `untrusted` is what it did touch: the models it modified, and everything
+    downstream of a source it modified, since the base is built on the head's fixtures.
+    Those answer for their own failure even when the base fails too; a model that built
+    on the base, or failed there for another reason, is the change's doing.
+    """
+    if head.status != "error" or head.unique_id in untrusted:
+        return False
+    if base is None or base.status != "error":
+        return False
+    return same_error(head.message, base.message)

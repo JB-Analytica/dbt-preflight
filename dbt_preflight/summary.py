@@ -28,6 +28,7 @@ from dbt_preflight.report import (
     PreflightReport,
     _generic_test_label,
     _human_reading,
+    broken_on_base_error,
 )
 from dbt_preflight.schema import InferredSource
 
@@ -45,7 +46,17 @@ def _verdict(report: PreflightReport) -> str:
 
 
 def _model_counts(models: list[ModelReport]) -> dict[str, int]:
-    counts = {"built": 0, "failed": 0, "skipped": 0, "not_verified": 0, "no_result": 0}
+    """Models by status. `failed` and `skipped` count only what the change answers for;
+    a model broken on the base branch too, and what it skipped, are counted apart."""
+    counts = {
+        "built": 0,
+        "failed": 0,
+        "skipped": 0,
+        "not_verified": 0,
+        "no_result": 0,
+        "failed_on_base": 0,
+        "skipped_by_base": 0,
+    }
     by_status = {
         BUILT: "built",
         FAILED: "failed",
@@ -54,6 +65,12 @@ def _model_counts(models: list[ModelReport]) -> dict[str, int]:
         NO_RESULT: "no_result",
     }
     for m in models:
+        if m.broken_on_base:
+            counts["failed_on_base"] += 1
+            continue
+        if m.skipped_by_base:
+            counts["skipped_by_base"] += 1
+            continue
         key = by_status.get(m.status)
         if key:
             counts[key] += 1
@@ -71,6 +88,8 @@ def _model(m: ModelReport) -> dict[str, Any]:
         "tests_failed": m.tests_failed,
         "tests_warned": m.tests_warned,
         "tests_failed_on_base": m.tests_failed_on_base,
+        "broken_on_base": m.broken_on_base,
+        "skipped_by_base": m.skipped_by_base,
         "dialect_function": m.dialect_function,
     }
 
@@ -181,6 +200,14 @@ def build_summary(
         # this change has to fix (or was warned about)" for a consumer written against it.
         "failing_tests": [_failing_test(t) for t in report.tests if not t.preexisting],
         "preexisting_failing_tests": [_failing_test(t) for t in report.preexisting_tests],
+        "broken_on_base_models": [
+            {
+                "name": m.name,
+                "unique_id": m.unique_id,
+                "error": broken_on_base_error(m),
+            }
+            for m in report.broken_on_base_models
+        ],
         "violations": [
             {
                 "rule": v.rule,

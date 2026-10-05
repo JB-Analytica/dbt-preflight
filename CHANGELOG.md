@@ -17,6 +17,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A model that fails to build is judged against the base branch too. One the pull request
+  did not modify, which fails on the base with the same error, no longer fails the check:
+  it leads the comment in an unfolded *Broken on main too (N)* section, with its error,
+  the models it skipped on both branches, and a pointer to any tests already failing
+  there, and the verdict is `passed_with_warnings`. A modified model, one that built on
+  the base, or one that fails there with a different error still fails, and what it
+  skips still counts. Found on mattermost (`account_daily_arr_deltas` reads a hard-coded
+  `finance.account_daily_arr`) and fivetran shopify (two marts that cannot cast fixture
+  values). The summary JSON adds `broken_on_base_models`, `counts.models.failed_on_base`
+  and `counts.models.skipped_by_base`, and per-model `broken_on_base` and
+  `skipped_by_base`; `counts.models.failed` and `skipped` hold only what the change
+  answers for. Downstream of a modified source nothing is judged against the base, tests
+  included: the base is built on the head's fixtures, so a renamed source column fails
+  there too, for the change's reasons.
 - A failing test is judged against the base branch. The base now runs the same tests on
   the same fixtures, before the pull request is built, and a test fails the check only
   when it is new, passed on the base, or fails on more rows than it did there. One that

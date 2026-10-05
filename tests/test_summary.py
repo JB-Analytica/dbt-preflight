@@ -56,6 +56,8 @@ def test_verdict_passed() -> None:
         "skipped": 0,
         "not_verified": 0,
         "no_result": 0,
+        "failed_on_base": 0,
+        "skipped_by_base": 0,
     }
 
 

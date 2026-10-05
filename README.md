@@ -82,8 +82,20 @@ from your schema, and the warehouse is a DuckDB file that lives for the length o
   on the base and errors on the pull request counts against it, and so does any test the
   pull request added or edited. `accepted_values` is judged like every other test. A model
   that fails to build still skips what depends on it, and so does a test failure the
-  change caused, including one that fails worse than on the base. Without `--base-ref` there is nothing
-  to compare against, so every failing test counts, as it always has.
+  change caused, including one that fails worse than on the base.
+- Whether a model that fails to build is this change's doing, judged the same way. A model
+  the pull request did not modify, which fails on the base branch too with the same error
+  (a hard-coded relation no branch builds, a fixture type it cannot cast), does not fail
+  the check: it leads the comment, unfolded, under *Broken on main too*, with its error,
+  the models it skipped on both branches, and a line pointing at any tests that already
+  fail there. The check passes with warnings. A modified model, a model that built on the
+  base, or one that fails there with a different error still fails the check, and what
+  it skips still counts as broken by the change. Downstream of a modified source neither
+  models nor tests are judged against the base: the base is built on the pull request's
+  fixtures, so there it fails for the change's reasons.
+
+  Without `--base-ref` there is nothing to compare against, so every failing test and
+  every model that fails to build counts, as it always has.
 - What the change did to the output. The base branch is built on the same fixtures, and the
   changed models plus everything downstream are compared: columns added, removed or
   retyped; row counts; rows whose values differ; and every metric the project defines,
