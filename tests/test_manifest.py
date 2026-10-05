@@ -152,3 +152,14 @@ def test_snapshots_with_a_fixed_target_schema_are_marked(raw_manifest: dict) -> 
     }
     manifest = Manifest.from_dict(raw_manifest)
     assert manifest.fixed_schema_snapshots == {"snapshot.p.legacy"}
+
+
+def test_fixture_bound_covers_what_a_modified_source_reaches(manifest: Manifest) -> None:
+    from dbt_preflight.cli import _fixture_bound
+
+    bound = _fixture_bound(manifest, {"source.p.shop.customers", "model.p.stg_shop__orders"})
+    assert bound == {
+        "source.p.shop.customers",
+        "model.p.stg_shop__customers",
+        "model.p.dim_customers",
+    }

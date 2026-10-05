@@ -870,3 +870,55 @@ def test_snapshots_with_a_fixed_schema_are_named() -> None:
         "`orders_snap` writes to a fixed `target_schema` that both branches would share, so it "
         "was built for this pull request only" in render(report)
     )
+
+
+def test_broken_on_base_section_leads_and_does_not_fail() -> None:
+    broken = _model(
+        "int_orders",
+        status=FAILED,
+        changed=False,
+        message='Runtime Error\n  Referenced column "discount" not found in FROM clause!',
+        broken_on_base=True,
+    )
+    skipped = [
+        _model(f"mart_{i}", status=SKIPPED, changed=False, skipped_by_base=True) for i in range(7)
+    ]
+    report = PreflightReport(
+        models=[_model("stg_orders", tests_passed=1), broken, *skipped],
+        tests=[_expression_test("stg_orders", 3, preexisting=True, base_failures=3)],
+        base_ref="origin/main",
+    )
+    body = render(report)
+    assert report.passed and report.has_warnings
+    top = body.split("### ⚠️ Broken on main too (1)\n")[1].split("### Changed models")[0]
+    assert "These models also fail on `main`, without this change:" in top
+    assert '- `int_orders` — Referenced column "discount" not found in FROM clause!' in top
+    assert "Skipped because of it: `mart_0`, `mart_1`, `mart_2`, `mart_3`, `mart_4`." in top
+    assert "<details><summary>2 more skipped</summary>" in top
+    assert "And 1 test already fails on `main` (details below)." in top
+    assert "Unchanged models this change breaks" not in body
+    assert "### Build errors" not in body
+    assert "`mart_0`" not in body.split("### Changed models")[1]
+
+
+def test_preexisting_tests_alone_still_get_the_top_line() -> None:
+    report = PreflightReport(
+        models=[_model("orders", tests_failed_on_base=2)],
+        tests=[
+            _expression_test("orders", 3, preexisting=True, base_failures=3),
+            _expression_test("orders", 4, preexisting=True, base_failures=4),
+        ],
+        base_ref="main",
+    )
+    body = render(report)
+    assert "### ⚠️ Broken on main too\n\n2 tests already fail on `main` (details below).\n" in body
+    assert body.index("### ⚠️ Broken on main too") < body.index("### Changed models")
+
+
+def test_a_base_given_as_a_sha_is_shortened() -> None:
+    report = PreflightReport(
+        models=[_model("orders", tests_failed_on_base=1)],
+        tests=[_expression_test("orders", 3, preexisting=True, base_failures=3)],
+        base_ref="f5be0aa00a761305ad769cfce04801f62d7d745a",
+    )
+    assert "### ⚠️ Broken on f5be0aa too" in render(report)

@@ -315,3 +315,102 @@ def test_a_snapshot_with_a_fixed_schema_is_built_for_the_head_only(
     # model it reads has a base to compare with.
     diff = next(d for d in summary["diffs"] if d["name"] == "stg_webshop__orders")
     assert diff["base_exists"] and diff["rows_differing"] == 0
+
+
+INT_ORDERS = "dbt/models/intermediate/int_orders__items_aggregated.sql"
+
+
+def _break_int_orders_on_base(repo: Path) -> None:
+    """The intermediate model reads a column that does not exist, on the base branch."""
+    _edit(
+        repo,
+        INT_ORDERS,
+        "sum(discount_cents) as discount_cents,",
+        "sum(discount) as discount_cents,",
+    )
+
+
+def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_path: Path) -> None:
+    # The pull request touches staging customers; the intermediate model is broken on main
+    # already, and the marts reading it are skipped on both branches. None of that is the
+    # change's doing: flagged at the top, not failed, not blamed.
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(
+        webshop,
+        "dbt/models/staging/webshop/stg_webshop__customers.sql",
+        "with source as",
+        "-- a harmless comment\nwith source as",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 0, body
+    assert summary["verdict"] == "passed_with_warnings"
+    [broken] = summary["broken_on_base_models"]
+    assert broken["name"] == "int_orders__items_aggregated"
+    assert '"discount" not found' in broken["error"]
+    assert summary["counts"]["models"]["failed"] == 0
+    assert summary["counts"]["models"]["failed_on_base"] == 1
+    statuses = {m["name"]: m for m in summary["models"]}
+    assert statuses["dim_customers"]["status"] == "skipped"
+    assert statuses["dim_customers"]["skipped_by_base"]
+    assert summary["counts"]["models"]["skipped"] == 0
+
+    top = body.split("### ⚠️ Broken on main too (1)")[1].split("### Changed models")[0]
+    assert "These models also fail on `main`, without this change:" in top
+    assert "- `int_orders__items_aggregated` — " in top
+    assert "Skipped because of it: " in top and "`dim_customers`" in top
+    assert "Unchanged models this change breaks" not in body
+    assert "### Build errors" not in body
+
+
+def test_a_modified_model_broken_on_base_too_still_fails(webshop: Path, tmp_path: Path) -> None:
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(webshop, INT_ORDERS, "with order_items as", "-- still broken\nwith order_items as")
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["broken_on_base_models"] == []
+    assert summary["counts"]["models"]["failed"] == 1
+    assert "### Build errors" in body
+
+
+def test_a_model_broken_differently_on_head_fails(webshop: Path, tmp_path: Path) -> None:
+    # Broken on main for one column; the change renames another it reads earlier, so on the
+    # pull request it fails on that one first. A different error is a new failure.
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(
+        webshop,
+        "dbt/models/staging/webshop/stg_webshop__order_items.sql",
+        "        unit_price_cents,\n",
+        "        unit_price_cents as unit_price,\n",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["broken_on_base_models"] == []
+    failed = [m["name"] for m in summary["models"] if m["status"] == "failed"]
+    assert "int_orders__items_aggregated" in failed
+
+
+def test_a_failure_caused_by_a_source_change_is_not_broken_on_base(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # The base is built on the head's fixtures. Rename a column in the source schema and
+    # staging fails on both branches with the same error, but because of this change: a
+    # model downstream of a modified source is never judged by the base.
+    _commit_base_then_branch(webshop)
+    _edit(
+        webshop,
+        "webshop.dbml",
+        "  email varchar [not null, unique]",
+        "  email_address varchar [not null, unique]",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["broken_on_base_models"] == []
+    assert _statuses(summary)["stg_webshop__customers"] == "failed"
+    assert "Broken on main too" not in body

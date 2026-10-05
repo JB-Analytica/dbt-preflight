@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dbt_preflight.baseline import is_preexisting
+from dbt_preflight.baseline import is_broken_on_base, is_preexisting
 from dbt_preflight.dbt_runner import NodeResult
 
 
@@ -56,3 +56,31 @@ def test_a_different_error_on_head_counts() -> None:
     head = "Runtime Error\n  Binder Error: column customer_id not found"
     base = "Runtime Error\n  Catalog Error: function initcap does not exist"
     assert not is_preexisting(_result("error", message=head), _result("error", message=base))
+
+
+def _model(status: str, message: str = "", uid: str = "model.p.m") -> NodeResult:
+    return NodeResult(
+        unique_id=uid,
+        name="m",
+        resource_type="model",
+        status=status,
+        message=message,
+        failures=None,
+        execution_time=0.0,
+    )
+
+
+def test_model_broken_the_same_way_on_base_is_broken_on_base() -> None:
+    head = _model("error", 'Runtime Error\n  Catalog Error: Table "preflight_raw"."x" missing')
+    base = _model("error", 'Runtime Error\n  Catalog Error: Table "preflight_base_raw"."x" missing')
+    assert is_broken_on_base(head, base, untrusted=set())
+
+
+def test_a_modified_model_or_a_different_error_or_a_base_build_counts() -> None:
+    head = _model("error", "Runtime Error\n  Binder Error: column a not found")
+    assert not is_broken_on_base(head, _model("error", head.message), untrusted={"model.p.m"})
+    assert not is_broken_on_base(
+        head, _model("error", "Runtime Error\n  Binder Error: column b not found"), set()
+    )
+    assert not is_broken_on_base(head, _model("success"), set())
+    assert not is_broken_on_base(head, None, set())

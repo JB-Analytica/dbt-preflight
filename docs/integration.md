@@ -66,17 +66,18 @@ Every flag on `run`:
 | Key | Type | What it holds |
 | --- | --- | --- |
 | `schema_version` | integer | Bumped when a key's meaning or shape changes, not when a key is only added. |
-| `verdict` | string | One of `passed`, `passed_with_warnings`, `failed`, `could_not_run`, `nothing_changed`. A run whose only failing tests also fail on the base branch is `passed_with_warnings` (see below). |
+| `verdict` | string | One of `passed`, `passed_with_warnings`, `failed`, `could_not_run`, `nothing_changed`. A run whose only failures, tests or model builds, also fail on the base branch is `passed_with_warnings` (see below). |
 | `exit_code` | integer | What the process actually exited with (0 or 1; see above). |
 | `base_ref` | string or null | The `--base-ref` this run was given. |
 | `head` | string or null | The head commit's SHA. |
 | `elapsed_seconds` | number | Total run time. |
 | `fatal` | string or null | Set only on `could_not_run`: why preflight could not run at all. |
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
-| `counts` | object | `models` (built/failed/skipped/not_verified/no_result), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `tests.failed` counts only failures the change answers for; `tests.failed_on_base` the ones that also fail on the base branch. |
-| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, dialect_function. |
+| `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, and `tests.failed_on_base` the tests that also fail on the base branch. |
+| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, dialect_function. `status` stays dbt's (`failed`, `skipped`); the two booleans say it is not this change's doing. |
 | `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count whenever the same, unedited test also failed there with rows; null when it passed, errored or is new or edited. In this list a non-null value is always smaller than `failures`: the test got worse), reading (a one-line plain-English reading of the DuckDB error, when there is one). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
 | `preexisting_failing_tests` | array | Failing tests that fail on the base branch the same way, on at least as many rows: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
+| `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
 | `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared, and model2data's own warnings. |
@@ -106,9 +107,34 @@ failure, and is reported the way a single `dbt build` would have: the models dow
 what it tests show as skipped.
 
 Rows are what dbt reports as `failures`, so for a test that counts groups rather than rows
-(`accepted_values` counts distinct rejected values) "more rows" means more of those. This is additive to schema version 1: a consumer that reads
-`verdict`, `counts.tests.failed` or `failing_tests` keeps getting what the run blames on
-the change. A consumer that wants every failing test regardless reads both lists.
+(`accepted_values` counts distinct rejected values) "more rows" means more of those.
+
+### Model builds and the base branch
+
+A model that fails to build is judged the same way. It is *broken on the base too*, and
+does not fail the run, when all of these hold: the pull request did not modify it (not in
+`state:modified`), it failed to build on the base branch, and its error's first line is the
+same on both sides once the base's schema name reads as the head's. A model the pull
+request modified, one that built on the base, and one that fails there with a different
+error count against the run, as before.
+
+Neither rule applies downstream of a modified source. The base is built on the head's
+fixtures, so when a source changes (a column renamed in the DBML, an edited `sources.yml`,
+or the schema or config file that shapes every source) the base runs against data its own
+code was not written for and fails for the change's reasons. Models downstream of a
+modified source, and tests that read them, are judged as if there were no base.
+
+What such a model skips is skipped on both branches and is not blamed on the change:
+those models carry `skipped_by_base: true` and stay out of `counts.models.skipped`. A
+model downstream of something the change broke as well (a model failing only on head, or
+a test the change made fail) still counts as skipped. The comment lists all of this in an
+unfolded *Broken on main too* section above *Changed models*, and points there at the
+tests already failing on the base, whose details stay folded further down.
+
+All of this is additive to schema version 1: a consumer that reads `verdict`,
+`counts.models.failed`, `counts.tests.failed` or `failing_tests` keeps getting what the run
+blames on the change. A consumer that wants every failure regardless reads
+`preexisting_failing_tests` and `broken_on_base_models` too.
 
 ## The comment's marker
 

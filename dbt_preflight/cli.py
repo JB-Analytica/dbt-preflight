@@ -16,7 +16,7 @@ from typing import Optional
 import typer
 
 from dbt_preflight import __version__
-from dbt_preflight.baseline import FAILING, is_preexisting
+from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
 from dbt_preflight.config import ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
@@ -430,6 +430,7 @@ def _run(
                 db_path,
                 select,
                 modified,
+                _fixture_bound(manifest, modified),
                 timer,
             )
         else:
@@ -455,6 +456,18 @@ def _run(
             _diff_against_base(config, report, manifest, base, db_path, changed_ids, timer)
 
 
+def _fixture_bound(manifest: Manifest, modified: set[str]) -> set[str]:
+    """The modified sources and everything downstream of them.
+
+    The base is built on the head's fixtures, so once a source changed (a renamed column
+    in the DBML, an edited `sources.yml`) the base reads data its own code was not written
+    for, and fails for the change's reasons, not its own. Nothing here is judged by its
+    base result: not its builds, and not the tests that read it.
+    """
+    sources = {uid for uid in modified if uid in manifest.sources}
+    return sources | manifest.descendants(sources)
+
+
 @dataclass
 class _BaseBuild:
     """The base branch, built on the same fixtures before the head."""
@@ -463,6 +476,11 @@ class _BaseBuild:
     # Test and unit-test results on the base branch, by unique id. Empty when its tests
     # could not run, which leaves every head failure counted, exactly as before.
     tests: dict[str, NodeResult] = field(default_factory=dict)
+    # Model, seed and snapshot results on the base branch, by unique id.
+    tables: dict[str, NodeResult] = field(default_factory=dict)
+    # Builds never judged by their base result: what the change modified, and
+    # everything `_fixture_bound` covers.
+    untrusted: set[str] = field(default_factory=set)
 
     def failing_test_selectors(self, head: Manifest) -> list[str]:
         """Exact selectors for the head's copies of the tests that fail on the base."""
@@ -482,6 +500,7 @@ def _build_base(
     db_path: Path,
     select: list[str],
     modified: set[str],
+    fixture_bound: set[str],
     timer: _StepTimer,
 ) -> _BaseBuild | None:
     """Build the base branch's side of the selection, then run its tests.
@@ -492,7 +511,8 @@ def _build_base(
 
     A test the pull request modified keeps no base result: its unique id survives an
     edit to a singular test's SQL, a unit test's rows or a generic test's config, so the
-    base result would describe a different test. Snapshots with a fixed `target_schema`
+    base result would describe a different test. Neither does a test that reads anything
+    `fixture_bound` covers. Snapshots with a fixed `target_schema`
     are left out, with everything downstream of them: building them here would leave the
     pull request merging its snapshot onto the base's rows in the same table.
     """
@@ -535,14 +555,19 @@ def _build_base(
     results = {
         r.unique_id: r
         for r in tests.results
-        if r.resource_type in {"test", "unit_test"} and r.unique_id not in modified
+        if r.resource_type in {"test", "unit_test"}
+        and r.unique_id not in modified
+        and not fixture_bound.intersection(r.depends_on)
     }
     failing = sum(1 for r in results.values() if r.status in FAILING)
     timer.mark(
         f"   base branch: {built} nodes built, {len(results)} tests, {failing} failing there"
     )
     return _BaseBuild(
-        manifest=Manifest.load(workdir / "base_build" / "manifest.json"), tests=results
+        manifest=Manifest.load(workdir / "base_build" / "manifest.json"),
+        tests=results,
+        tables={r.unique_id: r for r in tables.results if r.resource_type in _TABLE_KINDS},
+        untrusted=modified | fixture_bound,
     )
 
 
@@ -602,6 +627,8 @@ def _build_and_check(
         hook is not None,
         base.tests if base is not None else None,
     )
+    if base is not None:
+        _judge_builds(report, manifest, outcome, base)
     built = [m for m in report.models if m.status == BUILT]
     timer.mark(
         f"   built {len(built)}/{len(report.models)} models, "
@@ -683,6 +710,47 @@ def _fold_in_later_tests(
             continue
         results.append(r)
     outcome.results = results
+
+
+def _judge_builds(
+    report: PreflightReport, manifest: Manifest, outcome: RunOutcome, base: _BaseBuild
+) -> None:
+    """Mark the models that fail to build on the base branch too, and what that skips.
+
+    A model broken on the base the same way, untouched by the change, is flagged rather
+    than failed (dbt_preflight/baseline.py). Its dependants are skipped on both sides; one
+    is put down to it only when nothing the change did is upstream of it as well: a model
+    that fails only on head, a seed or snapshot that failed, or a test the change made
+    fail. Anything else skipped still counts, exactly as before.
+    """
+    head = {r.unique_id: r for r in outcome.results if r.resource_type in _TABLE_KINDS}
+    for m in report.models:
+        r = head.get(m.unique_id)
+        if m.status == FAILED and r is not None:
+            m.broken_on_base = is_broken_on_base(r, base.tables.get(m.unique_id), base.untrusted)
+    broken = {m.unique_id for m in report.models if m.broken_on_base}
+    if not broken:
+        return
+
+    roots = {
+        m.unique_id
+        for m in report.models
+        if m.status in {FAILED, NOT_VERIFIED} and not m.broken_on_base
+    }
+    roots |= {
+        uid
+        for uid, r in head.items()
+        if r.resource_type != "model" and r.status not in {"success", "skipped"}
+    }
+    for t in report.failing_tests:
+        test = manifest.tests.get(t.unique_id) or manifest.unit_tests.get(t.unique_id)
+        if test is not None:
+            roots |= {d for d in test.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
+    from_change = manifest.descendants(roots)
+    from_base = manifest.descendants(broken)
+    for m in report.models:
+        if m.status == SKIPPED and m.unique_id in from_base and m.unique_id not in from_change:
+            m.skipped_by_base = True
 
 
 def _diff_against_base(
