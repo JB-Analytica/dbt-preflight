@@ -66,15 +66,22 @@ def base_worktree(repo_root: Path, ref: str, dest: Path) -> Iterator[Path]:
         shutil.rmtree(dest, ignore_errors=True)
 
 
-def paths_changed(repo_root: Path, ref: str, paths: list[Path]) -> list[Path]:
-    """Which of `paths` differ between `ref` and the working tree (staged or not)."""
+def paths_changed(
+    repo_root: Path, ref: str, paths: list[Path], committed_only: bool = False
+) -> list[Path]:
+    """Which of `paths` differ between `ref` and the working tree (staged or not).
+
+    `committed_only` compares with HEAD instead, for a file a tool rewrites in the working
+    tree on its own (`dbt deps` and `package-lock.yml`).
+    """
     changed: list[Path] = []
     for path in paths:
         try:
             rel = str(path.resolve().relative_to(repo_root.resolve()))
         except ValueError:
             continue
-        result = _git(repo_root, "diff", "--quiet", ref, "--", rel, check=False)
+        against = [ref, "HEAD"] if committed_only else [ref]
+        result = _git(repo_root, "diff", "--quiet", *against, "--", rel, check=False)
         if result.returncode == 1:
             changed.append(path)
     return changed

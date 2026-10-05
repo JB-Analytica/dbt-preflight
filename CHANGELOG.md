@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A real-world regression suite (`scripts/realworld/`, `uv run poe realworld --compare`):
+  four public dbt projects pinned to a commit, each run through a harmless change, a
+  column rename and a wider change, compared with a committed baseline. Not part of
+  `poe check`, since it needs network; a weekly workflow runs it.
+
 ### Fixed
 
 - Seeds were never loaded on a pull-request run. The selection held models only and the
@@ -28,20 +35,31 @@ All notable changes to this project are documented here. The format follows
   warnings, exactly as they do with no config file at all. Add `conventions: {preset: jba}`
   to keep them as errors. A config file written only for `project_dir` and `dialect` had
   turned fivetran/dbt_shopify into 263 convention errors.
-- A model that fails to build is judged against the base branch too. One the pull request
-  did not modify, which fails on the base with the same error, no longer fails the check:
-  it leads the comment in an unfolded *Broken on main too (N)* section, with its error,
-  the models it skipped on both branches, and a pointer to any tests already failing
-  there, and the verdict is `passed_with_warnings`. A modified model, one that built on
-  the base, or one that fails there with a different error still fails, and what it
-  skips still counts. Found on mattermost (`account_daily_arr_deltas` reads a hard-coded
-  `finance.account_daily_arr`) and fivetran shopify (two marts that cannot cast fixture
-  values). The summary JSON adds `broken_on_base_models`, `counts.models.failed_on_base`
-  and `counts.models.skipped_by_base`, and per-model `broken_on_base` and
-  `skipped_by_base`; `counts.models.failed` and `skipped` hold only what the change
-  answers for. Downstream of a modified source nothing is judged against the base, tests
-  included: the base is built on the head's fixtures, so a renamed source column fails
-  there too, for the change's reasons.
+- A model that fails to build is judged against the base branch too. One that fails on
+  the base with the same error message, and has nothing the change touched upstream of
+  it, no longer fails the check: it leads the comment in an unfolded *Broken on main too
+  (N)* section, with its error, the models it skipped on both branches, and a pointer to
+  any tests already failing there, and the verdict is `passed_with_warnings`. A model the
+  change modified, added or reaches from upstream, one that built on the base, or one
+  that fails there differently still fails. A skipped model is put down to a broken one
+  only when the base skipped it too and the change did not touch it. Found on mattermost
+  (`account_daily_arr_deltas` reads a hard-coded `finance.account_daily_arr`) and
+  fivetran shopify (two marts that cannot cast fixture values).
+- When in doubt, a failure counts against the pull request. Errors are compared as whole
+  messages (an enforced contract always opens with the same line), and an error is never
+  pre-existing when anything upstream changed, since DuckDB reports only the first error
+  in a statement. Downstream of a source whose fixtures changed nothing is judged against
+  the base, tests included; with no DBML file that covers a staging model's cast or test
+  that changes the schema preflight derives, compared against the one derived from the
+  base. A change to `dbt_project.yml`, `packages.yml`, `dependencies.yml`,
+  a committed `package-lock.yml`, `selectors.yml` or a checked-in `profiles.yml` turns
+  the base comparison off.
+- Summary JSON `schema_version` is 2. `failing_tests`, `counts.tests.failed`,
+  `counts.models.failed` and `counts.models.skipped` now hold only what the change answers
+  for; `preexisting_failing_tests`, `broken_on_base_models`, `counts.tests.failed_on_base`,
+  `counts.models.failed_on_base`, `counts.models.skipped_by_base`, per-model
+  `tests_failed_on_base`, `broken_on_base` and `skipped_by_base`, and `base_failures` are
+  new. See docs/integration.md for the full list.
 - A failing test is judged against the base branch. The base now runs the same tests on
   the same fixtures, before the pull request is built, and a test fails the check only
   when it is new, passed on the base, or fails on more rows than it did there. One that
@@ -57,10 +75,6 @@ All notable changes to this project are documented here. The format follows
   compared with its base result, since dbt keeps its unique id through an edit to a
   singular test's SQL, a unit test's rows or a generic test's config.
   Runs without `--base-ref` behave as before.
-- The summary JSON adds `preexisting_failing_tests`, `counts.tests.failed_on_base`,
-  per-model `tests_failed_on_base`, and `base_failures` on each failing test.
-  `failing_tests` and `counts.tests.failed` now hold only what the change answers for.
-  `schema_version` stays 1.
 - A pull request that only adds or edits a test now runs it: tests count toward
   `state:modified`, and the model a modified test is declared on is a changed model.
   Before, such a pull request reported that nothing had changed. The same holds for a test

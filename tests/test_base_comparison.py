@@ -372,8 +372,10 @@ def test_a_modified_model_broken_on_base_too_still_fails(webshop: Path, tmp_path
     code, body, summary = _run(webshop, tmp_path)
     assert code == 1, body
     assert summary["broken_on_base_models"] == []
-    assert summary["counts"]["models"]["failed"] == 1
-    assert "### Build errors" in body
+    # Its unit test errors on both branches too, but the model it reads was modified, so
+    # that error is not pre-existing either: it stays in the build and skips the model.
+    assert _statuses(summary)["int_orders__items_aggregated"] in {"failed", "skipped"}
+    assert not any(m["skipped_by_base"] for m in summary["models"])
 
 
 def test_a_model_broken_differently_on_head_fails(webshop: Path, tmp_path: Path) -> None:
@@ -391,8 +393,8 @@ def test_a_model_broken_differently_on_head_fails(webshop: Path, tmp_path: Path)
     code, body, summary = _run(webshop, tmp_path)
     assert code == 1, body
     assert summary["broken_on_base_models"] == []
-    failed = [m["name"] for m in summary["models"] if m["status"] == "failed"]
-    assert "int_orders__items_aggregated" in failed
+    assert _statuses(summary)["int_orders__items_aggregated"] in {"failed", "skipped"}
+    assert not any(m["skipped_by_base"] for m in summary["models"])
 
 
 def test_a_failure_caused_by_a_source_change_is_not_broken_on_base(
@@ -414,3 +416,201 @@ def test_a_failure_caused_by_a_source_change_is_not_broken_on_base(
     assert summary["broken_on_base_models"] == []
     assert _statuses(summary)["stg_webshop__customers"] == "failed"
     assert "Broken on main too" not in body
+
+
+# --- What is skipped because of a model broken on main ------------------------------
+
+
+def test_a_modified_model_that_now_reads_a_broken_model_counts(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # dim_products built on main. The pull request makes it read the broken intermediate
+    # model, so it is skipped on head only: the change's doing, not the base's.
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(
+        webshop,
+        "dbt/models/marts/dim_products.sql",
+        "select * from final",
+        "select * from final\n"
+        "where product_id not in (select order_id from {{ ref('int_orders__items_aggregated') }})",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    product = next(m for m in summary["models"] if m["name"] == "dim_products")
+    assert product["status"] == "skipped" and not product["skipped_by_base"]
+
+
+def test_a_broken_edit_downstream_of_a_broken_model_counts(webshop: Path, tmp_path: Path) -> None:
+    # fct_orders is skipped on both branches, but the pull request edited it (with a typo
+    # it never gets to compile): what it changed was never checked, so it counts.
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(webshop, "dbt/models/marts/fct_orders.sql", "select * from final", "selectt * from final")
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    fct = next(m for m in summary["models"] if m["name"] == "fct_orders")
+    assert fct["status"] == "skipped" and not fct["skipped_by_base"]
+
+
+def test_a_new_model_reading_a_broken_model_counts(webshop: Path, tmp_path: Path) -> None:
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _write(
+        webshop,
+        "dbt/models/marts/fct_order_money.sql",
+        "select order_id, net_amount_cents from {{ ref('int_orders__items_aggregated') }}\n",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    new = next(m for m in summary["models"] if m["name"] == "fct_order_money")
+    assert new["status"] == "skipped" and not new["skipped_by_base"]
+    assert summary["counts"]["models"]["skipped"] >= 1
+
+
+# --- Errors that can hide behind an error already on main --------------------------
+
+
+def test_a_new_error_behind_an_old_one_in_the_same_model_counts(
+    webshop: Path, tmp_path: Path
+) -> None:
+    # DuckDB stops at the first error. The intermediate model already fails on `discount`
+    # on main; the change renames `discount_cents`, which it reads after that, so the
+    # error message is unchanged. Something upstream changed: never broken on main.
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(
+        webshop,
+        "dbt/models/staging/webshop/stg_webshop__order_items.sql",
+        "        discount_cents,\n",
+        "        discount_cents as line_discount_cents,\n",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["broken_on_base_models"] == []
+
+
+def test_a_vars_change_judges_nothing_against_the_base(webshop: Path, tmp_path: Path) -> None:
+    # dbt's state comparison does not see vars. With dbt_project.yml changed, a model that
+    # fails on both branches counts, as it would with no base at all.
+    _break_int_orders_on_base(webshop)
+    _commit_base_then_branch(webshop)
+    _edit(webshop, "dbt/dbt_project.yml", "flags:\n", "vars:\n  discount_rate: 0.1\n\nflags:\n")
+    _edit(
+        webshop,
+        "dbt/models/staging/webshop/stg_webshop__customers.sql",
+        "with source as",
+        "-- a harmless comment\nwith source as",
+    )
+
+    code, body, summary = _run(webshop, tmp_path)
+    assert code == 1, body
+    assert summary["broken_on_base_models"] == []
+    assert "dbt_project.yml` changed, so nothing was judged against the base branch" in body
+
+
+# --- Fixtures derived from the project: a staging edit reshapes a source -----------
+
+
+def _derived_shop(repo: Path, cast_a: str, a_values: str) -> None:
+    """Two staging models over one source, no DBML: the fixtures are derived from them."""
+    _write(
+        repo,
+        "dbt_project.yml",
+        'name: shopx\nversion: "1.0.0"\nconfig-version: 2\nprofile: shopx\n'
+        'model-paths: ["models"]\ntest-paths: ["tests"]\n'
+        "flags:\n  send_anonymous_usage_stats: false\n",
+    )
+    _write(
+        repo,
+        "models/staging/_sources.yml",
+        "version: 2\nsources:\n  - name: shop\n    schema: raw\n    tables:\n"
+        "      - name: orders\n      - name: customers\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_shop__orders_a.sql",
+        f"select id as order_id, cast(amount as {cast_a}) as amount, status\n"
+        "from {{ source('shop', 'orders') }}\n",
+    )
+    _write(
+        repo,
+        "models/staging/_a.yml",
+        "version: 2\nmodels:\n  - name: stg_shop__orders_a\n    columns:\n"
+        "      - name: status\n        data_tests:\n          - accepted_values:\n"
+        f"              arguments:\n                values: {a_values}\n",
+    )
+    # Reads a relation no branch builds before anything else, so it fails on both sides
+    # with the same first error, whatever the fixtures say about `amount`.
+    _write(
+        repo,
+        "models/staging/stg_shop__orders_b.sql",
+        "select o.id as order_id, o.status\nfrom finance.nowhere as n\n"
+        "join {{ source('shop', 'orders') }} as o on n.id = o.id\n"
+        "join {{ source('shop', 'customers') }} as c on c.id = o.amount\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_shop__orders_c.sql",
+        "select id as order_id, status from {{ source('shop', 'orders') }}\n",
+    )
+    _write(
+        repo,
+        "tests/assert_no_paid_orders.sql",
+        "select * from {{ ref('stg_shop__orders_c') }} where status = 'paid'\n",
+    )
+    _write(
+        repo,
+        "models/marts/fct_orders.sql",
+        "select a.order_id from {{ ref('stg_shop__orders_a') }} as a\n"
+        "join {{ ref('stg_shop__orders_b') }} as b on a.order_id = b.order_id\n"
+        "join {{ ref('stg_shop__orders_c') }} as c on a.order_id = c.order_id\n",
+    )
+
+
+def test_a_cast_change_that_reshapes_a_sibling_source_blocks(tmp_path: Path) -> None:
+    # The change only edits staging model a's cast, but with no DBML that cast types the
+    # `amount` fixture every reader of `orders` gets. Model b fails on both branches with
+    # the same first error; the base ran it on other data, so that says nothing.
+    repo = tmp_path / "shopx"
+    _derived_shop(repo, "integer", "[paid, shipped]")
+    _commit_base_then_branch(repo)
+    _edit(repo, "models/staging/stg_shop__orders_a.sql", "as integer)", "as varchar)")
+
+    code, body, summary = _run(repo, tmp_path, config=False)
+    assert summary["verdict"] == "failed", body
+    assert summary["broken_on_base_models"] == []
+    assert "stg_shop__orders_b" in [m["name"] for m in summary["models"]]
+
+
+def test_an_accepted_values_change_that_reshapes_a_source_blocks(tmp_path: Path) -> None:
+    # Model a's accepted_values become the `status` enum. Widening it means fewer `paid`
+    # rows, so a test on model c fails on fewer rows than on main, which once read as
+    # "already failing". Its fixtures changed: it counts.
+    repo = tmp_path / "shopx"
+    _derived_shop(repo, "integer", "[paid, shipped]")
+    _commit_base_then_branch(repo)
+    _edit(repo, "models/staging/_a.yml", "[paid, shipped]", "[paid, shipped, delivered, lost]")
+
+    code, body, summary = _run(repo, tmp_path, config=False)
+    assert summary["verdict"] == "failed", body
+    assert "assert_no_paid_orders" in [t["name"] for t in summary["failing_tests"]]
+    assert summary["preexisting_failing_tests"] == []
+
+
+def test_a_lock_file_rewritten_by_dbt_deps_is_not_a_change(tmp_path: Path) -> None:
+    from dbt_preflight.git import paths_changed
+
+    repo = tmp_path / "r"
+    _write(repo, "package-lock.yml", "packages: []\n")
+    _commit_base_then_branch(repo)
+    lock = repo / "package-lock.yml"
+    lock.write_text("packages: [rewritten]\n")  # what `dbt deps` does in the working tree
+    assert paths_changed(repo, "main", [lock]) == [lock]
+    assert paths_changed(repo, "main", [lock], committed_only=True) == []
+    _git(repo, "commit", "-qam", "bump the lock")
+    assert paths_changed(repo, "main", [lock], committed_only=True) == [lock]

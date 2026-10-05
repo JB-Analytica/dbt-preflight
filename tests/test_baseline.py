@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dbt_preflight.baseline import is_broken_on_base, is_preexisting
+from dbt_preflight.baseline import is_broken_on_base, is_preexisting, same_error
 from dbt_preflight.dbt_runner import NodeResult
 
 
@@ -84,3 +84,36 @@ def test_a_modified_model_or_a_different_error_or_a_base_build_counts() -> None:
     )
     assert not is_broken_on_base(head, _model("success"), set())
     assert not is_broken_on_base(head, None, set())
+
+
+def test_two_different_contract_violations_are_different_errors() -> None:
+    # Every enforced-contract error opens with the same line; the mismatch is below it.
+    head = (
+        "Compilation Error in model m (models/m.sql)\n"
+        "  This model has an enforced contract that failed.\n"
+        "  | column_name | definition_type | contract_type | mismatch_reason |\n"
+        "  | amount      | VARCHAR         | INTEGER       | data type mismatch |\n"
+    )
+    base = (
+        "Compilation Error in model m (models/m.sql)\n"
+        "  This model has an enforced contract that failed.\n"
+        "  | column_name | definition_type | contract_type | mismatch_reason |\n"
+        "  | ordered_at  | VARCHAR         | TIMESTAMP     | data type mismatch |\n"
+    )
+    assert not same_error(head, base)
+    assert same_error(head, head.replace("amount     ", "amount"))  # whitespace only
+    assert not is_broken_on_base(_model("error", head), _model("error", base), set())
+
+
+def test_caret_offsets_and_base_schemas_do_not_make_an_error_different() -> None:
+    head = (
+        "Runtime Error\n  Binder Error: column x not found\n"
+        '  LINE 3: from "preflight_staging"."t" where x > 1\n'
+        "                                           ^\n"
+    )
+    base = (
+        "Runtime Error\n  Binder Error: column x not found\n"
+        '  LINE 3: from "preflight_base_staging"."t" where x > 1\n'
+        "                                                ^\n"
+    )
+    assert same_error(head, base)

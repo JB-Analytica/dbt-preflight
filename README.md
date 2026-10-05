@@ -78,21 +78,36 @@ from your schema, and the warehouse is a DuckDB file that lives for the length o
   It does not stop anything downstream from building either: tests that fail on the base
   are left out of the build and run after it, so the rest of the pull request is still
   checked. A test fails "the same way" when it returns rows on both sides and no more on
-  the pull request, or errors on both sides with the same error; a test that returned rows
-  on the base and errors on the pull request counts against it, and so does any test the
-  pull request added or edited. `accepted_values` is judged like every other test. A model
+  the pull request, or errors on both sides with the same error message, line for line,
+  and nothing it reads was touched by the change (DuckDB stops at the first error, so an
+  old one can hide a new one). A test that returned rows on the base and errors on the
+  pull request counts against it, and so does any test the pull request added or edited. `accepted_values` is judged like every other test. A model
   that fails to build still skips what depends on it, and so does a test failure the
   change caused, including one that fails worse than on the base.
 - Whether a model that fails to build is this change's doing, judged the same way. A model
-  the pull request did not modify, which fails on the base branch too with the same error
-  (a hard-coded relation no branch builds, a fixture type it cannot cast), does not fail
-  the check: it leads the comment, unfolded, under *Broken on main too*, with its error,
-  the models it skipped on both branches, and a line pointing at any tests that already
-  fail there. The check passes with warnings. A modified model, a model that built on the
-  base, or one that fails there with a different error still fails the check, and what
-  it skips still counts as broken by the change. Downstream of a modified source neither
-  models nor tests are judged against the base: the base is built on the pull request's
-  fixtures, so there it fails for the change's reasons.
+  that fails on the base branch too, with the same error message, and has nothing the
+  change touched upstream of it (a hard-coded relation no branch builds, a fixture type
+  it cannot cast) does not fail the check: it leads the comment, unfolded, under *Broken
+  on main too*, with its error, the models it skipped on both branches, and a line
+  pointing at any tests that already fail there. The check passes with warnings. A model
+  the change modified, added, or reaches from upstream, one that built on the base, or
+  one that fails there with a different error still fails the check. A model skipped on
+  the pull request is put down to a broken model only when it was skipped on the base
+  too and the change neither touched it nor broke anything else above it; otherwise it
+  counts as broken by the change.
+
+  When in doubt preflight counts against the pull request, so some things are never
+  judged against the base. Downstream of a source whose fixtures changed, neither models
+  nor tests are, since the base ran on data its code was not written for. A source's
+  fixtures change when the DBML file changes, when `.dbt-preflight.yml` changes, when
+  dbt sees the source itself as modified (`sources.yml`), and, with no DBML file, when
+  the schema preflight derives from the project differs from the one it derives from the
+  base: a staging model's cast, its `unique`/`not_null`/`accepted_values` tests or the
+  columns it reads all shape that schema. And when `dbt_project.yml`, `packages.yml`,
+  `dependencies.yml`, `package-lock.yml`, `selectors.yml` or a checked-in `profiles.yml`
+  changed (the lock file by commit, since `dbt deps` rewrites it in the working tree),
+  nothing is judged against the base at all: dbt's own comparison does not see vars or
+  package versions.
 
   Without `--base-ref` there is nothing to compare against, so every failing test and
   every model that fails to build counts, as it always has.
