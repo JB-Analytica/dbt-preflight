@@ -45,6 +45,14 @@ All notable changes to this project are documented here. The format follows
   only when the base skipped it too and the change did not touch it. Found on mattermost
   (`account_daily_arr_deltas` reads a hard-coded `finance.account_daily_arr`) and
   fivetran shopify (two marts that cannot cast fixture values).
+- A model that fails on the base the same way, but that the change reaches from upstream,
+  is reported as *Could not be checked*, naming what the change modified upstream,
+  instead of under *Unchanged models this change breaks*. It still fails the run. The
+  summary adds `unverified_broken_on_base_models`, per-model `unverified_broken_on_base`
+  and `skipped_by_unverified`, and `counts.models.unverified_broken_on_base`.
+- A "table does not exist" error reads as "was not built, it failed or was skipped
+  upstream" only when the table is a model, seed, snapshot or source of the project; a
+  table nothing in the project builds reads as a hard-coded table.
 - When in doubt, a failure counts against the pull request. Errors are compared as whole
   messages (an enforced contract always opens with the same line), and an error is never
   pre-existing when anything upstream changed, since DuckDB reports only the first error

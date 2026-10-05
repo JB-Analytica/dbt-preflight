@@ -17,7 +17,7 @@ from typing import Optional
 import typer
 
 from dbt_preflight import __version__
-from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting
+from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
 from dbt_preflight.config import ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
@@ -318,6 +318,7 @@ def _run(
     head_runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
     head_runner.deps()
     manifest = Manifest.load(head_runner.parse())
+    report.relations = manifest.relations()
     timer.mark(f"   parsed {len(manifest.models)} models, {len(manifest.sources)} sources")
 
     # DuckDB names its catalog after the file. Rename the file so `database` in the
@@ -835,12 +836,27 @@ def _judge_builds(
     head = {r.unique_id: r for r in outcome.results if r.resource_type in _TABLE_KINDS}
     for m in report.models:
         r = head.get(m.unique_id)
-        if m.status == FAILED and r is not None:
-            m.broken_on_base = is_broken_on_base(
-                r, base.tables.get(m.unique_id), trust.changed_upstream
-            )
+        on_base = base.tables.get(m.unique_id)
+        if m.status != FAILED or r is None:
+            continue
+        m.broken_on_base = is_broken_on_base(r, on_base, trust.changed_upstream)
+        if (
+            not m.broken_on_base
+            # Not what the change modified, nor what reads fixtures it changed: there the
+            # base ran on the change's data, so its error is the change's too.
+            and m.unique_id not in trust.untrusted
+            and on_base is not None
+            and on_base.status == "error"
+            and same_error(r.message, on_base.message)
+        ):
+            # The same error on main, but the change reaches the model from upstream and
+            # DuckDB reports only the first error: it counts, as "could not be checked",
+            # not as something this change is known to have broken.
+            m.unverified_broken_on_base = True
+            m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
     broken = {m.unique_id for m in report.models if m.broken_on_base}
-    if not broken:
+    unverified = {m.unique_id for m in report.models if m.unverified_broken_on_base}
+    if not broken and not unverified:
         return
 
     roots = {
@@ -859,7 +875,14 @@ def _judge_builds(
             roots |= {d for d in test.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
     from_change = manifest.descendants(roots)
     from_base = manifest.descendants(broken)
+    # What only an unverified model is upstream of is skipped "because of it": still
+    # counted, but not said to be broken by the change.
+    from_unverified = manifest.descendants(unverified)
+    from_known = manifest.descendants(roots - unverified)
     for m in report.models:
+        m.skipped_by_unverified = (
+            m.status == SKIPPED and m.unique_id in from_unverified and m.unique_id not in from_known
+        )
         on_base = base.tables.get(m.unique_id)
         m.skipped_by_base = (
             m.status == SKIPPED
@@ -871,6 +894,25 @@ def _judge_builds(
             and on_base is not None
             and on_base.status == "skipped"
         )
+
+
+def _changed_ancestors(manifest: Manifest, uid: str, modified: set[str]) -> list[str]:
+    """The names of what the change modified upstream of `uid`, nearest first."""
+    seen: set[str] = set()
+    out: list[str] = []
+    frontier = list(manifest.parent_map.get(uid, []))
+    while frontier:
+        parent = frontier.pop(0)
+        if parent in seen:
+            continue
+        seen.add(parent)
+        if parent in modified:
+            source = manifest.sources.get(parent)
+            out.append(
+                f"{source.source_name}.{source.name}" if source else manifest.node_name(parent)
+            )
+        frontier += manifest.parent_map.get(parent, [])
+    return out
 
 
 def _diff_against_base(
