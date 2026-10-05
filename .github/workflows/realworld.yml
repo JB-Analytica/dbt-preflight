@@ -16,8 +16,6 @@ jobs:
   realworld:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      REALWORLD_CACHE: ${{ runner.temp }}/preflight-realworld
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -26,6 +24,9 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --extra dev
       - name: Run the suite against the baseline
+        # The runner context is not available in a job-level env, so set the cache here.
+        env:
+          REALWORLD_CACHE: ${{ runner.temp }}/preflight-realworld
         run: uv run poe realworld --compare
       - name: Keep the comments and summaries
         if: always()
