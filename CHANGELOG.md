@@ -16,6 +16,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Editing `.dbt-preflight.yml` made every source count as modified, whatever changed.
+  Now only a key that shapes the fixtures or what the models compile to does that
+  (`project_dir`, `schema`, `rows`, `rows_for`, `seed`, `locale`, `env`,
+  `loader_columns`, `dialect`). Adding a `conventions:` block to audience-analytics had
+  rebuilt all 33 models and failed on a fixture weakness the change had nothing to do with.
+  A config that is new, or unreadable on either side, still counts as a change.
 - Seeds were never loaded on a pull-request run. The selection held models only and the
   base branch was built with `dbt run`, so a project whose models `ref()` a seed (classic
   jaffle_shop; Tuva-style lookup seeds beside sources) built none of them, with `Table

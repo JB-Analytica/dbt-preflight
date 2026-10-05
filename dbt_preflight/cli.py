@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import yaml
 
 from dbt_preflight import __version__
 from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
@@ -31,7 +32,7 @@ from dbt_preflight.dbt_runner import (
 )
 from dbt_preflight.diff import compute_diffs
 from dbt_preflight.fixtures import build_fixtures
-from dbt_preflight.git import GitError, base_worktree, git_root, head_sha, paths_changed
+from dbt_preflight.git import GitError, base_worktree, file_at, git_root, head_sha, paths_changed
 from dbt_preflight.github import GitHubError, post_or_update_comment, pull_request_number
 from dbt_preflight.manifest import Manifest
 from dbt_preflight.metrics import collect_metrics
@@ -379,6 +380,8 @@ def _run(
             # config changed, every source is effectively different and everything runs.
             watched = [p for p in (config.schema, config.path) if p is not None]
             touched = paths_changed(config.repo_root, base_ref, watched)
+            if config.path in touched and not _config_reshapes_fixtures(config, base_ref):
+                touched.remove(config.path)
             if touched:
                 names = ", ".join(f"`{_relative(p, config.repo_root)}`" for p in touched)
                 report.note = (
@@ -520,6 +523,42 @@ def _dbml_tables(text: str) -> dict[str, str]:
         used = [enums[t] for t in re.findall(r"^\s+\S+ (\S+)", body, re.MULTILINE) if t in enums]
         out[name] = body + "".join(used)
     return out
+
+
+# The config keys that shape the fixtures or what the models compile to. A change to any
+# other key (conventions, metrics, how dialect gaps are judged) leaves every source as it was.
+_FIXTURE_KEYS = (
+    "project_dir",
+    "schema",
+    "rows",
+    "rows_for",
+    "seed",
+    "locale",
+    "env",
+    "loader_columns",
+    "dialect",
+)
+
+
+def _config_reshapes_fixtures(config: PreflightConfig, base_ref: str) -> bool:
+    """Whether the config's change between the base and the head can change the fixtures.
+
+    A config file that is new, unreadable on either side, or differs in any key in
+    `_FIXTURE_KEYS` counts as reshaping them; when in doubt it does.
+    """
+    if config.path is None:
+        return False
+    before = file_at(config.repo_root, base_ref, config.path)
+    if before is None:
+        return True
+    try:
+        base_raw = yaml.safe_load(before) or {}
+        head_raw = yaml.safe_load(config.path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return True
+    if not isinstance(base_raw, dict) or not isinstance(head_raw, dict):
+        return True
+    return any(base_raw.get(k) != head_raw.get(k) for k in _FIXTURE_KEYS)
 
 
 def _reshaped_sources(head: Manifest, base: Manifest) -> set[str]:
