@@ -1,4 +1,4 @@
-# Four public dbt projects, each pinned to a commit, each run through three kinds of change.
+# Public dbt projects, each pinned to a commit, each run through three kinds of change.
 #
 # Per project:
 #   repo / sha      what to fetch (shallow, by SHA, so a moving main cannot change a result)
@@ -107,3 +107,49 @@ projects:
         - {file: models/rest/staging/stg_shopify__order.sql, prepend: *comment}
         - {file: models/rest/staging/stg_shopify__order_line.sql, prepend: *comment}
         - {file: models/rest/staging/stg_shopify__product.sql, prepend: *comment}
+
+  shopify_derived:
+    description: >-
+      Same pinned fivetran/dbt_shopify and changes as `shopify`, but no hand-written DBML:
+      preflight has to derive the source schema itself. A project with sources it cannot see.
+    repo: https://github.com/fivetran/dbt_shopify.git
+    sha: 03e91d7aeb83151f968105f8580d13110f5375e4
+    setup:
+      - {copy: shopify_derived.dbt-preflight.yml, to: .dbt-preflight.yml}
+    rename_column: {old: customer_id, new: cust_id}
+    expect: {harmless: passes, rename: caught}
+    changes:
+      harmless:
+        - {file: models/rest/staging/stg_shopify__customer.sql, prepend: *comment}
+      rename:
+        - file: models/rest/staging/stg_shopify__customer.sql
+          replace: {old: "id as customer_id,", new: "id as cust_id,"}
+      full:
+        - {file: models/rest/staging/stg_shopify__order.sql, prepend: *comment}
+        - {file: models/rest/staging/stg_shopify__order_line.sql, prepend: *comment}
+        - {file: models/rest/staging/stg_shopify__product.sql, prepend: *comment}
+
+  dbt_ga4:
+    description: >-
+      Velir/dbt-ga4 via its integration_test_project (a consumer project that installs the
+      package with `local: ..`). BigQuery, no schema given: sources are GA4 export tables with
+      nested records, selected through macros.
+    repo: https://github.com/Velir/dbt-ga4.git
+    sha: 664be28505018ba6e5409a91e0aa1fce11d321dc
+    setup:
+      - {copy: dbt_ga4.dbt-preflight.yml, to: .dbt-preflight.yml}
+    # page_path is built in stg_ga4__events and read by dim_ga4__sessions(_daily).
+    rename_column: {old: page_path, new: page_url_path}
+    expect: {harmless: passes, rename: caught}
+    changes:
+      harmless:
+        - {file: models/staging/stg_ga4__events.sql, prepend: *comment}
+      rename:
+        - file: models/staging/stg_ga4__events.sql
+          replace:
+            old: "{{ extract_page_path('page_location') }} as page_path,"
+            new: "{{ extract_page_path('page_location') }} as page_url_path,"
+      full:
+        - {file: models/staging/stg_ga4__events.sql, prepend: *comment}
+        - {file: models/staging/stg_ga4__sessions_traffic_sources.sql, prepend: *comment}
+        - {file: models/staging/stg_ga4__page_engaged_time.sql, prepend: *comment}

@@ -56,7 +56,14 @@ def _summary(**over):
 
 def test_committed_manifest_loads_and_is_pinned():
     projects = rw.load_manifest()
-    assert set(projects) == {"jaffle_shop_classic", "jaffle_shop_current", "mattermost", "shopify"}
+    assert set(projects) == {
+        "jaffle_shop_classic",
+        "jaffle_shop_current",
+        "mattermost",
+        "shopify",
+        "shopify_derived",
+        "dbt_ga4",
+    }
     for p in projects.values():
         assert set(p.changes) == set(rw.CHANGE_NAMES)
         assert len(p.sha) == 40

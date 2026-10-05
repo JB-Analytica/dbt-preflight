@@ -1,6 +1,6 @@
 # Real-world regression suite
 
-Four public dbt projects, each run through three kinds of pull request, so a release is
+Six dbt project setups (public repos), each run through three kinds of pull request, so a release is
 measured against code we did not write and not only against `examples/webshop`.
 
 | Project | Why it is here |
@@ -9,6 +9,8 @@ measured against code we did not write and not only against `examples/webshop`.
 | `jaffle_shop_current` | dbt-labs/jaffle-shop main: dbt 2.0 project (its `require-dbt-version` is relaxed in the base commit) |
 | `mattermost` | Snowflake project in a subdirectory, needs `.dbt-preflight.yml` and `env:` |
 | `shopify` | fivetran/dbt_shopify via `integration_tests`, with a hand-written DBML as `schema:` |
+| `shopify_derived` | the same pinned dbt_shopify and changes, but no DBML: preflight must derive the source schema (a source it cannot see) |
+| `dbt_ga4` | Velir/dbt-ga4 via `integration_test_project`: GA4 export sources with nested records, read through macros; no schema given |
 
 Changes: `harmless` (a SQL comment in one staging model), `rename` (one column renamed in a
 staging model), `full` (comments in 3 or 4 staging models).
@@ -21,7 +23,7 @@ uv run poe realworld --compare                        # exit 1 if anything got w
 uv run poe realworld --project shopify --change rename
 ```
 
-It needs network and takes about four minutes. Projects are fetched shallow, by pinned SHA,
+It needs network and takes about five minutes. Projects are fetched shallow, by pinned SHA,
 into `$REALWORLD_CACHE` (default: `<system temp>/preflight-realworld`); summaries, comments
 and logs per run land in `<cache>/out` (`--out-dir` to change). Each run resets the cached
 clone to the pinned commit, commits the setup as base and the change as head, then runs
