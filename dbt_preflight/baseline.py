@@ -9,22 +9,36 @@ summary cannot apply it differently.
 
 from __future__ import annotations
 
+import re
+
 from dbt_preflight.dbt_runner import NodeResult
 
 FAILING = frozenset({"fail", "error"})
 
 
-def _first_error_line(message: str, base_schema: str, head_schema: str) -> str:
-    """The error's first meaningful line, with the base target's schema read as the head's.
+# Parts of a dbt error that differ between the two sides without saying anything different:
+# the caret line under the failing column (its offset moves with the schema name's
+# length), timings, and the absolute path of the base branch's checkout.
+_CARET = re.compile(r"^\s*\^+\s*$")
+_TIMING = re.compile(r"\b\d+(?:\.\d+)?\s*s(?:econds)?\b")
+_BASE_CHECKOUT = re.compile(r"\S*/\.preflight/base/")
 
-    The two sides build into different schemas (`preflight_base_*` versus `preflight_*`),
-    so an otherwise identical DuckDB error names a different relation on each side.
+
+def _normalised_error(message: str, base_schema: str, head_schema: str) -> list[str]:
+    """The whole error, as comparable lines, with the base target's schema read as the head's.
+
+    Every line, not the first: an enforced contract always opens with "This model has an
+    enforced contract that failed." and says which columns are wrong below it.
     """
-    for line in (message or "").splitlines():
-        line = line.strip()
-        if line and not line.startswith(("Runtime Error", "Compilation Error", "Database Error")):
-            return line.replace(base_schema, head_schema)
-    return ""
+    lines: list[str] = []
+    for line in (message or "").replace(base_schema, head_schema).splitlines():
+        if _CARET.match(line):
+            continue
+        line = _TIMING.sub("<t>", _BASE_CHECKOUT.sub("", line))
+        line = " ".join(line.split())
+        if line:
+            lines.append(line)
+    return lines
 
 
 def is_preexisting(
@@ -65,8 +79,8 @@ def same_error(
     base_schema: str = "preflight_base",
     head_schema: str = "preflight",
 ) -> bool:
-    """Whether two dbt errors say the same thing, once the base's schema reads as the head's."""
-    return _first_error_line(head_message, base_schema, head_schema) == _first_error_line(
+    """Whether two dbt errors say the same thing, line for line, once normalised."""
+    return _normalised_error(head_message, base_schema, head_schema) == _normalised_error(
         base_message, base_schema, head_schema
     )
 
@@ -75,10 +89,12 @@ def is_broken_on_base(head: NodeResult, base: NodeResult | None, untrusted: set[
     """Whether a model that failed to build on head fails the same way on the base branch.
 
     Only a model the pull request did not touch, which errored on the base with the same
-    error. `untrusted` is what it did touch: the models it modified, and everything
-    downstream of a source it modified, since the base is built on the head's fixtures.
-    Those answer for their own failure even when the base fails too; a model that built
-    on the base, or failed there for another reason, is the change's doing.
+    error. `untrusted` is everything the change can have reached: what it modified, what
+    reads a source whose fixtures it changed, and everything downstream of either.
+    DuckDB reports only the first error in a statement, so an unchanged error can hide a
+    new one the change put after it, upstream or in an ephemeral model inlined into this
+    one: a model with anything changed upstream is never broken on the base. A model
+    that built on the base, or failed there with a different error, is the change's doing.
     """
     if head.status != "error" or head.unique_id in untrusted:
         return False

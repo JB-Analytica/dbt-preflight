@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -45,7 +46,7 @@ from dbt_preflight.report import (
     PreflightReport,
     render,
 )
-from dbt_preflight.schema import SchemaError, resolve_schema
+from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema
 from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
 
@@ -383,6 +384,37 @@ def _run(
                     f"{names} changed, so every source counts as modified and all models ran."
                 )
                 modified |= set(manifest.sources)
+            # With no DBML file the fixtures are derived from the project itself, and a
+            # staging model's casts or tests shape them: a source whose derived table
+            # differs from the base's is as changed as an edited sources.yml.
+            if config.schema is None and manifest.sources:
+                reshaped = _reshaped_sources(manifest, Manifest.load(state_dir / "manifest.json"))
+                if reshaped - modified:
+                    names = ", ".join(
+                        f"`{manifest.sources[u].identifier}`" for u in sorted(reshaped - modified)
+                    )
+                    _say(f"   derived fixtures differ from the base for {names}")
+                    modified |= reshaped
+            # dbt's state comparison does not see vars or package versions. When a file
+            # that can change what every model does changed, nothing is judged by the base.
+            project_files = [config.project_dir / n for n in _PROJECT_FILES]
+            moved = paths_changed(config.repo_root, base_ref, project_files)
+            # `dbt deps` has just rewritten the lock file in the working tree on both
+            # sides; only a committed change to it is the pull request's.
+            moved += paths_changed(
+                config.repo_root,
+                base_ref,
+                [config.project_dir / "package-lock.yml"],
+                committed_only=True,
+            )
+            judge = not moved
+            if moved:
+                names = ", ".join(f"`{_relative(p, config.repo_root)}`" for p in moved)
+                extra = (
+                    f"{names} changed, so nothing was judged against the base branch: every "
+                    "failing test and model counts."
+                )
+                report.note = f"{report.note} {extra}" if report.note else extra
             # Models, plus the seeds and snapshots they read: a pull-request build that
             # selected models alone never loaded a seed, so a project whose staging layer
             # reads `ref('raw_customers')` failed on every model.
@@ -421,6 +453,7 @@ def _run(
                 for u in affected_nodes
                 if u in manifest.fixed_schema_snapshots
             )
+            untrusted = modified | _fixture_bound(manifest, modified)
             base = _build_base(
                 config,
                 report,
@@ -429,8 +462,13 @@ def _run(
                 workdir,
                 db_path,
                 select,
-                modified,
-                _fixture_bound(manifest, modified),
+                _Trust(
+                    modified=modified,
+                    fixture_bound=_fixture_bound(manifest, modified),
+                    untrusted=untrusted,
+                    changed_upstream=untrusted | manifest.descendants(untrusted),
+                    judge=judge,
+                ),
                 timer,
             )
         else:
@@ -456,6 +494,57 @@ def _run(
             _diff_against_base(config, report, manifest, base, db_path, changed_ids, timer)
 
 
+# Project-level files whose change can alter every model without dbt's state comparison
+# noticing: vars, package versions, selectors, a checked-in profile. `package-lock.yml`
+# too, compared by commit (see `_run`).
+_PROJECT_FILES = (
+    "dbt_project.yml",
+    "packages.yml",
+    "dependencies.yml",
+    "selectors.yml",
+    "profiles.yml",
+)
+
+_DBML_BLOCK = re.compile(r"^(Table|Enum) (\S+) \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
+
+
+def _dbml_tables(text: str) -> dict[str, str]:
+    """Each table of a derived DBML file, with the enums its columns use, as text."""
+    tables: dict[str, str] = {}
+    enums: dict[str, str] = {}
+    for kind, name, body in _DBML_BLOCK.findall(text):
+        (tables if kind == "Table" else enums)[name] = body
+    out: dict[str, str] = {}
+    for name, body in tables.items():
+        used = [enums[t] for t in re.findall(r"^\s+\S+ (\S+)", body, re.MULTILINE) if t in enums]
+        out[name] = body + "".join(used)
+    return out
+
+
+def _reshaped_sources(head: Manifest, base: Manifest) -> set[str]:
+    """Head sources whose derived fixture table differs from the one the base derives.
+
+    Columns, types, keys, refs and enum values all come from the project's own YAML and
+    staging SQL when there is no DBML file, so a pull request that edits a cast or a test
+    in one staging model changes the data every reader of that source gets. When the base
+    cannot be derived at all, every source counts.
+    """
+    try:
+        head_text, _ = derive_dbml(head)
+    except SchemaError:
+        return set()  # the head run reports this itself
+    try:
+        base_text, _ = derive_dbml(base)
+    except SchemaError:
+        return set(head.sources)
+    head_tables, base_tables = _dbml_tables(head_text), _dbml_tables(base_text)
+    return {
+        uid
+        for uid, src in head.sources.items()
+        if head_tables.get(src.identifier) != base_tables.get(src.identifier)
+    }
+
+
 def _fixture_bound(manifest: Manifest, modified: set[str]) -> set[str]:
     """The modified sources and everything downstream of them.
 
@@ -469,6 +558,22 @@ def _fixture_bound(manifest: Manifest, modified: set[str]) -> set[str]:
 
 
 @dataclass
+class _Trust:
+    """What the base branch's results may be used for, given what the change touched."""
+
+    modified: set[str]
+    # Modified sources and everything downstream: the base reads the head's fixtures there.
+    fixture_bound: set[str]
+    # `modified` plus `fixture_bound`: never skipped "because of the base".
+    untrusted: set[str]
+    # `untrusted` and everything downstream of it: never broken on the base, and no test
+    # reading it is pre-existing on an error, since one error can hide another.
+    changed_upstream: set[str]
+    # False when a project-level file changed: nothing is judged by the base at all.
+    judge: bool = True
+
+
+@dataclass
 class _BaseBuild:
     """The base branch, built on the same fixtures before the head."""
 
@@ -478,9 +583,7 @@ class _BaseBuild:
     tests: dict[str, NodeResult] = field(default_factory=dict)
     # Model, seed and snapshot results on the base branch, by unique id.
     tables: dict[str, NodeResult] = field(default_factory=dict)
-    # Builds never judged by their base result: what the change modified, and
-    # everything `_fixture_bound` covers.
-    untrusted: set[str] = field(default_factory=set)
+    trust: _Trust | None = None  # None: nothing is judged by the base
 
     def failing_test_selectors(self, head: Manifest) -> list[str]:
         """Exact selectors for the head's copies of the tests that fail on the base."""
@@ -499,8 +602,7 @@ def _build_base(
     workdir: Path,
     db_path: Path,
     select: list[str],
-    modified: set[str],
-    fixture_bound: set[str],
+    trust: _Trust,
     timer: _StepTimer,
 ) -> _BaseBuild | None:
     """Build the base branch's side of the selection, then run its tests.
@@ -512,7 +614,8 @@ def _build_base(
     A test the pull request modified keeps no base result: its unique id survives an
     edit to a singular test's SQL, a unit test's rows or a generic test's config, so the
     base result would describe a different test. Neither does a test that reads anything
-    `fixture_bound` covers. Snapshots with a fixed `target_schema`
+    the base ran on foreign fixtures for, a test that errored on the base and reads
+    anything the change reached (`_Trust`), nor, when `judge` is false, any test at all. Snapshots with a fixed `target_schema`
     are left out, with everything downstream of them: building them here would leave the
     pull request merging its snapshot onto the base's rows in the same table.
     """
@@ -555,9 +658,11 @@ def _build_base(
     results = {
         r.unique_id: r
         for r in tests.results
-        if r.resource_type in {"test", "unit_test"}
-        and r.unique_id not in modified
-        and not fixture_bound.intersection(r.depends_on)
+        if trust.judge
+        and r.resource_type in {"test", "unit_test"}
+        and r.unique_id not in trust.modified
+        and not trust.fixture_bound.intersection(r.depends_on)
+        and not (r.status == "error" and trust.changed_upstream.intersection(r.depends_on))
     }
     failing = sum(1 for r in results.values() if r.status in FAILING)
     timer.mark(
@@ -567,7 +672,7 @@ def _build_base(
         manifest=Manifest.load(workdir / "base_build" / "manifest.json"),
         tests=results,
         tables={r.unique_id: r for r in tables.results if r.resource_type in _TABLE_KINDS},
-        untrusted=modified | fixture_bound,
+        trust=trust if trust.judge else None,
     )
 
 
@@ -717,17 +822,23 @@ def _judge_builds(
 ) -> None:
     """Mark the models that fail to build on the base branch too, and what that skips.
 
-    A model broken on the base the same way, untouched by the change, is flagged rather
-    than failed (dbt_preflight/baseline.py). Its dependants are skipped on both sides; one
-    is put down to it only when nothing the change did is upstream of it as well: a model
-    that fails only on head, a seed or snapshot that failed, or a test the change made
-    fail. Anything else skipped still counts, exactly as before.
+    A model broken on the base the same way, with nothing the change touched upstream of
+    it, is flagged rather than failed (dbt_preflight/baseline.py). A model skipped on
+    head is put down to it only when it was skipped on the base too, the change did not
+    modify or add it or reshape its fixtures, and nothing else the change did is upstream
+    of it: a model that fails only on head, a seed or snapshot that failed, or a test the
+    change made fail. Anything else skipped still counts, exactly as before.
     """
+    trust = base.trust
+    if trust is None:
+        return
     head = {r.unique_id: r for r in outcome.results if r.resource_type in _TABLE_KINDS}
     for m in report.models:
         r = head.get(m.unique_id)
         if m.status == FAILED and r is not None:
-            m.broken_on_base = is_broken_on_base(r, base.tables.get(m.unique_id), base.untrusted)
+            m.broken_on_base = is_broken_on_base(
+                r, base.tables.get(m.unique_id), trust.changed_upstream
+            )
     broken = {m.unique_id for m in report.models if m.broken_on_base}
     if not broken:
         return
@@ -749,8 +860,17 @@ def _judge_builds(
     from_change = manifest.descendants(roots)
     from_base = manifest.descendants(broken)
     for m in report.models:
-        if m.status == SKIPPED and m.unique_id in from_base and m.unique_id not in from_change:
-            m.skipped_by_base = True
+        on_base = base.tables.get(m.unique_id)
+        m.skipped_by_base = (
+            m.status == SKIPPED
+            and m.unique_id in from_base
+            and m.unique_id not in from_change
+            # Something the change made or edited answers for itself, even downstream of
+            # a broken model; and "skipped on both branches" has to be true.
+            and m.unique_id not in trust.untrusted
+            and on_base is not None
+            and on_base.status == "skipped"
+        )
 
 
 def _diff_against_base(

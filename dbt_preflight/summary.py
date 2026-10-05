@@ -9,6 +9,8 @@ test, a moved metric or a removed column means.
 Keys are snake_case; every value is a plain string, number, boolean, list or dict, never a
 dataclass. `schema_version` is bumped when a key's meaning or shape changes, not when a key
 is only added.
+Version 2 (0.4.0) narrowed the failure keys to what the change answers for; see
+docs/integration.md.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from dbt_preflight.report import (
 )
 from dbt_preflight.schema import InferredSource
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _verdict(report: PreflightReport) -> str:
