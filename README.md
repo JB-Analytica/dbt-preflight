@@ -100,7 +100,7 @@ from dbt's semantic layer, Lightdash `meta.metrics`, or a `metrics:` list in the
 
 ### What was already broken, and what could not be checked
 
-![A preflight comment on Fivetran's Shopify package that passes with warnings: two models that also fail on main are listed first, with the models they skip, and the pull request is not failed for them](https://raw.githubusercontent.com/JB-Analytica/dbt-preflight/main/assets/comment-broken-on-main.png)
+![A preflight comment on dbt-labs/jaffle-shop that passes with warnings: three tests that also fail on main are listed first and folded below, each noting which columns' types preflight guessed, and the harmless pull request is not failed for them](https://raw.githubusercontent.com/JB-Analytica/dbt-preflight/main/assets/comment-broken-on-main.png)
 
 A model that fails the same way on `main` leads the comment under ⚠️ *Broken on main too*
 and does not fail the pull request. Tests synthetic data can never satisfy fail on both
