@@ -330,10 +330,13 @@ def _break_int_orders_on_base(repo: Path) -> None:
     )
 
 
-def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_path: Path) -> None:
+def test_a_model_broken_on_base_too_is_flagged_and_what_the_change_reaches_counts(
+    webshop: Path, tmp_path: Path
+) -> None:
     # The pull request touches staging customers; the intermediate model is broken on main
-    # already, and the marts reading it are skipped on both branches. None of that is the
-    # change's doing: flagged at the top, not failed, not blamed.
+    # already. It is flagged at the top, not failed, not blamed. The mart reading both it
+    # and staging customers is skipped on both branches, but the change reaches it through
+    # staging customers, so its skip counts: the change to it was never checked.
     _break_int_orders_on_base(webshop)
     _commit_base_then_branch(webshop)
     _edit(
@@ -344,8 +347,8 @@ def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_pat
     )
 
     code, body, summary = _run(webshop, tmp_path)
-    assert code == 0, body
-    assert summary["verdict"] == "passed_with_warnings"
+    assert code == 1, body
+    assert summary["verdict"] == "failed"
     [broken] = summary["broken_on_base_models"]
     assert broken["name"] == "int_orders__items_aggregated"
     assert '"discount" not found' in broken["error"]
@@ -353,13 +356,13 @@ def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_pat
     assert summary["counts"]["models"]["failed_on_base"] == 1
     statuses = {m["name"]: m for m in summary["models"]}
     assert statuses["dim_customers"]["status"] == "skipped"
-    assert statuses["dim_customers"]["skipped_by_base"]
-    assert summary["counts"]["models"]["skipped"] == 0
+    assert not statuses["dim_customers"]["skipped_by_base"]
+    assert summary["counts"]["models"]["skipped"] >= 1
 
     top = body.split("### ⚠️ Broken on main too (1)")[1].split("### Changed models")[0]
     assert "These models also fail on `main`, without this change:" in top
     assert "- `int_orders__items_aggregated` — " in top
-    assert "Skipped because of it: " in top and "`dim_customers`" in top
+    assert "`dim_customers`" in top and "because the change reaches" in top
     assert "Unchanged models this change breaks" not in body
     assert "### Build errors" not in body
 

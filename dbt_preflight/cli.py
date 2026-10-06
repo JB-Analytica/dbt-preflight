@@ -39,7 +39,7 @@ from dbt_preflight.dbt_runner import (
     write_profiles,
 )
 from dbt_preflight.diff import compute_diffs
-from dbt_preflight.fixtures import build_fixtures
+from dbt_preflight.fixtures import build_fixtures, widen_json
 from dbt_preflight.git import GitError, base_worktree, file_at, git_root, head_sha, paths_changed
 from dbt_preflight.github import GitHubError, post_or_update_comment, pull_request_number
 from dbt_preflight.manifest import Manifest
@@ -55,7 +55,13 @@ from dbt_preflight.report import (
     PreflightReport,
     render,
 )
-from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema, source_table_names
+from dbt_preflight.schema import (
+    SchemaError,
+    derive_dbml,
+    json_reads,
+    resolve_schema,
+    source_table_names,
+)
 from dbt_preflight.schema_file import annotate, count_notes, default_output
 from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
@@ -389,6 +395,7 @@ def _run(
         _say(f"   transpiling model SQL from {dialect} to DuckDB")
     changed_ids: set[str] = set()
     base: _BaseBuild | None = None
+    base_compiled: CompiledSql | None = None
     with contextlib.ExitStack() as stack:
         if base_ref:
             base_root = stack.enter_context(
@@ -441,6 +448,24 @@ def _run(
                     )
                     _say(f"   derived fixtures differ from the base for {names}")
                     modified |= reshaped
+            # The JSON columns get the base's paths too: both branches build on one
+            # fixture, so a key the pull request renamed must not validate itself.
+            if report.fixtures is not None and report.fixtures.json_shapes:
+                base_manifest = Manifest.load(state_dir / "manifest.json")
+                if config.schema is not None:
+                    base_compiled = _compile_for_inference(
+                        base_project, base_manifest, catalog, workdir, "base_compiled",
+                        config.env, dialect, config.vars, json_only=True,
+                    )  # fmt: skip
+                widen_json(
+                    db_path,
+                    report.fixtures,
+                    json_reads(base_manifest, base_compiled),
+                    config.seed,
+                    # A side read without its compiled SQL misses macro-hidden paths:
+                    # marking the other side's as new would null real reads.
+                    mark_new=(compiled is None) == (base_compiled is None),
+                )
             # dbt's state comparison does not see vars or package versions. When a file
             # that can change what every model does changed, nothing is judged by the base.
             project_files = [config.project_dir / n for n in _PROJECT_FILES]
@@ -515,6 +540,7 @@ def _run(
                     changed_upstream=untrusted | manifest.descendants(untrusted),
                     judge=judge,
                     guess_bound=_guess_bound(manifest, report),
+                    tested_by_change=manifest.tested_models(modified),
                 ),
                 timer,
             )
@@ -605,6 +631,13 @@ def _config_reshapes_fixtures(config: PreflightConfig, base_ref: str) -> bool:
     return any(base_raw.get(k) != head_raw.get(k) for k in _FIXTURE_KEYS)
 
 
+_JSON_NOTE = re.compile(r"(?:, )?note: 'JSON[^']*'")
+
+
+def _without_json_notes(dbml: str) -> str:
+    return _JSON_NOTE.sub("", dbml).replace(" [] ", " ").replace(" []\n", "\n")
+
+
 def _reshaped_sources(
     head: Manifest,
     base: Manifest,
@@ -637,6 +670,9 @@ def _reshaped_sources(
         base_text, _ = derive_dbml(base, base_compiled)
     except SchemaError:
         return set(head.sources)
+    # The JSON notes say which paths each side reads; the fixture holds both sides' paths
+    # (`fixtures.widen_json`), so a difference there reshapes nothing.
+    head_text, base_text = _without_json_notes(head_text), _without_json_notes(base_text)
     head_tables, base_tables = _dbml_tables(head_text), _dbml_tables(base_text)
     # By the name each side writes the source's table under, not its identifier: that name
     # is sanitised (`events_*` -> `events__`) or prefixed for a duplicate identifier
@@ -758,6 +794,8 @@ class _Trust:
     # Nodes reading a source column whose type preflight guessed, directly or upstream:
     # uid -> "<table>.<column>". Never "broken on main", never a pre-existing failure.
     guess_bound: dict[str, list[str]] = field(default_factory=dict)
+    # Models a data test or unit test the change added or edited is declared on.
+    tested_by_change: set[str] = field(default_factory=set)
     # False when a project-level file changed: nothing is judged by the base at all.
     judge: bool = True
 
@@ -1095,9 +1133,9 @@ def _judge_builds(
             m.status == SKIPPED
             and m.unique_id in from_base
             and m.unique_id not in from_change
-            # Something the change made or edited answers for itself, even downstream of
-            # a broken model; and "skipped on both branches" has to be true.
-            and m.unique_id not in trust.untrusted
+            # Something the change reaches answers for itself, even downstream of a broken
+            # model (a model reading both); and "skipped on both branches" has to be true.
+            and not _reached(m.unique_id, trust)
             and on_base is not None
             and on_base.status == "skipped"
         )
@@ -1107,7 +1145,18 @@ def _judge_builds(
             and not m.skipped_by_base
             and m.unique_id in from_limited
             and m.unique_id not in from_change
-            and m.unique_id not in trust.untrusted
+            and not _reached(m.unique_id, trust)
+            and on_base is not None
+            and on_base.status == "skipped"
+        )
+        # Skipped on both branches behind such a model, but the change reaches it through
+        # another parent: it counts, as unchecked, not as something the change broke.
+        m.skipped_unchecked = (
+            m.status == SKIPPED
+            and not m.skipped_by_base
+            and not m.skipped_by_fixture_limited
+            and m.unique_id in (from_base | from_limited)
+            and m.unique_id not in from_change
             and on_base is not None
             and on_base.status == "skipped"
         )
@@ -1115,10 +1164,12 @@ def _judge_builds(
 
 def _reached(uid: str, trust: _Trust) -> bool:
     """Whether the change can affect a node: it modified it, the node reads fixtures the
-    change reshaped, or either is upstream of it (`_Trust.changed_upstream`). Anything else
+    change reshaped, or either is upstream of it (`_Trust.changed_upstream`); or the change
+    added or edited a data test or unit test on it, whose result needs the model built
+    (`_Trust.tested_by_change`). Anything else
     builds from identical SQL on identical data on both branches, so by determinism the
     change cannot have affected it."""
-    return uid in trust.changed_upstream
+    return uid in trust.changed_upstream or uid in trust.tested_by_change
 
 
 def _reads_a_source(manifest: Manifest, uid: str) -> bool:

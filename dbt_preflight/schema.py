@@ -39,7 +39,7 @@ from dbt_preflight.json_columns import (
     Shape,
     format_note,
     is_json_argument,
-    json_reads_in_tree,
+    json_reads_by_column,
     merge_shape,
 )
 from dbt_preflight.manifest import Manifest, ModelNode, SourceColumn, SourceTable, TestNode
@@ -1440,7 +1440,10 @@ def json_reads(
     aliases (`cast(receipt as varchar) as receipt`, `payload as order_payload`) or selects
     a `*`, or whose SQL shows no select at all (Fivetran's `{{ union_data(...) }}`, when it
     was not compiled); through a pass-through to its source; and to a
-    source it reads directly. The result is a candidate list: a name that reaches a source
+    source it reads directly. A qualified column (`o.payload`) whose qualifier names a
+    source or a ref directly is followed into that one node only, so a join of two tables
+    with a `payload` each fills only the one parsed. The result is a candidate list: a name
+    that reaches a source
     without such a column, or one typed as something JSON cannot be, is dropped by the
     caller, which knows the source's columns.
     """
@@ -1448,13 +1451,39 @@ def json_reads(
         view = CompiledView(manifest, compiled)
     trees: dict[str, list[exp.Expr]] = {}
     aliases: dict[str, dict[str, str]] = {}
+    placeholders: dict[str, str] = {}  # raw SQL's stand-in for a source()/ref() -> its uid
+    models_by_name: dict[str, str] = {}
+    for uid in sorted(manifest.models):
+        models_by_name.setdefault(manifest.models[uid].name, uid)
+    sources_by_name = {(s.source_name, s.name): uid for uid, s in manifest.sources.items()}
+
+    def _raw_tree(uid: str) -> exp.Expr | None:
+        def _sub(m: re.Match[str], kind: str) -> str:
+            if kind == "source":
+                target = sources_by_name.get((m.group(1), m.group(2)))
+            else:
+                target = models_by_name.get(m.group(2) or m.group(1))
+            name = f"__preflight_dep_{len(placeholders)}__"
+            if target is not None:
+                placeholders[name] = target
+            return name
+
+        sql = _SOURCE_CALL_RE.sub(lambda m: _sub(m, "source"), manifest.models[uid].raw_code)
+        sql = _REF_CALL_RE.sub(lambda m: _sub(m, "ref"), sql)
+        sql = _CONFIG_CALL_RE.sub("", sql)
+        sql = _BLOCK_OR_COMMENT_RE.sub("", sql)
+        sql = _JINJA_EXPR_RE.sub("__preflight_expr__", sql)
+        try:
+            return sqlglot.parse_one(sql, read=None)
+        except Exception:  # noqa: BLE001 - any parser failure just means "cannot infer"
+            return None
 
     def _trees(uid: str) -> list[exp.Expr]:
         if uid not in trees:
             found: list[exp.Expr] = []
             if view is not None and (tree := view.tree(uid)) is not None:
                 found.append(tree)
-            raw = _parse_staging_sql(manifest.models[uid].raw_code)
+            raw = _raw_tree(uid)
             if raw is not None:
                 found.append(raw)
             trees[uid] = found
@@ -1467,6 +1496,19 @@ def json_reads(
 
     traced: dict[tuple[str, str], set[tuple[str, str]]] = {}
 
+    def _through(dep: str, n: str) -> set[tuple[str, str]]:
+        """Source columns name `n` can be, read from the node `dep`."""
+        if dep in manifest.sources:
+            return {(dep, n)}
+        if view is not None and dep in view.pass_through:
+            return {(view.pass_through[dep], n)}
+        if dep in manifest.models:
+            dep_trees = _trees(dep)
+            opaque = not any(t.find(exp.Select) for t in dep_trees)
+            if opaque or n in aliases[dep] or any(map(_has_star, dep_trees)):
+                return _trace(dep, n)
+        return set()
+
     def _trace(uid: str, name: str) -> set[tuple[str, str]]:
         if (uid, name) in traced:
             return traced[(uid, name)]
@@ -1478,27 +1520,42 @@ def json_reads(
         out: set[tuple[str, str]] = set()
         for dep in manifest.models[uid].depends_on:
             for n in names:
-                if dep in manifest.sources:
-                    out.add((dep, n))
-                elif view is not None and dep in view.pass_through:
-                    out.add((view.pass_through[dep], n))
-                elif dep in manifest.models:
-                    dep_trees = _trees(dep)
-                    opaque = not any(t.find(exp.Select) for t in dep_trees)
-                    if opaque or n in aliases[dep] or any(map(_has_star, dep_trees)):
-                        out |= _trace(dep, n)
+                out |= _through(dep, n)
         traced[(uid, name)] = out
         return out
 
+    def _qualified_dep(uid: str, col: exp.Column, scope_of: dict[int, Scope]) -> str | None:
+        """The one node a qualified column reads from (`o.payload` with `o` an alias of a
+        source or a ref), or None when the qualifier names a CTE or nothing resolvable."""
+        scope = scope_of.get(id(col))
+        if not col.table or scope is None:
+            return None
+        sources = {k.lower(): v for k, v in scope.sources.items()}
+        table = sources.get(col.table.lower())
+        if not isinstance(table, exp.Table):
+            return None
+        dep = placeholders.get(table.name) or (view.node_for(table) if view else None)
+        return dep if dep in manifest.models[uid].depends_on else None
+
     out: dict[tuple[str, str], Shape] = {}
     for uid in sorted(manifest.models):
-        reads: dict[str, Shape] = {}
         for tree in _trees(uid):
-            for name, shape in json_reads_in_tree(tree).items():
-                merge_shape(reads.setdefault(name, {}), shape)
-        for name, shape in sorted(reads.items()):
-            for key in sorted(_trace(uid, name)):
-                merge_shape(out.setdefault(key, {}), shape)
+            occurrences = json_reads_by_column(tree)
+            if not occurrences:
+                continue
+            scope_of: dict[int, Scope] = {}
+            try:
+                for scope in traverse_scope(tree):
+                    for col in scope.columns:
+                        scope_of[id(col)] = scope
+            except Exception:  # noqa: BLE001 - an odd tree just means no qualifier help
+                scope_of = {}
+            for col, shape in occurrences:
+                name = col.name.lower()
+                dep = _qualified_dep(uid, col, scope_of)
+                keys = _through(dep, name) if dep is not None else _trace(uid, name)
+                for key in sorted(keys):
+                    merge_shape(out.setdefault(key, {}), shape)
     return out
 
 

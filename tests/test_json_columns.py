@@ -5,9 +5,11 @@ that fails on a value preflight generated."""
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
+import duckdb
 import pytest
 import sqlglot
 from typer.testing import CliRunner
@@ -265,8 +267,47 @@ def test_values_keep_the_null_rate() -> None:
     assert [v is not None for v in values] == present
 
 
-def test_nothing_read_but_the_whole_value_is_an_empty_object() -> None:
-    assert json_values({"": None}, "t", "c", 1, [True]) == ["{}"]
+def test_nothing_read_but_the_whole_value_is_still_distinct_per_row() -> None:
+    assert json_values({"": None}, "t", "c", 1, [True, True]) == ['{"id":1}', '{"id":2}']
+
+
+def test_values_are_unique_per_row() -> None:
+    # A source `unique` test on the JSON column, or on an id extracted from it, holds.
+    for shape in ({"name": None}, {"id": "integer"}, {"amount": "number"}):
+        values = json_values(shape, "t", "c", 7, [True] * 5000)
+        assert len(set(values)) == 5000
+
+
+def test_new_keys_are_null() -> None:
+    [text] = json_values({"amount": "number", "amout": "number"}, "t", "c", 1, [True], {"amout"})
+    obj = json.loads(text)
+    assert obj["amout"] is None and isinstance(obj["amount"], float)
+
+
+def test_a_note_saying_not_json_opts_out() -> None:
+    from dbt_preflight.json_columns import opted_out
+
+    assert opted_out("free text, not JSON")
+    assert not opted_out("JSON, keys read: a")
+
+
+def test_a_qualified_column_fills_only_its_own_source() -> None:
+    other = "source.p.shop.customers"
+    manifest = _manifest(
+        "select o.id, json_extract_string(o.payload, '$.weight') as w\n"
+        "from {{ source('shop', 'parcels') }} as o\n"
+        "join {{ source('shop', 'customers') }} as c on c.id = o.id",
+        "select 1",
+    )
+    raw = manifest.models[STG]
+    raw.depends_on.append(other)
+    manifest.sources[other] = type(manifest.sources[SRC])(
+        **{**manifest.sources[SRC].__dict__, "unique_id": other, "name": "customers",
+           "identifier": "customers"}
+    )  # fmt: skip
+    reads = json_reads(manifest)
+    assert (SRC, "payload") in reads
+    assert (other, "payload") not in reads
 
 
 # --- the fallback for errors about generated values -------------------------------------
@@ -456,6 +497,7 @@ def _judge(manifest: Manifest, failing: dict[str, str], modified: set[str], **kw
         untrusted=set(modified),
         changed_upstream=descendants,
         guess_bound=kw.get("guess_bound", {}),
+        tested_by_change=manifest.tested_models(modified),
     )
     base = _BaseBuild(manifest=manifest, tables={r.unique_id: r for r in results}, trust=trust)
     _judge_builds(report, manifest, RunOutcome(True, results), base)
@@ -520,3 +562,104 @@ def test_reached_failure_over_a_guessed_column_could_not_be_checked(manifest: Ma
     assert m[MART].unverified_broken_on_base and not m[MART].fixture_limited
     assert not report.passed
     assert "reads `orders.x`, whose type preflight guessed" in render(report)
+
+
+@pytest.mark.parametrize("error", [JSON_ERROR, BINDER_ERROR])
+def test_a_dependant_the_change_reaches_is_not_excused_by_an_unreached_parent(
+    manifest: Manifest, error: str
+) -> None:
+    # The diamond: the change modifies stg_shop__orders, which builds; stg_shop__customers
+    # is unreached and fails on both sides; dim_customers reads both and is skipped on both.
+    # It is reached through orders, so it counts, whichever category its other parent is in.
+    report, m = _judge(manifest, {CUST: error}, modified={ORDERS}, statuses={MART: "skipped"})
+    assert m[CUST].fixture_limited or m[CUST].broken_on_base
+    assert not m[MART].skipped_by_fixture_limited and not m[MART].skipped_by_base
+    assert m[MART].skipped_unchecked
+    assert not report.passed
+    body = render(report)
+    assert "counted against this pull request because the change reaches it" in body
+    assert "Unchanged models this change breaks" not in body
+
+
+def test_a_model_whose_test_the_change_edits_is_reached(manifest: Manifest) -> None:
+    # The change edits the `unique` test on stg_shop__customers and nothing else: that test
+    # needs the model built, so its failure on generated data counts.
+    report, m = _judge(manifest, {CUST: JSON_ERROR}, modified={"test.p.u1"})
+    assert m[CUST].unverified_broken_on_base and not m[CUST].fixture_limited
+    assert not report.passed
+
+
+def test_a_renamed_json_key_reads_null_on_the_head(parcels: Path, tmp_path: Path) -> None:
+    # The base reads `$.weight`; the pull request reads `$.wieght`. The fixture holds both
+    # keys, so the base still gets values, and the typo reads NULL as on real data.
+    mart = parcels / "models/marts/parcel_weights.sql"
+    mart.write_text(mart.read_text().replace("$.weight", "$.wieght"))
+    _git(parcels, "commit", "-qam", "typo")
+    comment, summary_file = tmp_path / "comment.md", tmp_path / "summary.json"
+    CliRunner().invoke(
+        app,
+        [
+            "run", "--base-ref", "main", "--repo-root", str(parcels), "--keep-workdir",
+            "--comment-file", str(comment), "--summary-file", str(summary_file),
+        ],
+    )  # fmt: skip
+    summary = json.loads(summary_file.read_text())
+    assert summary["fixtures"]["json_new_keys"] == ["parcels.payload: wieght"]
+    assert "`parcels.payload: wieght`" in comment.read_text()
+    (db_file,) = (parcels / ".preflight").glob("*.duckdb")
+    copy = tmp_path / "inspect.duckdb"
+    shutil.copy(db_file, copy)
+    wal = db_file.with_name(db_file.name + ".wal")
+    if wal.exists():  # dbt-duckdb still holds the file open: take what it has not merged
+        shutil.copy(wal, copy.with_name(copy.name + ".wal"))
+    con = duckdb.connect(str(copy), read_only=True)
+    rows = con.execute("select payload from raw.parcels where payload is not null").fetchall()
+    payloads = [json.loads(r[0]) for r in rows]
+    assert all(p["weight"] is not None and p["wieght"] is None for p in payloads)
+    tables = con.execute(
+        "select table_schema from information_schema.tables where table_name = 'parcel_weights'"
+    ).fetchall()
+    by_schema = {
+        s: con.execute(f'select count(weight) from "{s}".parcel_weights').fetchone()[0]
+        for (s,) in tables
+    }
+    non_null = con.execute("select count(payload) from raw.parcels").fetchone()[0]
+    assert sorted(by_schema.values()) == [0, non_null]  # head all NULL, base all values
+
+
+def test_json_paths_alone_do_not_reshape_a_source() -> None:
+    # Both branches build on one fixture holding both sides' paths (`widen_json`).
+    from dbt_preflight.cli import _reshaped_sources
+
+    head = _manifest(STG_SQL, MART_SQL.replace("$.weight", "$.wieght"))
+    base = _manifest(STG_SQL, MART_SQL)
+    assert derive_dbml(head)[0] != derive_dbml(base)[0]
+    assert _reshaped_sources(head, base) == set()
+
+
+def test_a_dbml_column_noted_not_json_is_left_alone(manifest: Manifest) -> None:
+    import pandas as pd
+    from model2data.parse.dbml import ColumnDef, TableDef
+
+    from dbt_preflight.fixtures import _fill_json
+    from dbt_preflight.schema import ResolvedSchema
+
+    src = manifest.sources["source.p.shop.customers"]
+    table = TableDef(
+        "customers",
+        [
+            ColumnDef("payload", "varchar", description="free text, not JSON"),
+            ColumnDef("attrs", "varchar"),
+        ],
+    )
+    schema = ResolvedSchema(
+        tables={"customers": table},
+        refs=[],
+        dbml_path=Path("x.dbml"),
+        derived=False,
+        json_reads={(src.unique_id, "payload"): {"a": None}, (src.unique_id, "attrs"): {}},
+    )
+    df = pd.DataFrame({"payload": ["Some text."], "attrs": ["Other text."]})
+    filled = _fill_json(df, schema, src, "customers", 42)
+    assert [name for name, _ in filled] == ["attrs"]
+    assert df["payload"].tolist() == ["Some text."]

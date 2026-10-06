@@ -280,16 +280,25 @@ def path_text(segments: list[str]) -> str:
 
 def json_reads_in_tree(tree: exp.Expr) -> dict[str, Shape]:
     """{column name: the paths read from it} for every column a JSON function reads in
-    parsed SQL, by name only: which table it belongs to is `schema.json_reads`'s question.
+    parsed SQL, by name only (`json_reads_by_column` keeps each occurrence).
 
-    A JSON call nested in another (`p->'a'->>'b'`) reads one path, `a.b`; the inner `a`
-    is recorded too, as an object. A cast to JSON (`p::json`) reads the whole value."""
+    A JSON call nested in another (`p->'a'->>'b'`) reads one path, `a.b`. A cast to JSON
+    (`p::json`) reads the whole value."""
     out: dict[str, Shape] = {}
+    for col, shape in json_reads_by_column(tree):
+        merge_shape(out.setdefault(col.name.lower(), {}), shape)
+    return out
+
+
+def json_reads_by_column(tree: exp.Expr) -> list[tuple[exp.Column, Shape]]:
+    """Each column occurrence a JSON function reads, with the paths read from it there, so
+    the caller can tell `o.payload` from `c.payload` (`schema.json_reads`)."""
+    out: list[tuple[exp.Column, Shape]] = []
     for node in tree.walk():
         if _is_json_cast(node):
             found = _base(node.this)
             if found is not None and not _feeds_json(node):
-                merge_shape(out.setdefault(found[0].name.lower(), {}), {path_text(found[1]): None})
+                out.append((found[0], {path_text(found[1]): None}))
             continue
         if not _is_json_call(node):
             continue
@@ -303,7 +312,7 @@ def json_reads_in_tree(tree: exp.Expr) -> dict[str, Shape]:
         shape: Shape = {}
         for segments in _path_arguments(node):
             shape[path_text(prefix + segments)] = leaf if segments or prefix else None
-        merge_shape(out.setdefault(col.name.lower(), {}), shape)
+        out.append((col, shape))
     return out
 
 
@@ -351,6 +360,15 @@ _NOTE = re.compile(r"(?:^|;\s*)JSON(?:, keys read: (?P<keys>[^;]*))?\s*(?=;|$)")
 _NOTE_KEY = re.compile(r"^(?P<path>\S+?)(?: \((?P<leaf>[a-z]+)\))?$")
 
 
+_OPT_OUT = re.compile(r"\bnot JSON\b", re.IGNORECASE)
+
+
+def opted_out(text: str | None) -> bool:
+    """Whether a column note says `not JSON`: the user's word that the column holds text,
+    so it is never filled with JSON, whatever the SQL does with it."""
+    return bool(text and _OPT_OUT.search(text))
+
+
 def parse_note(text: str | None) -> Shape | None:
     """The shape a column note written by `format_note` describes, or None when the note
     says nothing about JSON. Other prose in the note, separated by `; `, is ignored."""
@@ -373,12 +391,13 @@ def parse_note(text: str | None) -> Shape | None:
 
 
 class _Node:
-    __slots__ = ("keys", "items", "leaf")
+    __slots__ = ("keys", "items", "leaf", "null")
 
     def __init__(self) -> None:
         self.keys: dict[str, _Node] = {}
         self.items: _Node | None = None
         self.leaf: str | None = None
+        self.null = False  # a key only the pull request reads: present, but null
 
 
 def _segments(path: str) -> list[str]:
@@ -391,7 +410,7 @@ def _segments(path: str) -> list[str]:
     return out
 
 
-def _tree(shape: Shape) -> _Node:
+def _tree(shape: Shape, nulls: frozenset[str] | set[str] = frozenset()) -> _Node:
     root = _Node()
     for path in sorted(shape):
         node = root
@@ -403,6 +422,8 @@ def _tree(shape: Shape) -> _Node:
                 node = node.keys.setdefault(seg, _Node())
         if shape[path] is not None:
             node.leaf = merge_shape({"": node.leaf}, {"": shape[path]})[""]
+        if path in nulls:
+            node.null = True
     return root
 
 
@@ -414,46 +435,57 @@ def _hash(*parts: object) -> int:
 _EPOCH = datetime(2024, 1, 1)
 
 
-def _scalar(leaf: str | None, name: str, h: int) -> object:
+def _scalar(leaf: str | None, name: str, h: int, row: int) -> object:
+    """A leaf value. Strings and integers carry the row number, so a source `unique` test
+    on a JSON column, or on a key extracted from one, holds as it would on real ids."""
     if leaf == "integer":
-        return h % 1000
+        return row * 1000 + h % 1000
     if leaf == "number":
-        return round((h % 100_000) / 100, 2)
+        return round(row * 1000 + (h % 100_000) / 100, 2)
     if leaf == "boolean":
         return h % 2 == 0
     if leaf == "date":
         return (date(2024, 1, 1) + timedelta(days=h % 730)).isoformat()
     if leaf == "timestamp":
         return (_EPOCH + timedelta(seconds=h % (730 * 86_400))).isoformat(sep=" ")
-    return f"{name or 'value'}_{h % 1000}"
+    return f"{name or 'value'}_{row}_{h % 10_000:04d}"
 
 
-def _value(node: _Node, name: str, key: str) -> object:
+def _value(node: _Node, name: str, key: str, row: int) -> object:
     h = _hash(key)
     if node.keys:  # an object wins over an array or a leaf at the same path
-        return {k: _value(child, k, f"{key}.{k}") for k, child in sorted(node.keys.items())}
+        return {k: _value(child, k, f"{key}.{k}", row) for k, child in sorted(node.keys.items())}
     if node.items is not None:
-        return [_value(node.items, name, f"{key}[{i}]") for i in range(1 + h % 3)]
-    return _scalar(node.leaf, name, h)
+        return [_value(node.items, name, f"{key}[{i}]", row) for i in range(1 + h % 3)]
+    if node.null:
+        return None
+    return _scalar(node.leaf, name, h, row)
 
 
 def json_values(
-    shape: Shape, table: str, column: str, seed: int, present: list[bool]
+    shape: Shape,
+    table: str,
+    column: str,
+    seed: int,
+    present: list[bool],
+    nulls: frozenset[str] | set[str] = frozenset(),
 ) -> list[str | None]:
     """One JSON text per row, None where `present` is False (the column's own nulls).
 
     Every path in `shape` is in every object, an array has one to three elements, and a
-    leaf is a scalar of its type. Derived from the seed, the table and the column alone,
-    so the same input gives byte-identical output; the shape's root is always an object
-    unless the only thing read is an array at the root."""
-    root = _tree(shape)
+    leaf is a scalar of its type; a leaf path in `nulls` is there with a JSON null. Derived
+    from the seed, the table, the column and the row alone, so the same input gives
+    byte-identical output, and adding a path leaves every other value as it was. Nothing
+    read but the whole value gives `{"id": <row>}`, distinct per row."""
+    root = _tree(shape, nulls)
     out: list[str | None] = []
     for i, keep in enumerate(present):
         if not keep:
             out.append(None)
             continue
-        value = _value(root, column, f"{seed}:{table}:{column}:{i}")
         if not root.keys and root.items is None:
-            value = {}
+            value: object = {"id": i + 1}
+        else:
+            value = _value(root, column, f"{seed}:{table}:{column}:{i}", i + 1)
         out.append(json.dumps(value, sort_keys=True, separators=(",", ":")))
     return out

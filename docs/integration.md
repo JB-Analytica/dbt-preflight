@@ -87,7 +87,7 @@ written), and 1 when it cannot derive a schema or the output exists.
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
 | `headline` | object or null | The comment's one-line summary under the verdict heading, as data; see "The headline" below. Null on `could_not_run` and `nothing_changed`, which have no such line. |
 | `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base/unverified_broken_on_base/fixture_limited/skipped_by_fixture_limited), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, `models.fixture_limited` the models the change does not reach that preflight's generated data cannot build, `models.skipped_by_fixture_limited` what only those skipped (neither is in `failed` or `skipped`), and `tests.failed_on_base` the tests that also fail on the base branch. |
-| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, unverified_broken_on_base, skipped_by_unverified, fixture_limited, skipped_by_fixture_limited, dialect_function. `status` stays dbt's (`failed`, `skipped`); `broken_on_base`, `skipped_by_base`, `fixture_limited` and `skipped_by_fixture_limited` say it is not this change's doing (none of them is counted as failed or skipped). |
+| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, unverified_broken_on_base, skipped_by_unverified, fixture_limited, skipped_by_fixture_limited, skipped_unchecked, dialect_function. `status` stays dbt's (`failed`, `skipped`); `broken_on_base`, `skipped_by_base`, `fixture_limited` and `skipped_by_fixture_limited` say it is not this change's doing (none of them is counted as failed or skipped). |
 | `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count whenever the same, unedited test also failed there with rows; null when it passed, errored or is new or edited. In this list a non-null value is always smaller than `failures`: the test got worse), reading (a one-line plain-English reading of the DuckDB error, when there is one), guessed_inputs (source columns it reads, directly or upstream, whose type preflight guessed; an error there is not judged against the base, failing rows still can be pre-existing). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
 | `preexisting_failing_tests` | array | Failing tests that fail on the base branch the same way, on at least as many rows: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
 | `fixture_limited_models` | array | Models the change does not reach that fail the same way on the base branch over preflight's generated data: name, unique_id, error, reason (the kind of value, e.g. `malformed JSON`, or "reads `x.y`, whose type preflight guessed"), fixture_error, guessed_inputs. A warning: they do not fail the run (`passed_with_warnings`). Empty without `--base-ref`. |
@@ -95,7 +95,7 @@ written), and 1 when it cannot derive a schema or the output exists.
 | `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
-| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), the text columns filled with JSON because a model parses them as JSON (`json_columns`, as `identifier.column`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
+| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), the text columns filled with JSON because a model parses them as JSON (`json_columns`, as `identifier.column`), the JSON keys only the pull request reads, put in the fixture as nulls (`json_new_keys`, as `identifier.column: path`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
 
 ### The headline
@@ -103,7 +103,9 @@ written), and 1 when it cannot derive a schema or the output exists.
 The comment's first line under `## 🛫 dbt preflight: <verdict>` is one short paragraph,
 parts joined by ` · `, always in this order and each left out when zero or not relevant:
 
-1. `N new failures` (`1 new failure`), or `No new failures`. Failing models, new failing
+1. `N new failures` (`1 new failure`), or `No new failures` (then `, but N models not built`
+   when models the change reaches were skipped without a new failure above them, e.g.
+   behind a model broken on the base). Failing models, new failing
    tests and convention errors count; warnings, pre-existing failures, models broken on the
    base and models that could not be checked do not.
 2. Metrics, when a base branch is given: `moves N metrics (<label> <delta>)`, naming the one
@@ -128,7 +130,7 @@ where nothing changed, and a run that could not run, have no line. Examples:
 
 The summary's `headline` object holds the same facts: `new_failures`, `moved_metrics`,
 `metrics_defined`, `top_metric` (`name`, `label`, `base`, `head`, or null), `value_changed_models`,
-`touched_models`, `touched_marts`, `unverified`, `broken_on_base`, `fixture_limited`, and `text` (the line as
+`touched_models`, `touched_marts`, `unverified`, `broken_on_base`, `fixture_limited`, `not_built`, and `text` (the line as
 rendered). `moved_metrics`, `value_changed_models`, `touched_models` and `touched_marts` are
 null in a full build. The key is additive: `schema_version` stays `2`.
 
@@ -196,8 +198,8 @@ does not parse, a failed cast of a string - in a model with a source upstream
 (`fixture_error`; the patterns are DuckDB's error text, listed in one place,
 `baseline.FIXTURE_SHAPED_ERRORS`). A compilation error is never one: it happens before any
 data is read. Where it goes depends on whether the change reaches the model (it modified
-it, the model reads fixtures the change reshaped, or either is upstream of it,
-`cli._reached`):
+it, the model reads fixtures the change reshaped, either is upstream of it, or the change
+added or edited a data test or unit test on it; `cli._reached`):
 
 - **Reached:** *Could not be checked*, with the reason named. It counts against the run
   (`unverified_broken_on_base: true`, in `counts.models.failed`).
@@ -205,8 +207,12 @@ it, the model reads fixtures the change reshaped, or either is upstream of it,
   so the change cannot have affected it. It goes in an unfolded *Preflight's generated data
   cannot build this model* section next to *Broken on main too*, with the reason, and is a
   warning (`fixture_limited: true`, in `fixture_limited_models` and
-  `counts.models.fixture_limited`). What only it skips is listed with it
-  (`skipped_by_fixture_limited`) and does not count either.
+  `counts.models.fixture_limited`). A model skipped on both branches only because of it
+  is listed with it (`skipped_by_fixture_limited`) and does not count either, unless the
+  change reaches that model too: a model reading both it and something the change
+  modified counts, listed right below those sections as skipped and never checked
+  (`skipped_unchecked: true`, in `counts.models.skipped`). The same rule holds for what a
+  model broken on the base skips.
 
 A test over a model reading a guessed column, or over a guessed source column, carries
 `guessed_inputs` too. If it errors on the base (a type mismatch or failed cast on guessed
@@ -273,7 +279,7 @@ wants every failure regardless reads `preexisting_failing_tests` and
 Added since, without a version bump (0.5.0): `fixture_limited_models`,
 `counts.models.fixture_limited` and `counts.models.skipped_by_fixture_limited`, per-model
 `fixture_limited` and `skipped_by_fixture_limited`, `fixture_error` and `guessed_inputs` on
-`unverified_broken_on_base_models`, and `fixtures.json_columns`.
+`unverified_broken_on_base_models`, `fixtures.json_columns`, `fixtures.json_new_keys`, and `headline.fixture_limited`.
 
 ## The comment's marker
 

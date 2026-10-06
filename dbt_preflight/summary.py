@@ -112,6 +112,7 @@ def _model(m: ModelReport) -> dict[str, Any]:
         "skipped_by_unverified": m.skipped_by_unverified,
         "fixture_limited": m.fixture_limited,
         "skipped_by_fixture_limited": m.skipped_by_fixture_limited,
+        "skipped_unchecked": m.skipped_unchecked,
         "dialect_function": m.dialect_function,
     }
 
@@ -179,6 +180,7 @@ def _fixtures(report: PreflightReport) -> dict[str, Any] | None:
         "inferred_sources": [_inferred_source(s) for s in fx.inferred_sources],
         "skipped_sources": list(fx.skipped_sources),
         "json_columns": list(fx.json_columns),
+        "json_new_keys": list(fx.json_new_keys),
         "guessed_sources": fx.guessed_sources,
         "warnings": {
             "unmatched_sources": list(fx.unmatched_sources),

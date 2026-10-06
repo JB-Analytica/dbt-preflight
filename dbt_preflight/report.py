@@ -61,6 +61,9 @@ class ModelReport:
     # on identical data, so the change cannot affect it. A warning, never a failure.
     fixture_limited: bool = False
     skipped_by_fixture_limited: bool = False  # skipped only because of a model like that
+    # Skipped on both branches behind a model broken on the base or one preflight's data
+    # cannot build, but the change reaches it through another parent: it counts, unchecked.
+    skipped_unchecked: bool = False
 
     @property
     def not_this_change(self) -> bool:
@@ -534,6 +537,7 @@ def render(report: PreflightReport) -> str:
 
     lines += _broken_on_base_section(report)
     lines += _fixture_limited_section(report)
+    lines += _skipped_unchecked_lines(report)
 
     # Changed models. When there is no base to diff against, every model is "changed".
     rows = report.changed or report.models
@@ -570,6 +574,7 @@ def render(report: PreflightReport) -> str:
         and not m.not_this_change
         and not m.unverified_broken_on_base
         and not m.skipped_by_unverified
+        and not m.skipped_unchecked
     ]
     if around and report.base_ref:
         broken = [m for m in around if m.status in {FAILED, SKIPPED} or m.tests_failed]
@@ -759,6 +764,29 @@ def fixture_limited_reason(m: ModelReport) -> str:
     if m.fixture_error:
         return m.fixture_error
     return f"reads {_guessed_list(m)}, whose type preflight guessed"
+
+
+def _skipped_unchecked_lines(report: PreflightReport) -> list[str]:
+    """Models skipped behind one of the above that this change reaches anyway: counted."""
+    names = [f"`{m.name}`" for m in report.models if m.skipped_unchecked]
+    if not names:
+        return []
+    shown, rest = names[:_SKIPPED_BY_BASE_SHOWN], names[_SKIPPED_BY_BASE_SHOWN:]
+    one = len(names) == 1
+    lines = [
+        f"Also skipped behind {'it' if one else 'those'} on both branches, and counted against "
+        "this pull request because the change reaches "
+        f"{'it' if one else 'them'} through another model, so "
+        f"{'it was' if one else 'they were'} never checked: {', '.join(shown)}."
+    ]
+    if rest:
+        lines += [
+            f"<details><summary>{len(rest)} more</summary>",
+            "",
+            ", ".join(rest) + ".",
+            "</details>",
+        ]
+    return [*lines, ""]
 
 
 def _fixture_limited_section(report: PreflightReport) -> list[str]:
@@ -970,6 +998,11 @@ def headline(report: PreflightReport) -> dict[str, Any] | None:
         # The change does not reach these, and preflight's generated data cannot build
         # them: a warning, like broken on the base, not a failure.
         "fixture_limited": len(report.fixture_limited_models),
+        # Models the change reaches that were skipped without a failure of its own above
+        # them (behind a model broken on the base): they fail the run too.
+        "not_built": len([m for m in report.unbuilt_models if not m.skipped_by_unverified])
+        if not report.build_error_models and not report.failing_tests
+        else 0,
     }
     data["text"] = _headline_text(report, data, top)
     return data
@@ -982,6 +1015,8 @@ def _count(n: int, singular: str, plural: str | None = None) -> str:
 def _headline_text(report: PreflightReport, h: dict[str, Any], top: MetricDiff | None) -> str:
     failures = h["new_failures"]
     parts = [_count(failures, "new failure") if failures else "No new failures"]
+    if h["not_built"]:
+        parts[0] += f", but {_count(h['not_built'], 'model')} not built"
     moved = h["moved_metrics"]
     if moved:
         detail = ""
@@ -1228,6 +1263,13 @@ def _fixtures_block(report: PreflightReport) -> str:
             "",
             "Filled with JSON, with the keys the models read, because a model parses them as "
             "JSON: " + ", ".join(f"`{c}`" for c in fx.json_columns),
+        ]
+    if fx.json_new_keys:
+        parts += [
+            "",
+            "JSON keys only this pull request reads, null in the fixture as in data that "
+            "lacks them (a renamed key reads NULL here): "
+            + ", ".join(f"`{k}`" for k in fx.json_new_keys),
         ]
     if fx.inferred_sources:
         parts += ["", "Columns inferred from the staging models that read them:"]

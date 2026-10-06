@@ -9,7 +9,12 @@ doing. The exact rules, as a consumer of the summary JSON needs them, are in
 
 1. `dbt parse` on the pull request, to learn the sources, models and tests.
 2. Fixtures: model2data generates data for every source table, cast to the declared types,
-   loaded into a DuckDB file whose catalog is named after the sources' `database`.
+   loaded into a DuckDB file whose catalog is named after the sources' `database`. A text
+   column a model parses as JSON (`json_extract_string(payload, '$.weight')`, `->>`, a
+   macro that compiles to one), traced back through staging aliases and table qualifiers,
+   gets JSON objects holding every key either branch reads, derived from the seed. A key
+   only the pull request reads, on a column the base parses too, is there as a JSON null,
+   as in data that lacks it, so a renamed key reads NULL instead of validating itself.
 3. `dbt parse` on the base branch in a temporary worktree, then `dbt ls --select
    state:modified` to find what changed.
 4. Each compiled model is transpiled from the project's dialect to DuckDB with sqlglot,
@@ -73,9 +78,19 @@ A model the change modified, added, or reaches from upstream, one that built on 
 or one that fails there with a different error still fails the check. One that fails the
 same way on the base but sits below something the change touched still fails it, under
 *Could not be checked*: DuckDB reports only the first error, so a new one could hide behind
-the old, but the change is not known to have broken it either. The same goes for a model
-that reads a source column whose type preflight guessed: both branches ran on the guess, so
-the shared failure may be the guess's. A model skipped on the pull request is put down to a
+the old, but the change is not known to have broken it either.
+
+A model that fails the same way on both branches over preflight's own data - it reads a
+column whose type preflight guessed, or DuckDB's error is about a generated value
+(malformed JSON, a timestamp or date that does not parse, a failed cast of a string) - is
+never *Broken on main too*, since main is not what failed. If the change reaches it (it
+modified it, reshaped its fixtures, added or edited a test on it, or modified something
+upstream), it is *Could not be checked* and counts. If not, it builds from identical SQL on
+identical data on both branches, so the change cannot have affected it: it is listed as a
+warning under *Preflight's generated data cannot build this model*, with the reason, and
+what only it skips does not count either.
+
+A model skipped on the pull request is put down to a
 broken model only when it was skipped on the base too and the change neither touched it nor
 broke anything else above it; otherwise it counts as broken by the change.
 

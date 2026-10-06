@@ -71,10 +71,14 @@ All notable changes to this project are documented here. The format follows
   preflight generated (`baseline.FIXTURE_SHAPED_ERRORS`, DuckDB's error text in one list;
   a compilation error and a model with no source upstream are exempt). Such a model, and
   one failing over a guessed column, is split by whether the change reaches it (modifies
-  it, reshapes its fixtures, or either upstream): reached, it is "Could not be checked" and
-  counts; not reached, it builds from identical SQL on identical data on both sides, so it
-  goes in a new warning section, "Preflight's generated data cannot build this model", with
-  the reason, and what only it skips is not counted either. The summary gains
+  it, reshapes its fixtures, adds or edits a test on it, or modifies something upstream):
+  reached, it is "Could not be checked" and counts; not reached, it builds from identical
+  SQL on identical data on both sides, so it goes in a new warning section, "Preflight's
+  generated data cannot build this model", with the reason, and what is skipped only
+  because of it is not counted either, unless the change reaches that too. A guessed,
+  unreached model that used to count in `counts.models.failed` (as unverified) now counts
+  in `counts.models.fixture_limited`, and the headline adds `N cannot be built on
+  generated data` (`headline.fixture_limited`). The summary gains
   `fixture_limited_models`, `counts.models.fixture_limited` and
   `counts.models.skipped_by_fixture_limited`, per-model `fixture_limited` and
   `skipped_by_fixture_limited`, and `fixture_error` on `unverified_broken_on_base_models`
@@ -141,6 +145,15 @@ All notable changes to this project are documented here. The format follows
   `dbt-preflight schema` writes, note such a column as `JSON, keys read: ...`, and a run on
   that file builds the same fixtures. The fixtures block lists the columns, and the summary
   JSON gains `fixtures.json_columns` (schema version unchanged).
+  - The paths are the base branch's and the head's together: both build on one fixture,
+    so a difference in paths alone does not reshape a source. A key only the pull request
+    reads, on a column the base parses too, is a JSON null, so a renamed key (`$.amount` to
+    `$.amout`) reads NULL as on real data instead of validating itself; the comment and
+    `fixtures.json_new_keys` list such keys.
+  - A qualified column (`o.payload` in a join) fills only the source its qualifier names.
+  - A DBML column whose note contains `not JSON` keeps its generated text.
+  - Leaf strings and integers carry the row number, so a `unique` test on a JSON column or
+    a key read from it holds; a column read only as a whole gets `{"id": <row>}`.
 - Transpiling from BigQuery (and Spark, Databricks, Hive) turned identifiers dbt rendered
   in double quotes for the DuckDB target into string literals: `dbt_utils.star` became
   `SELECT 'customer_id', 'email'`, and Fivetran's `shopify__customers` failed with
@@ -149,7 +162,11 @@ All notable changes to this project are documented here. The format follows
   `as`, or alone as a select-list item outside a function call); BigQuery's own
   double-quoted strings elsewhere (`status = "paid"`, `concat(a, " ", b)`) stay strings,
   and single-quoted strings and comments are untouched. When DuckDB cannot plan that
-  reading, the previous one is used, so DuckDB decides where a token could be either.
+  reading for a reason other than one of those columns missing, the string reading is
+  tried; a missing column is never turned into a constant.
+- A model skipped on both branches behind a model broken on the base was excused even when
+  the change reached it through another parent (a model reading both a broken model and a
+  modified one). It counts now.
 - A derived table could get two `pk` columns (`id`, and a column whose staging alias was
   tested `unique` and `not_null`), which model2data reads as one composite key, so neither
   was unique and the staging model's `unique` test failed on the fixtures

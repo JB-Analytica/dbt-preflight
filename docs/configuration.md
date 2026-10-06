@@ -117,7 +117,10 @@ Preflight needs to know what the source tables look like. Three options:
 1. **A DBML file** (`schema:`). If the repository already describes its source system in
    DBML, point at it. Note hints in the DBML (weighted statuses, skewed foreign keys, null
    rates) carry through to the fixtures, so the data behaves like a business. A change to
-   the DBML file counts as a change to every source, so everything is rebuilt.
+   the DBML file counts as a change to every source, so everything is rebuilt. A text
+   column some model parses as JSON is filled with JSON holding the keys read, even when
+   the DBML says nothing about it; a column note containing `not JSON` keeps the generated
+   text.
 2. **Derived from `sources.yml`.** With no `schema:` set, preflight reads the project's
    sources. `unique` and `not_null` tests become keys, and `relationships` tests between
    sources become foreign keys.
@@ -222,7 +225,9 @@ from the name`, `type read from compiled SQL`, or `inferred from a staging cast`
 plain prose, so model2data treats them as descriptions and they change nothing about the
 generated data; delete a note once you have checked its column. (A note that is, whole, a
 JSON object is how model2data shapes generation: put those next to the prose notes, not in
-them.)
+them.) A column a model reads as JSON carries `JSON, keys read: address.city, weight
+(number)`, which preflight does read: it fills the column with JSON holding those keys.
+Keep it while a model still parses the column, or write `not JSON` to keep text.
 
 The default path is `source_system/<dbt project name>.dbml` in the folder that holds
 `.dbt-preflight.yml`, so the `schema:` line the command prints works as it is. `--output`
@@ -267,6 +272,13 @@ The dialect is read from a `profiles.yml` checked into the project directory (th
 ```yaml
 dialect: bigquery   # or snowflake, redshift, databricks, trino, ... ; duckdb/none to disable
 ```
+
+dbt renders for the DuckDB target, so a macro such as `dbt_utils.star` quotes identifiers
+with double quotes, which BigQuery's grammar reads as strings. A double-quoted token is
+read as an identifier where only one can stand (next to a `.`, after `as`, or alone as a
+select-list item); elsewhere (`status = "paid"`) it stays a string. When DuckDB rejects the
+identifier reading for a reason other than one of those columns missing, the string reading
+gets a chance; a missing column stays missing rather than becoming a constant.
 
 A model sqlglot cannot parse runs as written and the comment says so. dbt's own SQL, and
 generic tests rendered from macros, are never transpiled; only model bodies and singular

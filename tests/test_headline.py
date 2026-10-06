@@ -7,6 +7,7 @@ from dbt_preflight.diff import MetricDiff, ModelDiff
 from dbt_preflight.report import (
     BUILT,
     FAILED,
+    SKIPPED,
     FailedTest,
     ModelReport,
     PreflightReport,
@@ -88,6 +89,12 @@ def test_preexisting_and_broken_on_base_are_not_new_failures() -> None:
         tests=[old],
     )
     assert _top_line(report) == "No new failures · touches 2 models · 1 broken on main"
+
+
+def test_a_red_run_with_only_unbuilt_models_says_so() -> None:
+    report = _report(models=[_model("stg_a"), _model("dim_b", SKIPPED, changed=False)])
+    assert not report.passed
+    assert _top_line(report).startswith("No new failures, but 1 model not built")
 
 
 def test_fixture_limited_models_are_counted_apart_not_as_failures() -> None:
@@ -249,6 +256,7 @@ def test_summary_carries_the_same_headline() -> None:
         "unverified": 0,
         "broken_on_base": 1,
         "fixture_limited": 0,
+        "not_built": 0,
         "text": "No new failures · moves 1 metric (Revenue +10.0%) · touches 1 mart · "
         "1 broken on main",
     }
