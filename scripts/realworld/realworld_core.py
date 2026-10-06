@@ -259,8 +259,14 @@ def merge_baseline(
 
 
 def regressions(base: dict[str, Any], row: Row) -> list[str]:
-    """Ways `row` is worse than the baseline entry `base`; empty when it is not worse."""
+    """Ways `row` is worse than the baseline entry `base`; empty when it is not worse.
+
+    A baseline that could not run at all has no counts to fall below: any run that gets
+    further is progress, so only a change back to could_not_run would count.
+    """
     out: list[str] = []
+    if base["verdict"] == "could_not_run":
+        return out
     if row.built < base["built"]:
         out.append(f"built {base['built']} -> {row.built}")
     if row.failed > base["failed"]:

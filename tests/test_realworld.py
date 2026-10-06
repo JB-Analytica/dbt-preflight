@@ -56,7 +56,14 @@ def _summary(**over):
 
 def test_committed_manifest_loads_and_is_pinned():
     projects = rw.load_manifest()
-    assert set(projects) == {"jaffle_shop_classic", "jaffle_shop_current", "mattermost", "shopify"}
+    assert set(projects) == {
+        "jaffle_shop_classic",
+        "jaffle_shop_current",
+        "mattermost",
+        "shopify",
+        "shopify_derived",
+        "dbt_ga4",
+    }
     for p in projects.values():
         assert set(p.changes) == set(rw.CHANGE_NAMES)
         assert len(p.sha) == 40
@@ -228,6 +235,13 @@ def test_verdict_regression_from_passing():
 def test_lost_rename_only_counts_if_baseline_had_it():
     base = _base(rename_detected=False)
     assert rw.compare(base, {"p/rename": _row(rename_detected=False)}) == {}
+
+
+def test_a_project_that_could_not_run_before_can_only_improve():
+    # shopify_derived: could_not_run on 0.4.0, then running with a failing model is progress.
+    base = _base(verdict="could_not_run", built=0, failed=0, not_verified=0, no_result=0)
+    assert rw.compare(base, {"p/rename": _row(failed=2, verdict="failed")}) == {}
+    assert rw.compare(base, {"p/rename": _row(verdict="could_not_run", built=0)}) == {}
 
 
 def test_new_key_without_baseline_is_not_a_regression():
