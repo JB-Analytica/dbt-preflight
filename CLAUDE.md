@@ -32,6 +32,19 @@ dbt-preflight run --base-ref origin/main --comment-file .preflight-comment.md
 This repo *is* dbt-preflight. It is not itself a dbt project, so dbt modelling conventions
 apply to `examples/webshop/`, not to the top-level layout.
 
+## Releasing
+
+Releases are drafted, then published by a maintainer.
+
+1. Bump `version` in `pyproject.toml` and date the `[Unreleased]` CHANGELOG section as
+   `[X.Y.Z] - YYYY-MM-DD`, on a pull request; merge it.
+2. `scripts/draft_release.sh` drafts the GitHub release `vX.Y.Z` on `main`, with that
+   CHANGELOG section as the notes. Never push a version tag by hand.
+3. A maintainer reads the draft and presses "Publish release". That runs
+   `.github/workflows/release.yml`: version check, build, tests on the built wheel, files
+   attached, PyPI, and the `v0` tag moved. Before publishing, run the real-world suite
+   (`uv run poe realworld --compare`) and commit its baseline with the version bump.
+
 ## Gotchas
 
 - `action.yml` and `dbt_preflight/` change together: CI's `self-check` job runs the action
