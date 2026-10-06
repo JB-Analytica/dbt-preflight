@@ -1,6 +1,6 @@
 name: Real-world suite
 
-# Runs dbt-preflight against four public dbt projects and compares with
+# Runs dbt-preflight against five public dbt projects and compares with
 # scripts/realworld/baseline.json. Needs network and takes several minutes, so it is not
 # part of CI: run it by hand before a release, and weekly to catch drift.
 
