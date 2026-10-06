@@ -19,6 +19,8 @@ This is what a reviewer sees when a pull request renames `customer_id` in a stag
 
 > ## 🛫 dbt preflight: ❌ failed
 >
+> 3 new failures · moves no metrics · touches 3 marts
+>
 > Built 7 of 8 models (1 changed) against synthetic data · 42 tests · 0 convention issues · 11 s
 >
 > ### Changed models
@@ -39,6 +41,11 @@ This is what a reviewer sees when a pull request renames `customer_id` in a stag
 > - ❌ `unique` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
 > - ❌ `not_null` on `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
 > - ❌ relationships `stg_webshop__orders.customer_id` → `stg_webshop__customers.customer_id`: Binder Error: Referenced column "customer_id" not found in FROM clause!
+
+The line under the heading says what the change did in one breath: new failures, the
+metrics it moves (naming the biggest), how many models or marts it touches, and what could
+not be decided. Parts that are zero or irrelevant are left out. The same fields are in the
+summary JSON as `headline`.
 
 Each failing test folds a `<details>` block under it with a plain-English reading of the
 error (*this model has no column `customer_id`: renamed or dropped upstream?*), dbt's own

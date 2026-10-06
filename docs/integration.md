@@ -85,6 +85,7 @@ written), and 1 when it cannot derive a schema or the output exists.
 | `elapsed_seconds` | number | Total run time. |
 | `fatal` | string or null | Set only on `could_not_run`: why preflight could not run at all. |
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
+| `headline` | object or null | The comment's one-line summary under the verdict heading, as data; see "The headline" below. Null on `could_not_run` and `nothing_changed`, which have no such line. |
 | `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base/unverified_broken_on_base), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, and `tests.failed_on_base` the tests that also fail on the base branch. |
 | `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, unverified_broken_on_base, skipped_by_unverified, dialect_function. `status` stays dbt's (`failed`, `skipped`); the two booleans say it is not this change's doing. |
 | `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count whenever the same, unedited test also failed there with rows; null when it passed, errored or is new or edited. In this list a non-null value is always smaller than `failures`: the test got worse), reading (a one-line plain-English reading of the DuckDB error, when there is one), guessed_inputs (source columns it reads, directly or upstream, whose type preflight guessed; an error there is not judged against the base, failing rows still can be pre-existing). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
@@ -95,6 +96,38 @@ written), and 1 when it cannot derive a schema or the output exists.
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
 | `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
+
+### The headline
+
+The comment's first line under `## 🛫 dbt preflight: <verdict>` is one short paragraph,
+parts joined by ` · `, always in this order and each left out when zero or not relevant:
+
+1. `N new failures` (`1 new failure`), or `No new failures`. Failing models, new failing
+   tests and convention errors count; warnings, pre-existing failures, models broken on the
+   base and models that could not be checked do not.
+2. Metrics, when a base branch is given: `moves N metrics (<label> <delta>)`, naming the one
+   with the largest absolute relative change (a metric moving off a zero or missing base
+   counts as largest; ties go to the alphabetically first label, then name); `moves no
+   metrics` when metrics are defined and none moved; nothing when none are defined. With no
+   metrics defined and rows or values changed: `changes values in N models`.
+3. Scope, when a base branch is given: `touches N marts` when at least one model in the run
+   lives in a `marts` folder (it then counts those), otherwise `touches N models`. The count
+   is the run's whole selection: changed models, what is downstream, and models whose tests
+   read them.
+4. `N could not be checked`: models broken on the base that the change reaches, plus changed
+   models DuckDB could not run.
+5. `N broken on <base>`: models that fail the same way on the base branch.
+
+A full build (no base ref) has no change to measure, so it gets only 1, 4 and 5. A run
+where nothing changed, and a run that could not run, have no line. Examples:
+`No new failures · moves 3 metrics (Total lifetime value +4.6%) · touches 6 marts`,
+`2 new failures · touches 9 models · 1 broken on main`.
+
+The summary's `headline` object holds the same facts: `new_failures`, `moved_metrics`,
+`metrics_defined`, `top_metric` (`name`, `label`, `base`, `head`, or null), `value_changed_models`,
+`touched_models`, `touched_marts`, `unverified`, `broken_on_base`, and `text` (the line as
+rendered). `moved_metrics`, `value_changed_models`, `touched_models` and `touched_marts` are
+null in a full build. The key is additive: `schema_version` stays `2`.
 
 ### Failing tests and the base branch
 
