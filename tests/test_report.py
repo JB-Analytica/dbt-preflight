@@ -966,9 +966,12 @@ def test_a_model_the_change_reaches_is_not_checked_rather_than_broken() -> None:
     assert not report.passed  # still counts against the pull request
     section = body.split("### ❓ Could not be checked (1)")[1].split("###")[0]
     assert (
-        "- `account_daily_arr_deltas` — fails on `main` too, and this change reaches it from "
-        "upstream (`account_util_dates`): Catalog Error: Table with name finance.x does not exist!"
+        "- `account_daily_arr_deltas` — this change reaches it from upstream "
+        "(`account_util_dates`), and DuckDB reports only the first error in a statement, so a "
+        "new one could be hiding behind the old one: Catalog Error: Table with name finance.x "
+        "does not exist!"
     ) in section
+    assert "This model fails on `main` too, the same way" in section
     assert "Skipped because of it: `account_monthly`." in section
     breaks = body.split("Unchanged models this change breaks:")[1].split("###")[0]
     assert "`fct_genuinely_broken`" in breaks  # built on base, fails on head: today's wording

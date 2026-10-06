@@ -55,6 +55,7 @@ def test_metrics_and_judging_keys_do_not_reshape_the_fixtures(repo: Path) -> Non
         BASE + "locale: nl_BE\n",
         BASE + "env:\n  GCP_PROJECT: x\n",
         BASE + "dialect: snowflake\n",
+        BASE + "vars:\n  shopify_api: graphql\n",
     ],
 )
 def test_a_fixture_key_does_reshape_them(repo: Path, head: str) -> None:

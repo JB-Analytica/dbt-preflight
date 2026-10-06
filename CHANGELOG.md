@@ -5,6 +5,180 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-06
+
+### Added
+
+- A one-line summary directly under the verdict heading of the comment: new failures, the
+  metrics moved (naming the biggest, with its delta), models or marts touched, and what
+  could not be checked or is broken on the base branch, e.g. `No new failures · moves 3
+  metrics (Total lifetime value +4.6%) · touches 6 marts`. Parts that are zero are left out.
+  The summary JSON gains `headline` with the same fields (schema version unchanged).
+- `dbt-preflight schema` writes the schema a run derives from the project as a DBML file to
+  keep and refine in model2data studio. It does the head's derivation (sources.yml, staging
+  SQL, compiled SQL) with no warehouse, credentials or base ref. Columns `sources.yml` did
+  not type carry a prose note (`type guessed from the name`, `type read from compiled SQL`,
+  `inferred from a staging cast`), which model2data reads as a description, never as a
+  generation hint. Default path `source_system/<dbt project name>.dbml` beside
+  `.dbt-preflight.yml`; `--output` overrides it, `--force` overwrites and also derives when
+  the config already has `schema:`. A run with `schema:` pointing at the file builds the
+  same fixtures as the derived run.
+- When a run had to guess a column's type, the comment gets one line, outside the folded
+  fixtures block, pointing at `dbt-preflight schema` and model2data studio. It never
+  appears on a clean run, and the link carries no schema content. The summary JSON gains
+  `fixtures.guessed_sources` (schema version unchanged).
+- Schema inference reads dbt's compiled SQL as well as the raw SQL, so a source read
+  through a macro is no longer invisible. The models that read a source are compiled
+  against an empty DuckDB file on both branches; a pure `select *` (or a macro's empty
+  stand-in) counts as its source, and a typed null in a single-source model types the
+  column. Fivetran's dbt_shopify now derives a schema without a hand-written DBML file
+  (87 sources). The raw SQL wins where it already says something, and the fixtures block
+  says how many columns came from compiled SQL.
+  - Tests carry back from compiled SQL only from a model that reads that one source and
+    keeps its rows (no join, grouping, distinct, filter or aggregate), and only through a
+    column that resolves to the source in its own scope. A mart's grain test never
+    becomes a key on the source.
+  - A model that fails to compile is excluded by its exact selector and read from raw SQL.
+    When only the head compiles, every source counts as reshaped.
+
+- `vars:` in `.dbt-preflight.yml`: a mapping passed to every dbt command preflight runs as
+  `--vars`. A change to it counts as reshaping the fixtures, like `env:`. YAML dates are
+  passed as ISO strings, and a value JSON cannot carry is a config error.
+
+### Changed
+
+- **No untyped column stops the run any more.** A column still untyped after the raw and
+  compiled SQL is typed by its name when every reader could be followed, and is a
+  `varchar` when one could not. Both are listed as guessed, and the comment and the
+  summary (`unknown_columns`) say which are `varchar` for that reason. The run stops only
+  when a read source has no column known at all, and the error points at `schema:` and
+  `dbt-preflight schema`.
+- **A failure over a guessed column is never "broken on main".** A model that reads a
+  source column whose type preflight guessed, directly or upstream, and fails the same
+  way on both branches, is listed under "Could not be checked" with the guessed columns
+  named (`guessed_inputs` in the summary), and counts against the run, when the change
+  reaches it; when it does not, it is a warning (see "preflight's own data" below). A
+  compilation error is exempt, since it happens before any data is read. A test over such
+  a model, or over a
+  guessed source column, names the guessed columns it reads. When it *errors* (a type
+  mismatch, a failed cast) it is not judged against the base and counts. When it fails on
+  rows on both branches it stays pre-existing, annotated: an invariant that random data
+  breaks is not a typing question. The guesses are tied to the verdict instead of only appearing in the folded
+  Fixtures block.
+- **A failure on preflight's own data is never "broken on main".** A model that fails the
+  same way on both branches with an error about the shape of a value - malformed JSON, a
+  timestamp, date or time that does not parse, a failed cast of a string - fails on a value
+  preflight generated (`baseline.FIXTURE_SHAPED_ERRORS`, DuckDB's error text in one list;
+  a compilation error and a model with no source upstream are exempt). Such a model, and
+  one failing over a guessed column, is split by whether the change reaches it (modifies
+  it, reshapes its fixtures, adds or edits a test on it, or modifies something upstream):
+  reached, it is "Could not be checked" and counts; not reached, it builds from identical
+  SQL on identical data on both sides, so it goes in a new warning section, "Preflight's
+  generated data cannot build this model", with the reason, and what is skipped only
+  because of it is not counted either, unless the change reaches that too. A guessed,
+  unreached model that used to count in `counts.models.failed` (as unverified) now counts
+  in `counts.models.fixture_limited`, and the headline adds `N cannot be built on
+  generated data` (`headline.fixture_limited`). The summary gains
+  `fixture_limited_models`, `counts.models.fixture_limited` and
+  `counts.models.skipped_by_fixture_limited`, per-model `fixture_limited` and
+  `skipped_by_fixture_limited`, and `fixture_error` on `unverified_broken_on_base_models`
+  (schema version unchanged).
+- "Could not be checked" gives each model its own reason (a generated value, a guessed
+  column, or a change upstream hiding behind DuckDB's first error) under a generic intro,
+  instead of saying of every model that the change reaches it from upstream.
+- A snapshot or a singular test reading a source counts as a reader that cannot be
+  followed, so that source's unread untyped columns are flagged `varchar` rather than
+  typed by name.
+- **Sources nothing reads are skipped.** A source no model, snapshot or test reads, and
+  that `sources.yml` does not fully type, gets no fixture and no error. One line in the
+  fixtures block names it, and the summary lists it as `fixtures.skipped_sources`. A fully
+  typed source keeps its fixture, since another source's foreign key may point at it.
+- **Tests carry back only from a model that has the source's rows.** This applies to raw
+  SQL too, which changes 0.4.0's behaviour. A `unique`/`not_null`/`accepted_values` test
+  carries back only from a model that reads that one source, directly or through an
+  unfiltered pass-through, with no join, grouping, distinct, aggregate, filter, sampling,
+  paging, unnest/explode/`generate_series` or pivot. A staging model with a `where` or a
+  join no longer hands its tests to the source; a mart reading a source directly never
+  did legitimately.
+- A reader of a source is "followed" only without a `*` inside a join or an expression
+  and without whole-row references. A CTE counts as reading the source only through what
+  its FROM and JOINs select, no longer through every earlier CTE it could see.
+- A source identifier DBML cannot spell (GA4's `events_*`) gets a sanitised table name in
+  the derived schema. The fixture still loads under the identifier dbt expects.
+- Compiled SQL falls back to the project's own dialect when DuckDB's grammar cannot parse
+  it or finds column names no warehouse would use. Under DuckDB's grammar, BigQuery's
+  `replace(x, " ", "_")` reads as two columns named ` ` and `_`. For BigQuery-style
+  dialects, dbt's relation names are re-quoted for that attempt. An inferred column name
+  DBML cannot spell is dropped.
+- **Unread declared columns are typed by their name.** A column `sources.yml` declares
+  without a `data_type` used to fail the run unless a model read it. Now it gets a type
+  from its name and is listed as guessed, but only when every model reading the source is
+  accounted for: its compiled SQL parsed (in DuckDB's grammar, the default one or the
+  project's own dialect), names the source's relation (in full, or as an unambiguous
+  `schema.table`), passes no `*` over it to its output, and reads no unqualified column
+  next to a join. With anything less, the column is a flagged `varchar` (see above).
+  Fivetran documents more columns than its staging macros select.
+- **Numeric keys from a typed null become integers with a ref.** A column typed by a
+  compiled `cast(null as numeric(...))` and named `id` or `*_id` is an `int`. Fivetran
+  types every id `numeric(28,6)`, and decimal keys neither joined nor took a ref. A `*_id`
+  column typed this way gets a foreign-key ref when the target's `id` is an integer too.
+- `timestampntz` and `timestampltz` now read as `timestamp`. This also changes the raw-SQL
+  path: a Snowflake staging model casting to either spelling used to give the fixture
+  column that literal type name, and now gives it a timestamp.
+
+### Fixed
+
+- **A column a model parses as JSON gets valid JSON.** It used to get model2data's
+  placeholder sentences, so a model doing `json_extract` failed on both branches and was
+  reported "broken on main" over preflight's own data (Fivetran's `shopify__orders` and
+  `shopify__transactions`: `Malformed JSON ... Input: "Weight reason."`). Preflight now finds
+  the source columns read with a JSON function (DuckDB's `json_extract*`, `->`, `->>`,
+  `json_value`, `json_valid`, `json_keys`, `from_json`, `::json`; BigQuery's
+  `json_extract*`, `json_value`, `parse_json` where they survive), in raw and compiled SQL,
+  traced back through staging aliases, `select *` and pass-throughs, together with the
+  paths read and the type a cast after the extraction implies. The fixture step fills those
+  columns with JSON objects holding every path (nested objects, arrays where the SQL
+  indexes one), derived from the seed, table and column name, with the column's nulls kept.
+  Only a text column qualifies; model2data is untouched. Models whose raw SQL calls a macro
+  mentioning JSON are compiled too, in a second compile that cannot cost the inference
+  anything, also on a run with a DBML file. The derived schema, and the file
+  `dbt-preflight schema` writes, note such a column as `JSON, keys read: ...`, and a run on
+  that file builds the same fixtures. The fixtures block lists the columns, and the summary
+  JSON gains `fixtures.json_columns` (schema version unchanged).
+  - The paths are the base branch's and the head's together: both build on one fixture,
+    so a difference in paths alone does not reshape a source. A key only the pull request
+    reads, on a column the base parses too, is a JSON null, so a renamed key (`$.amount` to
+    `$.amout`) reads NULL as on real data instead of validating itself; the comment and
+    `fixtures.json_new_keys` list such keys. When only one branch compiled, keys are
+    compared in raw SQL alone, and the comment and `fixtures.json_keys_partly_compared`
+    say a key renamed inside a macro is not caught.
+  - A qualified column (`o.payload` in a join) fills only the source its qualifier names.
+  - A DBML column whose note contains `not JSON` keeps its generated text.
+  - Leaf strings and integers carry the row number, so a `unique` test on a JSON column or
+    a key read from it holds; a column read only as a whole gets `{"id": <row>}`.
+- Transpiling from BigQuery (and Spark, Databricks, Hive) turned identifiers dbt rendered
+  in double quotes for the DuckDB target into string literals: `dbt_utils.star` became
+  `SELECT 'customer_id', 'email'`, and Fivetran's `shopify__customers` failed with
+  `Values list "customers" does not have a column named "customer_id"`. A double-quoted
+  token is now an identifier where only an identifier can stand (next to a `.`, after
+  `as`, or alone as a select-list item outside a function call); BigQuery's own
+  double-quoted strings elsewhere (`status = "paid"`, `concat(a, " ", b)`) stay strings,
+  and single-quoted strings and comments are untouched. When DuckDB cannot plan that
+  reading for a reason other than one of those columns missing, the string reading is
+  tried; a missing column is never turned into a constant.
+- A model skipped on both branches behind a model broken on the base was excused even when
+  the change reached it through another parent (a model reading both a broken model and a
+  modified one). It counts now, listed as skipped and never checked.
+- A model the pull request added or edited a test on (generic, unit, or a singular test
+  reading it) could be "broken on main" when it failed the same way there, which skipped
+  the new test unseen and excused what the model skips. It is "Could not be checked" now,
+  naming the test.
+- A derived table could get two `pk` columns (`id`, and a column whose staging alias was
+  tested `unique` and `not_null`), which model2data reads as one composite key, so neither
+  was unique and the staging model's `unique` test failed on the fixtures
+  (audience-analytics' `stg_billtobox__creditors`). `id`, or failing that the first such
+  column, is now the only key; the others are `unique, not null`.
+
 ## [0.4.0] - 2026-10-05
 
 ### Added

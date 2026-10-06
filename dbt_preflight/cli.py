@@ -18,20 +18,28 @@ import typer
 import yaml
 
 from dbt_preflight import __version__
-from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
+from dbt_preflight.baseline import (
+    FAILING,
+    fixture_shaped_error,
+    is_broken_on_base,
+    is_preexisting,
+    same_error,
+)
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
-from dbt_preflight.config import ConfigError, PreflightConfig, load_config
+from dbt_preflight.compiled import CompiledSql, compile_selection, json_compile_selection
+from dbt_preflight.config import CONFIG_FILENAME, ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
     DbtError,
     DbtRunner,
     NodeResult,
     RunOutcome,
+    compile_models,
     read_project,
     write_profiles,
 )
 from dbt_preflight.diff import compute_diffs
-from dbt_preflight.fixtures import build_fixtures
+from dbt_preflight.fixtures import build_fixtures, widen_json
 from dbt_preflight.git import GitError, base_worktree, file_at, git_root, head_sha, paths_changed
 from dbt_preflight.github import GitHubError, post_or_update_comment, pull_request_number
 from dbt_preflight.manifest import Manifest
@@ -47,7 +55,14 @@ from dbt_preflight.report import (
     PreflightReport,
     render,
 )
-from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema
+from dbt_preflight.schema import (
+    SchemaError,
+    derive_dbml,
+    json_reads,
+    resolve_schema,
+    source_table_names,
+)
+from dbt_preflight.schema_file import annotate, count_notes, default_output
 from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
 
@@ -316,7 +331,10 @@ def _run(
     timer = _StepTimer()
 
     # 1. Parse the head so we know the sources and where they think they live.
-    head_runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
+    head_runner = DbtRunner(
+        project, profiles_dir, workdir / "target", workdir / "logs", config.env,
+        dbt_vars=config.vars,
+    )  # fmt: skip
     head_runner.deps()
     manifest = Manifest.load(head_runner.parse())
     report.relations = manifest.relations()
@@ -329,10 +347,30 @@ def _run(
         db_path = workdir / f"{catalog}.duckdb"
         write_profiles(profiles_dir, project.profile, db_path)
 
+    dialect = _project_dialect(config, project)
+
     # 2. Fixtures. A project with no sources takes its input from seeds, which dbt loads
     # itself during the build; there is nothing to generate and nothing to miss.
+    compiled: CompiledSql | None = None
+    head_dbml: str | None = None
+    if manifest.sources and config.schema is None:
+        compiled = _compile_for_inference(
+            project, manifest, catalog, workdir, "compiled", config.env, dialect, config.vars
+        )
+        timer.mark(f"   {_compiled_line(compiled)}")
+    elif manifest.sources and json_compile_selection(manifest):
+        # A DBML file gives the types, but what a model reads as JSON through a macro
+        # still only shows compiled (`schema.json_reads`).
+        compiled = _compile_for_inference(
+            project, manifest, catalog, workdir, "compiled", config.env, dialect, config.vars,
+            json_only=True,
+        )  # fmt: skip
+        n = len(compiled.code) if compiled is not None else 0
+        timer.mark(f"   compiled {n} models that read JSON through a macro")
     if manifest.sources:
-        schema = resolve_schema(config.schema, manifest, workdir)
+        schema = resolve_schema(config.schema, manifest, workdir, compiled)
+        if schema.derived:
+            head_dbml = schema.dbml_path.read_text(encoding="utf-8")
         fixtures = build_fixtures(config, schema, list(manifest.sources.values()), db_path)
         report.fixtures = fixtures
         timer.mark(
@@ -352,16 +390,12 @@ def _run(
     # 3. Base manifest, for state:modified. The worktree stays checked out until the end of
     # the run: before the head build, the base is built too, into its own schemas, on the
     # same fixtures, so its test results and its tables can be compared with the head's.
-    dialect = (
-        config.dialect
-        if config.dialect is not None
-        else detect_dialect(config.project_dir, project.profile)
-    )
-    if dialect and dialect not in {"duckdb", "none"}:
+    if dialect:
         report.dialect = dialect
         _say(f"   transpiling model SQL from {dialect} to DuckDB")
     changed_ids: set[str] = set()
     base: _BaseBuild | None = None
+    base_compiled: CompiledSql | None = None
     with contextlib.ExitStack() as stack:
         if base_ref:
             base_root = stack.enter_context(
@@ -369,8 +403,9 @@ def _run(
             )
             base_project = read_project(base_root / config.project_relpath)
             base_runner = DbtRunner(
-                base_project, profiles_dir, workdir / "base_target", workdir / "logs", config.env
-            )
+                base_project, profiles_dir, workdir / "base_target", workdir / "logs", config.env,
+                dbt_vars=config.vars,
+            )  # fmt: skip
             base_runner.deps()
             base_runner.parse()
             timer.mark("   base parsed")
@@ -392,13 +427,47 @@ def _run(
             # staging model's casts or tests shape them: a source whose derived table
             # differs from the base's is as changed as an edited sources.yml.
             if config.schema is None and manifest.sources:
-                reshaped = _reshaped_sources(manifest, Manifest.load(state_dir / "manifest.json"))
+                base_manifest = Manifest.load(state_dir / "manifest.json")
+                base_compiled = _compile_for_inference(
+                    base_project,
+                    base_manifest,
+                    catalog,
+                    workdir,
+                    "base_compiled",
+                    config.env,
+                    dialect,
+                    config.vars,
+                )
+                timer.mark(f"   base {_compiled_line(base_compiled)}")
+                reshaped = _reshaped_sources(
+                    manifest, base_manifest, compiled, base_compiled, head_dbml
+                )
                 if reshaped - modified:
                     names = ", ".join(
                         f"`{manifest.sources[u].identifier}`" for u in sorted(reshaped - modified)
                     )
                     _say(f"   derived fixtures differ from the base for {names}")
                     modified |= reshaped
+            # The JSON columns get the base's paths too: both branches build on one
+            # fixture, so a key the pull request renamed must not validate itself.
+            if report.fixtures is not None and report.fixtures.json_shapes:
+                base_manifest = Manifest.load(state_dir / "manifest.json")
+                if config.schema is not None:
+                    base_compiled = _compile_for_inference(
+                        base_project, base_manifest, catalog, workdir, "base_compiled",
+                        config.env, dialect, config.vars, json_only=True,
+                    )  # fmt: skip
+                widen_json(
+                    db_path,
+                    report.fixtures,
+                    json_reads(base_manifest, base_compiled),
+                    config.seed,
+                    # A side read without its compiled SQL misses macro-hidden paths: then
+                    # new keys come from both sides' raw SQL, which they read alike.
+                    compare=None
+                    if (compiled is None) == (base_compiled is None)
+                    else (json_reads(manifest), json_reads(base_manifest)),
+                )
             # dbt's state comparison does not see vars or package versions. When a file
             # that can change what every model does changed, nothing is judged by the base.
             project_files = [config.project_dir / n for n in _PROJECT_FILES]
@@ -472,6 +541,8 @@ def _run(
                     untrusted=untrusted,
                     changed_upstream=untrusted | manifest.descendants(untrusted),
                     judge=judge,
+                    guess_bound=_guess_bound(manifest, report),
+                    tested_by_change=_tests_changed_on(manifest, modified),
                 ),
                 timer,
             )
@@ -535,6 +606,7 @@ _FIXTURE_KEYS = (
     "seed",
     "locale",
     "env",
+    "vars",
     "loader_columns",
     "dialect",
 )
@@ -561,28 +633,140 @@ def _config_reshapes_fixtures(config: PreflightConfig, base_ref: str) -> bool:
     return any(base_raw.get(k) != head_raw.get(k) for k in _FIXTURE_KEYS)
 
 
-def _reshaped_sources(head: Manifest, base: Manifest) -> set[str]:
+_JSON_NOTE = re.compile(r"(?:, )?note: 'JSON[^']*'")
+
+
+def _without_json_notes(dbml: str) -> str:
+    return _JSON_NOTE.sub("", dbml).replace(" [] ", " ").replace(" []\n", "\n")
+
+
+def _reshaped_sources(
+    head: Manifest,
+    base: Manifest,
+    head_compiled: CompiledSql | None = None,
+    base_compiled: CompiledSql | None = None,
+    head_text: str | None = None,
+) -> set[str]:
     """Head sources whose derived fixture table differs from the one the base derives.
 
     Columns, types, keys, refs and enum values all come from the project's own YAML and
     staging SQL when there is no DBML file, so a pull request that edits a cast or a test
     in one staging model changes the data every reader of that source gets. When the base
-    cannot be derived at all, every source counts.
+    cannot be derived at all, every source counts. Each side is derived from its own
+    compiled SQL, compiled the same way, so a difference is the change's. When only the
+    head compiled, the two cannot be compared like for like, and every source counts too;
+    when only the base did, it is derived without it, as the head was.
+
+    `head_text` is the DBML the run already derived for the head, when there is one.
     """
+    if head_compiled is not None and base_compiled is None:
+        return set(head.sources)
+    if head_compiled is None:
+        base_compiled = None
+    if head_text is None:
+        try:
+            head_text, _ = derive_dbml(head, head_compiled)
+        except SchemaError:
+            return set()  # the head run reports this itself
     try:
-        head_text, _ = derive_dbml(head)
-    except SchemaError:
-        return set()  # the head run reports this itself
-    try:
-        base_text, _ = derive_dbml(base)
+        base_text, _ = derive_dbml(base, base_compiled)
     except SchemaError:
         return set(head.sources)
+    # The JSON notes say which paths each side reads; the fixture holds both sides' paths
+    # (`fixtures.widen_json`), so a difference there reshapes nothing.
+    head_text, base_text = _without_json_notes(head_text), _without_json_notes(base_text)
     head_tables, base_tables = _dbml_tables(head_text), _dbml_tables(base_text)
+    # By the name each side writes the source's table under, not its identifier: that name
+    # is sanitised (`events_*` -> `events__`) or prefixed for a duplicate identifier
+    # (`<source>__<identifier>`), and a lookup that finds nothing on either side would
+    # compare equal and hide the change.
+    head_names = source_table_names(head.sources.values())
+    base_names = source_table_names(base.sources.values())
     return {
         uid
-        for uid, src in head.sources.items()
-        if head_tables.get(src.identifier) != base_tables.get(src.identifier)
+        for uid in head.sources
+        if head_tables.get(head_names[uid])
+        != (base_tables.get(base_names[uid]) if uid in base_names else None)
     }
+
+
+def _compile_for_inference(
+    project,
+    manifest: Manifest,
+    catalog: str,
+    workdir: Path,
+    name: str,
+    env: dict[str, str],
+    dialect: str | None = None,
+    dbt_vars: dict | None = None,
+    json_only: bool = False,
+) -> CompiledSql | None:
+    """Compile the models that read sources, for the schema inference (`compiled.py`).
+
+    Then, in a second compile so a failure there cannot cost the inference anything, the
+    models that read JSON through a macro (`json_compile_selection`), for the columns that
+    get JSON fixtures. `json_only` compiles only those, for a run with a DBML file.
+
+    Against a DuckDB file of its own, empty, under the catalog name the sources resolve
+    to: the head and the base then see exactly the same database - no relation at all -
+    whenever each is compiled, so a macro that introspects one renders its fallback on both
+    sides. None when nothing compiled; the inference then reads raw SQL alone.
+    """
+    compile_profiles = workdir / f"{name}_profiles"
+    (workdir / name).mkdir(parents=True, exist_ok=True)
+    write_profiles(compile_profiles, project.profile, workdir / name / f"{catalog}.duckdb")
+    runner = DbtRunner(
+        project, compile_profiles, workdir / f"{name}_target", workdir / "logs", env,
+        dbt_vars=dbt_vars,
+    )  # fmt: skip
+    selection = [] if json_only else compile_selection(manifest)
+    compiled: CompiledSql | None = None
+    if selection:
+        outcome = compile_models(
+            runner,
+            {u: manifest.selector(u) for u in selection},
+            {manifest.models[u].original_file_path: u for u in selection},
+        )
+        if outcome.manifest is None:
+            return None
+        # Read now: the second compile rewrites the same manifest.json.
+        compiled = CompiledSql.load(outcome.manifest, outcome.failed, dialect)
+    extra = json_compile_selection(manifest, set(selection))
+    if not extra or (compiled is None and not json_only):
+        return compiled
+    outcome = compile_models(
+        runner,
+        {u: manifest.selector(u) for u in extra},
+        {manifest.models[u].original_file_path: u for u in extra},
+    )
+    if outcome.manifest is None:
+        return compiled
+    more = CompiledSql.load(outcome.manifest, dialect=dialect)
+    if compiled is None:
+        compiled = CompiledSql(relations=more.relations, dialect=dialect)
+    for uid in extra:
+        if uid in more.code:
+            compiled.code.setdefault(uid, more.code[uid])
+    return compiled
+
+
+def _project_dialect(config: PreflightConfig, project) -> str | None:
+    """The SQL dialect to transpile from: configured, else read from the profile; None for DuckDB."""
+    dialect = (
+        config.dialect
+        if config.dialect is not None
+        else detect_dialect(config.project_dir, project.profile)
+    )
+    return None if dialect in {"duckdb", "none"} else dialect
+
+
+def _compiled_line(compiled: CompiledSql | None) -> str:
+    if compiled is None:
+        return "could not compile the models that read sources; inferring from raw SQL"
+    line = f"compiled {len(compiled.code)} models that read sources"
+    if compiled.failed:
+        line += f" ({len(compiled.failed)} failed to compile, read as raw SQL)"
+    return line
 
 
 def _fixture_bound(manifest: Manifest, modified: set[str]) -> set[str]:
@@ -609,6 +793,12 @@ class _Trust:
     # `untrusted` and everything downstream of it: never broken on the base, and no test
     # reading it is pre-existing on an error, since one error can hide another.
     changed_upstream: set[str]
+    # Nodes reading a source column whose type preflight guessed, directly or upstream:
+    # uid -> "<table>.<column>". Never "broken on main", never a pre-existing failure.
+    guess_bound: dict[str, list[str]] = field(default_factory=dict)
+    # Model -> the names of the data tests or unit tests the change added or edited on it
+    # (declared on it, or a singular test reading it): `_tests_changed_on`.
+    tested_by_change: dict[str, list[str]] = field(default_factory=dict)
     # False when a project-level file changed: nothing is judged by the base at all.
     judge: bool = True
 
@@ -673,6 +863,7 @@ def _build_base(
         workdir / "logs",
         config.env,
         target=BASE_TARGET_NAME,
+        dbt_vars=config.vars,
     )
     if not names:
         runner.parse()
@@ -695,15 +886,7 @@ def _build_base(
     if tests.error:
         _say(f"   ⚠️  base tests could not run, every head failure counts: {tests.error}")
     built = sum(1 for r in tables.results if r.status == "success")
-    results = {
-        r.unique_id: r
-        for r in tests.results
-        if trust.judge
-        and r.resource_type in {"test", "unit_test"}
-        and r.unique_id not in trust.modified
-        and not trust.fixture_bound.intersection(r.depends_on)
-        and not (r.status == "error" and trust.changed_upstream.intersection(r.depends_on))
-    }
+    results = {r.unique_id: r for r in tests.results if _base_test_usable(r, trust)}
     failing = sum(1 for r in results.values() if r.status in FAILING)
     timer.mark(
         f"   base branch: {built} nodes built, {len(results)} tests, {failing} failing there"
@@ -774,6 +957,7 @@ def _build_and_check(
     )
     if base is not None:
         _judge_builds(report, manifest, outcome, base)
+        _mark_guessed_tests(report, manifest, base)
     built = [m for m in report.models if m.status == BUILT]
     timer.mark(
         f"   built {len(built)}/{len(report.models)} models, "
@@ -878,7 +1062,34 @@ def _judge_builds(
         on_base = base.tables.get(m.unique_id)
         if m.status != FAILED or r is None:
             continue
-        m.broken_on_base = is_broken_on_base(r, on_base, trust.changed_upstream)
+        guessed = trust.guess_bound.get(m.unique_id)
+        same_on_base = (
+            on_base is not None
+            and on_base.status == "error"
+            and same_error(r.message, on_base.message)
+            # A compilation error happens before any data is read, so no fixture can have
+            # caused it: that one is judged against the base as usual.
+            and "Compilation Error" not in (r.message or "")
+        )
+        # Malformed JSON, a timestamp that does not parse, a failed cast: an error about a
+        # value, and the values are preflight's generated data on both branches.
+        shaped = fixture_shaped_error(r.message) if _reads_a_source(manifest, m.unique_id) else None
+        if same_on_base and (shaped or guessed):
+            # Failing the same way on main proves nothing about the project when the data
+            # is preflight's: not "broken on main". It counts only when the change reaches it.
+            m.fixture_error = shaped
+            m.guessed_inputs = guessed or []
+            if _reached(m.unique_id, trust):
+                m.unverified_broken_on_base = True
+                m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
+                m.edited_tests = trust.tested_by_change.get(m.unique_id, [])
+            else:
+                m.fixture_limited = True
+            continue
+        # A model the change added or edited a test on is never excused: the test needs it.
+        m.broken_on_base = is_broken_on_base(
+            r, on_base, trust.changed_upstream | set(trust.tested_by_change)
+        )
         if (
             not m.broken_on_base
             # Not what the change modified, nor what reads fixtures it changed: there the
@@ -893,15 +1104,17 @@ def _judge_builds(
             # not as something this change is known to have broken.
             m.unverified_broken_on_base = True
             m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
+            m.edited_tests = trust.tested_by_change.get(m.unique_id, [])
     broken = {m.unique_id for m in report.models if m.broken_on_base}
     unverified = {m.unique_id for m in report.models if m.unverified_broken_on_base}
-    if not broken and not unverified:
+    limited = {m.unique_id for m in report.models if m.fixture_limited}
+    if not broken and not unverified and not limited:
         return
 
     roots = {
         m.unique_id
         for m in report.models
-        if m.status in {FAILED, NOT_VERIFIED} and not m.broken_on_base
+        if m.status in {FAILED, NOT_VERIFIED} and not m.broken_on_base and not m.fixture_limited
     }
     roots |= {
         uid
@@ -914,6 +1127,7 @@ def _judge_builds(
             roots |= {d for d in test.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
     from_change = manifest.descendants(roots)
     from_base = manifest.descendants(broken)
+    from_limited = manifest.descendants(limited)
     # What only an unverified model is upstream of is skipped "because of it": still
     # counted, but not said to be broken by the change.
     from_unverified = manifest.descendants(unverified)
@@ -927,12 +1141,139 @@ def _judge_builds(
             m.status == SKIPPED
             and m.unique_id in from_base
             and m.unique_id not in from_change
-            # Something the change made or edited answers for itself, even downstream of
-            # a broken model; and "skipped on both branches" has to be true.
-            and m.unique_id not in trust.untrusted
+            # Something the change reaches answers for itself, even downstream of a broken
+            # model (a model reading both); and "skipped on both branches" has to be true.
+            and not _reached(m.unique_id, trust)
             and on_base is not None
             and on_base.status == "skipped"
         )
+        # The same, behind a model preflight's data cannot build.
+        m.skipped_by_fixture_limited = (
+            m.status == SKIPPED
+            and not m.skipped_by_base
+            and m.unique_id in from_limited
+            and m.unique_id not in from_change
+            and not _reached(m.unique_id, trust)
+            and on_base is not None
+            and on_base.status == "skipped"
+        )
+        # Skipped on both branches behind such a model, but the change reaches it through
+        # another parent: it counts, as unchecked, not as something the change broke.
+        m.skipped_unchecked = (
+            m.status == SKIPPED
+            and not m.skipped_by_base
+            and not m.skipped_by_fixture_limited
+            and m.unique_id in (from_base | from_limited)
+            and m.unique_id not in from_change
+            and on_base is not None
+            and on_base.status == "skipped"
+        )
+
+
+def _tests_changed_on(manifest: Manifest, modified: set[str]) -> dict[str, list[str]]:
+    """{model: names of the tests the change added or edited on it}: generic tests by the
+    node they are declared on, unit tests by the model they exercise, and singular tests
+    (no attached node) by every model they read."""
+    out: dict[str, set[str]] = {}
+    for uid, test in manifest.tests.items():
+        if uid not in modified:
+            continue
+        targets = [test.attached_node] if test.attached_node else test.depends_on
+        for target in targets:
+            if target in manifest.models:
+                out.setdefault(target, set()).add(test.name)
+    for uid, unit in manifest.unit_tests.items():
+        if uid in modified and unit.model_uid in manifest.models:
+            out.setdefault(unit.model_uid, set()).add(uid.split(".")[-1])
+    return {uid: sorted(names) for uid, names in sorted(out.items())}
+
+
+def _reached(uid: str, trust: _Trust) -> bool:
+    """Whether the change can affect a node: it modified it, the node reads fixtures the
+    change reshaped, or either is upstream of it (`_Trust.changed_upstream`); or the change
+    added or edited a data test or unit test on it, whose result needs the model built
+    (`_Trust.tested_by_change`). Anything else
+    builds from identical SQL on identical data on both branches, so by determinism the
+    change cannot have affected it."""
+    return uid in trust.changed_upstream or uid in trust.tested_by_change
+
+
+def _reads_a_source(manifest: Manifest, uid: str) -> bool:
+    """Whether a source is upstream of a node: only then is generated data in what it reads."""
+    seen: set[str] = set()
+    frontier = list(manifest.parent_map.get(uid, []))
+    while frontier:
+        parent = frontier.pop()
+        if parent in seen:
+            continue
+        if parent in manifest.sources:
+            return True
+        seen.add(parent)
+        frontier += manifest.parent_map.get(parent, [])
+    return False
+
+
+def _base_test_usable(r: NodeResult, trust: _Trust) -> bool:
+    """Whether a test's base result may judge the head's: see `_build_base`."""
+    guessed = r.unique_id in trust.guess_bound or bool(trust.guess_bound.keys() & set(r.depends_on))
+    return (
+        trust.judge
+        and r.resource_type in {"test", "unit_test"}
+        and r.unique_id not in trust.modified
+        and not trust.fixture_bound.intersection(r.depends_on)
+        and not (r.status == "error" and bool(trust.changed_upstream.intersection(r.depends_on)))
+        # A test over what reads a guessed column that errors on the base: a type mismatch
+        # or failed cast on guessed data is the guess's as likely as the project's, so it
+        # is not pre-existing. Failing rows on both branches still are (annotated, see
+        # `_mark_guessed_tests`): an invariant random data breaks is not a typing question.
+        and not (r.status == "error" and guessed)
+    )
+
+
+def _mark_guessed_tests(report: PreflightReport, manifest: Manifest, base: _BaseBuild) -> None:
+    """Name the guessed columns a failing test reads, directly or upstream, so the comment
+    says the failure may be preflight's guess rather than the project: an error there was
+    not judged against the base (`_build_base`), and failing rows on both branches stay
+    pre-existing but say what they read."""
+    if base.trust is None or not base.trust.guess_bound:
+        return
+    bound = base.trust.guess_bound
+    for t in report.tests:
+        test = manifest.tests.get(t.unique_id) or manifest.unit_tests.get(t.unique_id)
+        cols = set(bound.get(t.unique_id, []))
+        for dep in test.depends_on if test is not None else []:
+            cols |= set(bound.get(dep, []))
+        t.guessed_inputs = sorted(cols)
+
+
+def _guess_bound(manifest: Manifest, report: PreflightReport) -> dict[str, list[str]]:
+    """{node unique id: the guessed source columns it reads, as "<table>.<column>"}.
+
+    Column by column, as far as inference can tell: the models whose SQL reads a guessed
+    column (for a column typed varchar because a reader could not be followed, those
+    readers), a test on the source over a guessed column, and everything downstream of
+    them. A guessed column nothing reads binds nothing."""
+    fx = report.fixtures
+    if fx is None:
+        return {}
+    direct: dict[str, set[str]] = {}
+    guessed_by_source: dict[tuple[str, str], set[str]] = {}
+    for src in fx.inferred_sources:
+        guessed_by_source[(src.source_name, src.table)] = set(src.guessed_columns)
+        for col, readers in src.guessed_readers.items():
+            for uid in readers:
+                direct.setdefault(uid, set()).add(f"{src.identifier}.{col}")
+    for test in manifest.source_tests():
+        src = manifest.sources.get(test.attached_node or "")
+        if src is None or not test.column_name:
+            continue
+        if test.column_name in guessed_by_source.get((src.source_name, src.name), set()):
+            direct.setdefault(test.unique_id, set()).add(f"{src.identifier}.{test.column_name}")
+    out = {uid: set(cols) for uid, cols in direct.items()}
+    for uid, cols in direct.items():
+        for child in manifest.descendants({uid}):
+            out.setdefault(child, set()).update(cols)
+    return {uid: sorted(cols) for uid, cols in sorted(out.items())}
 
 
 def _changed_ancestors(manifest: Manifest, uid: str, modified: set[str]) -> list[str]:
@@ -1049,6 +1390,119 @@ def _finish(
 
     if fail_on_error and not report.passed:
         sys.exit(1)
+
+
+@app.command()
+def schema(
+    config_path: Optional[Path] = typer.Option(
+        None, "--config", help="Path to .dbt-preflight.yml (default: repo root)."
+    ),
+    repo_root: Optional[Path] = typer.Option(
+        None,
+        "--repo-root",
+        help="Repository root (default: the git root of the current directory).",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        help="Where to write the DBML (default: source_system/<project name>.dbml, next to "
+        ".dbt-preflight.yml).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing file, and derive a schema even when the config already "
+        "has `schema:`.",
+    ),
+) -> None:
+    """Write the schema a run derives from the project as a DBML file to keep and refine.
+
+    Needs no warehouse, credentials or base ref: the same derivation a run does on the
+    head (sources.yml, the staging models' SQL, compiled SQL), written to a file. Columns
+    preflight typed itself carry a note saying where the type came from.
+    """
+    repo_root = (repo_root or git_root(Path.cwd())).resolve()
+    try:
+        config = load_config(repo_root, config_path)
+    except ConfigError as exc:
+        _say(f"❌ Configuration error: {exc}")
+        raise typer.Exit(1) from None
+
+    if config.schema is not None and not force:
+        typer.echo(
+            f"`schema:` in {_relative(config.path or repo_root, repo_root)} already points at "
+            f"{config.describe_schema_source()}; nothing written. Edit that file, or pass "
+            "--force to derive a fresh schema anyway."
+        )
+        return
+
+    config_file = config.path or (config_path or repo_root / CONFIG_FILENAME).resolve()
+    try:
+        project = read_project(config.project_dir)
+    except DbtError as exc:
+        _say(f"❌ {exc}")
+        raise typer.Exit(1) from None
+    target = (output or default_output(config_file.parent, project.name)).resolve()
+    if target.exists() and not force:
+        _say(f"❌ {target} already exists. Pass --force to overwrite it.")
+        raise typer.Exit(1)
+
+    workdir = config.workdir
+    if workdir.exists():
+        shutil.rmtree(workdir)
+    workdir.mkdir(parents=True)
+    try:
+        dbml = _derive_schema_file(config, project, workdir)
+    except (SchemaError, DbtError) as exc:
+        _say(f"❌ {exc}")
+        raise typer.Exit(1) from None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(dbml, encoding="utf-8")
+
+    notes = count_notes(dbml)
+    tables = len(re.findall(r"^Table ", dbml, re.MULTILINE))
+    typer.echo(f"Wrote {_relative(target, repo_root)}: {tables} tables, {len(dbml):,} bytes.")
+    if any(notes.values()):
+        typer.echo(
+            f"{sum(notes.values())} columns carry a note saying where their type came from: "
+            + ", ".join(f"{n} {k}" for k, n in notes.items() if n)
+            + "."
+        )
+    shown = _relative(target, config_file.parent)
+    typer.echo("")
+    typer.echo("Next:")
+    typer.echo(f"  1. Add `schema: {shown}` to {_relative(config_file, repo_root)}.")
+    typer.echo("  2. Commit the file.")
+    typer.echo(
+        "  3. Refine it in model2data studio (https://studio.jbanalytica.com/?ref=dbt-preflight): "
+        "paste it into the editor,\n     or open the repository as a repository project."
+    )
+    if config.schema is not None:
+        typer.echo(
+            f"\n`schema:` already points at {config.describe_schema_source()}; "
+            "it is unchanged and the new file is not used until you edit it."
+        )
+
+
+def _derive_schema_file(config: PreflightConfig, project, workdir: Path) -> str:
+    """The DBML a run on the head would derive, as a file to keep. No warehouse, no base."""
+    profiles_dir = workdir / "profiles"
+    write_profiles(profiles_dir, project.profile, workdir / "preflight.duckdb")
+    _say(f"🛫 dbt preflight {__version__} · schema for project `{project.name}`")
+    runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
+    runner.deps()
+    manifest = Manifest.load(runner.parse())
+    catalog = _database_name(manifest, "preflight")
+    dialect = _project_dialect(config, project)
+    compiled = _compile_for_inference(
+        project, manifest, catalog, workdir, "compiled", config.env, dialect
+    )
+    _say(f"   {_compiled_line(compiled)}")
+    dbml, inferred = derive_dbml(manifest, compiled)
+    return annotate(dbml, manifest, inferred)
 
 
 if __name__ == "__main__":

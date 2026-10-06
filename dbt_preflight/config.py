@@ -8,6 +8,7 @@ project's `profiles.yml` and `sources.yml` expect to find.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,8 @@ class PreflightConfig:
     seed: int = 42
     locale: str | None = None
     env: dict[str, str] = field(default_factory=dict)
+    # dbt project vars, passed to every dbt invocation as `--vars`.
+    vars: dict[str, Any] = field(default_factory=dict)
     loader_columns: dict[str, dict[str, str]] = field(
         default_factory=lambda: {k: dict(v) for k, v in DEFAULT_LOADER_COLUMNS.items()}
     )
@@ -82,6 +85,21 @@ def _as_path(repo_root: Path, value: Any, key: str) -> Path:
     return (repo_root / value).resolve()
 
 
+def _json_value(value: Any, key: str) -> Any:
+    """A `vars:` value as JSON can carry it to `--vars`: a YAML date or timestamp becomes
+    its ISO string (`start_date: 2024-01-01` is a date to YAML, and a string to dbt
+    either way); anything else that is not plain JSON is refused."""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [_json_value(v, f"{key}[{i}]") for i, v in enumerate(value)]
+    if isinstance(value, dict):
+        return {str(k): _json_value(v, f"{key}.{k}") for k, v in value.items()}
+    raise ConfigError(f"`{key}` must be a string, number, boolean, list or mapping.")
+
+
 def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightConfig:
     """Build the config from `.dbt-preflight.yml` in `repo_root`, or from `config_path`.
 
@@ -112,6 +130,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
         "seed",
         "locale",
         "env",
+        "vars",
         "loader_columns",
         "dialect_failures",
         "check_all",
@@ -158,6 +177,10 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
     if not isinstance(env, dict):
         raise ConfigError("`env` must map variable names to values.")
     env = {str(k): str(v) for k, v in env.items()}
+    dbt_vars = raw.get("vars") or {}
+    if not isinstance(dbt_vars, dict):
+        raise ConfigError("`vars` must map dbt variable names to values.")
+    dbt_vars = {str(k): _json_value(v, f"vars.{k}") for k, v in dbt_vars.items()}
 
     loader_columns = {k: dict(v) for k, v in DEFAULT_LOADER_COLUMNS.items()}
     extra = raw.get("loader_columns") or {}
@@ -203,6 +226,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
         seed=seed,
         locale=raw.get("locale"),
         env=env,
+        vars=dbt_vars,
         loader_columns=loader_columns,
         dialect_failures=dialect_failures,
         check_all=check_all,

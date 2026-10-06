@@ -59,6 +59,8 @@ def test_verdict_passed() -> None:
         "failed_on_base": 0,
         "skipped_by_base": 0,
         "unverified_broken_on_base": 0,
+        "fixture_limited": 0,
+        "skipped_by_fixture_limited": 0,
     }
 
 
@@ -216,6 +218,7 @@ def test_preexisting_failures_have_their_own_list() -> None:
             "failures": 108,
             "base_failures": 108,
             "reading": None,
+            "guessed_inputs": [],
         }
     ]
     assert summary["counts"]["tests"] == {

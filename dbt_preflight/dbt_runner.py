@@ -145,6 +145,7 @@ class DbtRunner:
         log_path: Path,
         env: dict[str, str],
         target: str = TARGET_NAME,
+        dbt_vars: dict[str, Any] | None = None,
     ) -> None:
         self.project = project
         self.profiles_dir = profiles_dir
@@ -152,6 +153,15 @@ class DbtRunner:
         self.log_path = log_path
         self.env = env
         self.target = target
+        self.dbt_vars = dbt_vars or {}
+
+    def _vars_args(self) -> list[str]:
+        """`--vars` for every invocation when `.dbt-preflight.yml` sets `vars:`."""
+        if not self.dbt_vars:
+            return []
+        # `load_config` already turned dates into ISO strings; `default=str` is the backstop
+        # for a runner built some other way, so a stray value never crashes before a report.
+        return ["--vars", json.dumps(self.dbt_vars, sort_keys=True, default=str)]
 
     def _args(self, command: str, *extra: str) -> list[str]:
         return [
@@ -171,6 +181,7 @@ class DbtRunner:
             "--log-level-file",
             "info",
             "--no-use-colors",
+            *self._vars_args(),
             *extra,
         ]
 
@@ -210,6 +221,7 @@ class DbtRunner:
                 "--log-level",
                 "warn",
                 "--no-use-colors",
+                *self._vars_args(),
             ]
         )
         if not res.success:
@@ -336,3 +348,65 @@ class DbtRunner:
                 )
             )
         return outcome
+
+
+# How dbt names the model a compile aborted on: "Compilation Error in model stg_x (models/...)".
+_FAILED_MODEL = re.compile(r"Error in model (\w+) \(([^)\n]+)\)")
+
+
+@dataclass
+class CompileOutcome:
+    manifest: Path | None  # the manifest carrying `compiled_code`; None if nothing compiled
+    failed: list[str] = field(default_factory=list)  # unique ids left out because they failed
+
+
+def compile_models(
+    runner: DbtRunner,
+    selectors: dict[str, str],
+    paths: dict[str, str],
+    attempts: int = 25,
+) -> CompileOutcome:
+    """`dbt compile` the models in `selectors` ({unique_id: exact selector}), leaving out
+    each one that fails until the rest compile.
+
+    dbt aborts a whole compile on one model's compilation error (a macro that introspects a
+    relation the empty database does not have, `dbt_utils.get_column_values` for one), so
+    the failing model is identified - by its result's unique id, or by the file path the
+    error names, looked up in `paths` ({original_file_path: unique_id}) - excluded by its
+    exact selector, and the compile run again; the retries reuse the target path, so dbt's
+    partial parsing keeps them cheap. A selector, not a bare name: a name is matched against
+    every fqn part, so a model named like a package would exclude the package, and a
+    versioned model every version.
+
+    An abort leaves no manifest with compiled code, and the files it did write depend on
+    thread timing, so there is no partial result to keep: an error that names no model, or
+    a run of `attempts` failures, compiles nothing (`manifest` None) and the caller falls
+    back to raw SQL. Never raises.
+    """
+    failed: list[str] = []
+    if not selectors:
+        return CompileOutcome(manifest=None)
+    for _ in range(attempts):
+        extra = ["--select", *(selectors[u] for u in sorted(selectors) if u not in failed)]
+        if failed:
+            extra += ["--exclude", *(selectors[u] for u in failed)]
+        try:
+            res = runner._invoke(runner._args("compile", *extra), quiet=True)
+        except Exception:  # noqa: BLE001 - compiling is best effort, raw SQL still works
+            return CompileOutcome(manifest=None, failed=failed)
+        manifest = runner.target_path / "manifest.json"
+        if res.success:
+            return CompileOutcome(manifest=manifest if manifest.exists() else None, failed=failed)
+        uids: set[str] = set()
+        for _name, path in _FAILED_MODEL.findall(str(res.exception or "")):
+            if path.strip() in paths:
+                uids.add(paths[path.strip()])
+        for r in getattr(res.result, "results", None) or []:
+            status = str(getattr(r, "status", "")).split(".")[-1].lower()
+            if status == "error":
+                uids.add(r.node.unique_id)
+        uids = {u for u in uids if u in selectors} - set(failed)
+        if not uids:
+            break
+        failed = sorted(set(failed) | uids)
+    return CompileOutcome(manifest=None, failed=failed)

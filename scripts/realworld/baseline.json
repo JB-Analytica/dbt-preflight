@@ -1,12 +1,53 @@
 {
-  "preflight_version": "0.4.0",
+  "preflight_version": "0.5.0",
   "shas": {
     "jaffle_shop_classic": "fd7bfacae4f497ff044a6a0275268676bf1b64c3",
     "jaffle_shop_current": "5beb145b00f5465ec759cfcdd9745e858818cf95",
     "mattermost": "2fd40877b6dfab965b1b4cdb1dde133a884d4356",
-    "shopify": "03e91d7aeb83151f968105f8580d13110f5375e4"
+    "shopify": "03e91d7aeb83151f968105f8580d13110f5375e4",
+    "shopify_derived": "03e91d7aeb83151f968105f8580d13110f5375e4",
+    "dbt_ga4": "664be28505018ba6e5409a91e0aa1fce11d321dc"
   },
   "results": {
+    "dbt_ga4/full": {
+      "verdict": "failed",
+      "in_scope": 55,
+      "built": 0,
+      "failed": 0,
+      "skipped": 55,
+      "not_verified": 0,
+      "no_result": 0,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "rename_detected": null,
+      "wall_seconds": 12.6
+    },
+    "dbt_ga4/harmless": {
+      "verdict": "failed",
+      "in_scope": 55,
+      "built": 0,
+      "failed": 0,
+      "skipped": 55,
+      "not_verified": 0,
+      "no_result": 0,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "rename_detected": null,
+      "wall_seconds": 12.9
+    },
+    "dbt_ga4/rename": {
+      "verdict": "failed",
+      "in_scope": 55,
+      "built": 0,
+      "failed": 0,
+      "skipped": 55,
+      "not_verified": 0,
+      "no_result": 0,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "rename_detected": false,
+      "wall_seconds": 12.6
+    },
     "jaffle_shop_classic/full": {
       "verdict": "passed_with_warnings",
       "in_scope": 5,
@@ -18,7 +59,7 @@
       "tests_passed": 20,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 6.5
+      "wall_seconds": 7.4
     },
     "jaffle_shop_classic/harmless": {
       "verdict": "passed_with_warnings",
@@ -31,7 +72,7 @@
       "tests_passed": 20,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 6.5
+      "wall_seconds": 7.5
     },
     "jaffle_shop_classic/rename": {
       "verdict": "failed",
@@ -44,7 +85,7 @@
       "tests_passed": 15,
       "tests_failed": 2,
       "rename_detected": true,
-      "wall_seconds": 6.5
+      "wall_seconds": 7.7
     },
     "jaffle_shop_current/full": {
       "verdict": "passed_with_warnings",
@@ -57,7 +98,7 @@
       "tests_passed": 24,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 18.7
+      "wall_seconds": 23.2
     },
     "jaffle_shop_current/harmless": {
       "verdict": "passed_with_warnings",
@@ -70,7 +111,7 @@
       "tests_passed": 24,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 18.5
+      "wall_seconds": 22.6
     },
     "jaffle_shop_current/rename": {
       "verdict": "failed",
@@ -83,7 +124,7 @@
       "tests_passed": 18,
       "tests_failed": 3,
       "rename_detected": true,
-      "wall_seconds": 18.5
+      "wall_seconds": 22.0
     },
     "mattermost/full": {
       "verdict": "failed",
@@ -96,7 +137,7 @@
       "tests_passed": 7,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 6.9
+      "wall_seconds": 9.2
     },
     "mattermost/harmless": {
       "verdict": "failed",
@@ -109,7 +150,7 @@
       "tests_passed": 7,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 6.9
+      "wall_seconds": 9.3
     },
     "mattermost/rename": {
       "verdict": "failed",
@@ -122,46 +163,85 @@
       "tests_passed": 3,
       "tests_failed": 0,
       "rename_detected": true,
-      "wall_seconds": 6.8
+      "wall_seconds": 9.5
     },
     "shopify/full": {
       "verdict": "failed",
-      "in_scope": 89,
+      "in_scope": 92,
       "built": 81,
       "failed": 2,
-      "skipped": 6,
+      "skipped": 9,
       "not_verified": 0,
       "no_result": 0,
       "tests_passed": 34,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 30.1
+      "wall_seconds": 46.2
     },
     "shopify/harmless": {
-      "verdict": "passed_with_warnings",
-      "in_scope": 45,
+      "verdict": "failed",
+      "in_scope": 49,
       "built": 45,
       "failed": 0,
-      "skipped": 0,
+      "skipped": 4,
       "not_verified": 0,
       "no_result": 0,
       "tests_passed": 17,
       "tests_failed": 0,
       "rename_detected": null,
-      "wall_seconds": 27.7
+      "wall_seconds": 43.6
     },
     "shopify/rename": {
       "verdict": "failed",
-      "in_scope": 47,
+      "in_scope": 49,
       "built": 43,
       "failed": 2,
-      "skipped": 2,
+      "skipped": 4,
       "not_verified": 0,
       "no_result": 0,
       "tests_passed": 17,
       "tests_failed": 0,
       "rename_detected": true,
-      "wall_seconds": 27.7
+      "wall_seconds": 43.9
+    },
+    "shopify_derived/full": {
+      "verdict": "failed",
+      "in_scope": 96,
+      "built": 95,
+      "failed": 1,
+      "skipped": 0,
+      "not_verified": 0,
+      "no_result": 0,
+      "tests_passed": 50,
+      "tests_failed": 0,
+      "rename_detected": null,
+      "wall_seconds": 48.2
+    },
+    "shopify_derived/harmless": {
+      "verdict": "passed_with_warnings",
+      "in_scope": 52,
+      "built": 52,
+      "failed": 0,
+      "skipped": 0,
+      "not_verified": 0,
+      "no_result": 0,
+      "tests_passed": 24,
+      "tests_failed": 0,
+      "rename_detected": null,
+      "wall_seconds": 46.5
+    },
+    "shopify_derived/rename": {
+      "verdict": "failed",
+      "in_scope": 52,
+      "built": 46,
+      "failed": 3,
+      "skipped": 3,
+      "not_verified": 0,
+      "no_result": 0,
+      "tests_passed": 20,
+      "tests_failed": 0,
+      "rename_detected": true,
+      "wall_seconds": 45.0
     }
   }
 }

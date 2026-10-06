@@ -1,0 +1,13 @@
+version: 2
+
+models:
+  - name: stg_billing__creditors
+    columns:
+      - name: creditor_id
+        data_tests: [unique, not_null]
+      - name: creditor_number
+        data_tests: [unique, not_null]
+  - name: stg_billing__debtors
+    columns:
+      - name: debtor_number
+        data_tests: [unique, not_null]

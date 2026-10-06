@@ -17,6 +17,7 @@ hides a model.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,12 +91,114 @@ def _protect_relations(sql: str, dialect: str) -> str:
     return _QUOTED_RELATION.sub(repl, sql)
 
 
-def transpile_sql(sql: str, dialect: str) -> str:
-    """`sql` in `dialect`, rewritten for DuckDB. Raises SqlglotError when it cannot parse."""
-    statements = sqlglot.transpile(
-        _protect_relations(sql, dialect), read=dialect, write="duckdb", pretty=True
-    )
+_LEX = re.compile(
+    r"""(?P<comment>--[^\n]*|/\*.*?\*/)
+    |(?P<string>'{3}.*?'{3}|'(?:\\.|''|[^'\\])*')
+    |(?P<backtick>`[^`]*`)
+    |(?P<dq>"[^"`\n]*")
+    |(?P<word>[A-Za-z_][A-Za-z0-9_$]*)
+    |(?P<space>\s+)
+    |(?P<punct>.)""",
+    re.VERBOSE | re.DOTALL,
+)
+_SELECT_ITEM_START = {",", "select", "distinct"}
+_SELECT_ITEM_END = {",", "from", "as"}
+
+
+def _protect_identifiers(sql: str, dialect: str) -> str:
+    return _protect(sql, dialect)[0]
+
+
+def _protect(sql: str, dialect: str) -> tuple[str, set[str]]:
+    """dbt-rendered double-quoted identifiers as backticked ones, for a dialect where a
+    double-quoted token is a string.
+
+    dbt renders for the DuckDB target, so a macro quotes identifiers with double quotes:
+    `dbt_utils.star` writes `"customer_id",\n  "email"`, which BigQuery's grammar reads as
+    string literals (`SELECT 'customer_id'`). A double-quoted token is taken for an
+    identifier where only an identifier can stand: next to a `.` (`"db"."schema"."t"`,
+    `t."col"`), after `as`, or alone as an item of a select list, outside any function
+    call. Everywhere else (`status = "paid"`, `concat(a, "-")`) it stays BigQuery's string,
+    and single-quoted strings, backticks and comments are never touched."""
+    if dialect not in _BACKTICK_DIALECTS:
+        return sql, set()
+    rewritten: set[str] = set()
+    tokens = [(m.lastgroup, m.group()) for m in _LEX.finditer(sql)]
+    significant = [i for i, (kind, _) in enumerate(tokens) if kind not in {"space", "comment"}]
+
+    def key(i: int) -> str | None:
+        kind, text = tokens[i]
+        return text.lower() if kind in {"word", "punct"} else kind
+
+    frames = [{"call": False, "select": False}]  # one per parenthesis level
+    out = [text for _, text in tokens]
+    for n, i in enumerate(significant):
+        kind, text = tokens[i]
+        prev = key(significant[n - 1]) if n > 0 else None
+        nxt = key(significant[n + 1]) if n + 1 < len(significant) else None
+        if kind == "punct" and text == "(":
+            frames.append({"call": nxt not in {"select", "with"}, "select": False})
+        elif kind == "punct" and text == ")" and len(frames) > 1:
+            frames.pop()
+        elif kind == "word" and text.lower() == "select":
+            frames[-1]["select"] = True
+        elif kind == "word" and text.lower() == "from":
+            frames[-1]["select"] = False
+        elif kind == "dq" and len(text) > 2:
+            frame = frames[-1]
+            select_item = (
+                frame["select"]
+                and not frame["call"]
+                and prev in _SELECT_ITEM_START
+                and (nxt in _SELECT_ITEM_END or nxt is None)
+            )
+            if prev == "." or nxt == "." or prev == "as" or select_item:
+                out[i] = f"`{text[1:-1]}`"
+                rewritten.add(text[1:-1])
+    return "".join(out), rewritten
+
+
+def _transpile(sql: str, dialect: str) -> str:
+    statements = sqlglot.transpile(sql, read=dialect, write="duckdb", pretty=True)
     return ";\n\n".join(s for s in statements if s.strip())
+
+
+def _about(error: str, names: set[str]) -> bool:
+    """Whether DuckDB's error is a binder error naming one of `names`: a column the
+    identifier reading looked for and did not find."""
+    lowered = error.lower()
+    return "binder error" in lowered and any(f'"{n.lower()}"' in lowered for n in names)
+
+
+def transpile_sql(
+    sql: str, dialect: str, explain: Callable[[str], str | None] | None = None
+) -> str:
+    """`sql` in `dialect`, rewritten for DuckDB. Raises SqlglotError when it cannot parse.
+
+    Read with dbt's double-quoted identifiers kept as identifiers (`_protect_identifiers`).
+    `explain`, when given, asks DuckDB to plan a result: None when it can, else its error.
+    Only when the identifier reading fails for a reason other than one of those identifiers
+    being missing does the plain reading (relation names only, every other double-quoted
+    token a string) get a chance, and only if DuckDB can plan it. A missing column stays a
+    missing column: read as a string constant it would quietly pass a broken model."""
+    protected, names = _protect(sql, dialect)
+    plain = _protect_relations(sql, dialect)
+    try:
+        out = _transpile(protected, dialect)
+    except SqlglotError:
+        if plain == protected:
+            raise
+        return _transpile(plain, dialect)
+    if explain is None or plain == protected:
+        return out
+    error = explain(out)
+    if error is None or _about(error, names):
+        return out
+    try:
+        alternative = _transpile(plain, dialect)
+    except SqlglotError:
+        return out
+    return alternative if explain(alternative) is None else out
 
 
 @dataclass
@@ -147,15 +250,19 @@ class TranspileHook:
         dbt compiles a node right before it runs it, so its upstream relations exist by
         then. EXPLAIN plans without executing.
         """
+        return self.db_path is not None and self._duckdb_error(sql) is None
+
+    def _duckdb_error(self, sql: str) -> str | None:
+        """DuckDB's error planning `sql`, or None when it plans (`_duckdb_accepts`)."""
         if self.db_path is None:
-            return False
+            return "no database"
         try:
             if self._con is None:
                 self._con = duckdb.connect(str(self.db_path))
             self._con.execute(f"explain {sql}")
-            return True
-        except duckdb.Error:
-            return False
+            return None
+        except duckdb.Error as exc:
+            return str(exc)
 
     def _rewrite(self, node: Any) -> None:
         rtype = str(getattr(node, "resource_type", "")).split(".")[-1].lower()
@@ -171,7 +278,8 @@ class TranspileHook:
             self.accepted.append(node.name)
             return
         try:
-            node.compiled_code = transpile_sql(code, self.dialect)
+            explain = self._duckdb_error if self.db_path is not None else None
+            node.compiled_code = transpile_sql(code, self.dialect, explain)
             self.rewritten.append(node.name)
         except SqlglotError as exc:
             self.unparsed[node.name] = str(exc).splitlines()[0][:200]

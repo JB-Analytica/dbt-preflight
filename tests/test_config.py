@@ -55,6 +55,8 @@ def test_full_config_file(tmp_path: Path) -> None:
         ("schema: missing.dbml\n", "does not exist"),
         ("project_dir: nowhere\n", "No dbt_project.yml"),
         ("surprise: 1\n", "Unknown keys"),
+        ("vars: [a, b]\n", "`vars`"),
+        ("vars:\n  blob: !!binary aGk=\n", "`vars.blob`"),
     ],
 )
 def test_bad_values_are_rejected(tmp_path: Path, body: str, fragment: str) -> None:
@@ -76,3 +78,35 @@ def test_version_matches_the_packaging_metadata() -> None:
     pyproject = Path(__file__).parent.parent / "pyproject.toml"
     declared = tomllib.loads(pyproject.read_text())["project"]["version"]
     assert __version__ == declared
+
+
+def test_vars_are_read_and_passed_to_every_dbt_invocation(tmp_path: Path) -> None:
+    from dbt_preflight.dbt_runner import DbtProject, DbtRunner
+
+    repo = _repo(tmp_path)
+    (repo / CONFIG_FILENAME).write_text("vars:\n  shopify_api: rest\n  flags: {a: 1}\n")
+    config = load_config(repo)
+    assert config.vars == {"shopify_api": "rest", "flags": {"a": 1}}
+    project = DbtProject(
+        dir=repo, name="p", profile="p", model_paths=["models"], has_packages=False
+    )
+    runner = DbtRunner(project, tmp_path, tmp_path, tmp_path, {}, dbt_vars=config.vars)
+    args = runner._args("compile")
+    assert args[args.index("--vars") + 1] == '{"flags": {"a": 1}, "shopify_api": "rest"}'
+    plain = DbtRunner(project, tmp_path, tmp_path, tmp_path, {})
+    assert "--vars" not in plain._args("compile")
+
+
+def test_a_date_in_vars_is_passed_as_its_iso_string(tmp_path: Path) -> None:
+    from dbt_preflight.dbt_runner import DbtProject, DbtRunner
+
+    repo = _repo(tmp_path)
+    (repo / CONFIG_FILENAME).write_text("vars:\n  start_date: 2024-01-01\n  days: [2024-01-02]\n")
+    config = load_config(repo)
+    assert config.vars == {"start_date": "2024-01-01", "days": ["2024-01-02"]}
+    project = DbtProject(
+        dir=repo, name="p", profile="p", model_paths=["models"], has_packages=False
+    )
+    runner = DbtRunner(project, tmp_path, tmp_path, tmp_path, {}, dbt_vars=config.vars)
+    args = runner._args("compile")
+    assert args[args.index("--vars") + 1] == '{"days": ["2024-01-02"], "start_date": "2024-01-01"}'

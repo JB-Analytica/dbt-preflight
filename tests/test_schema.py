@@ -9,6 +9,7 @@ from dbt_preflight.schema import (
     SchemaError,
     _model_source_columns,
     derive_dbml,
+    derive_schema,
     resolve_schema,
 )
 
@@ -32,22 +33,29 @@ def test_derived_dbml_parses_with_model2data(manifest: Manifest, tmp_path) -> No
     assert (tmp_path / "derived.dbml").exists()
 
 
-def test_untyped_source_column_is_an_error(raw_manifest: dict) -> None:
+def test_untyped_source_column_becomes_a_flagged_varchar(raw_manifest: dict) -> None:
+    # Untyped, and the staging model's SQL says nothing about it: text, listed as guessed
+    # and as unknown, never a stop.
     raw_manifest["sources"]["source.p.shop.orders"]["columns"]["ordered_at"] = {
         "name": "ordered_at"
     }
     manifest = Manifest.from_dict(raw_manifest)
-    with pytest.raises(SchemaError) as exc:
-        derive_dbml(manifest)
-    assert "- name: ordered_at" in str(exc.value)
-    assert "data_type: <type>" in str(exc.value)
+    dbml, inferred = derive_dbml(manifest)
+    assert "  ordered_at varchar\n" in dbml
+    [orders] = inferred
+    assert orders.unknown_columns == ["ordered_at"]
+    assert "ordered_at" in orders.guessed_columns
 
 
 def test_source_without_columns_is_an_error(raw_manifest: dict) -> None:
     raw_manifest["sources"]["source.p.shop.orders"]["columns"] = {}
     manifest = Manifest.from_dict(raw_manifest)
-    with pytest.raises(SchemaError, match="every column the staging model reads"):
+    with pytest.raises(SchemaError) as exc:
         derive_dbml(manifest)
+    text = str(exc.value)
+    assert "No columns are known for `shop.orders`" in text
+    assert "`schema:`" in text and "dbt-preflight schema" in text
+    assert "every column the staging model reads" in text
 
 
 def test_explicit_dbml_file_wins(manifest: Manifest, tmp_path) -> None:
@@ -273,8 +281,9 @@ def test_declared_data_type_is_kept_over_inference() -> None:
     assert "id" in inferred[0].guessed_columns
 
 
-def test_source_read_by_no_model_still_errors(jaffle_manifest: Manifest) -> None:
-    """A source inference cannot help either (no columns, no reading model) still errors."""
+def test_source_read_by_nothing_is_skipped(jaffle_manifest: Manifest, tmp_path) -> None:
+    """A source no model, snapshot or test reads, and that nothing types, gets no fixture
+    and stops nothing."""
     src_products = "source.jaffle_shop.jaffle_shop.products"
     manifest = jaffle_manifest
     manifest.sources[src_products] = SourceTable(
@@ -286,14 +295,20 @@ def test_source_read_by_no_model_still_errors(jaffle_manifest: Manifest) -> None
         schema="raw_jaffle_shop",
         loader="",
     )
-    with pytest.raises(SchemaError) as exc:
-        derive_dbml(manifest)
-    text = str(exc.value)
-    assert "every column the staging model reads" in text
-    assert "- name: products" in text
+    derived = derive_schema(manifest)
+    assert "Table products" not in derived.text
+    assert derived.skipped == ["jaffle_shop.products"]
+    resolved = resolve_schema(None, manifest, tmp_path)
+    assert resolved.skipped == ["jaffle_shop.products"]
 
 
-def test_untyped_sources_get_a_yaml_patch(raw_manifest: dict) -> None:
+def test_a_fully_typed_source_nothing_reads_keeps_its_fixture(raw_manifest: dict) -> None:
+    raw_manifest["nodes"] = {}
+    derived = derive_schema(Manifest.from_dict(raw_manifest))
+    assert "Table customers" in derived.text and derived.skipped == []
+
+
+def test_a_read_source_with_no_columns_known_errors_with_a_patch(raw_manifest: dict) -> None:
     raw_manifest["sources"]["source.p.shop.orders"]["columns"]["ordered_at"] = {
         "name": "ordered_at"
     }
@@ -302,15 +317,13 @@ def test_untyped_sources_get_a_yaml_patch(raw_manifest: dict) -> None:
     with pytest.raises(SchemaError) as exc:
         derive_dbml(manifest)
     text = str(exc.value)
-    assert "as YAML to paste into the sources file" in text
+    assert "No columns are known for `shop.customers`" in text
     assert "  - name: shop\n    tables:\n" in text
     assert (
         "      - name: customers\n        columns:  # every column the staging model reads" in text
     )
-    assert (
-        "      - name: orders\n        columns:\n          - name: ordered_at\n            data_type: <type>"
-        in text
-    )
+    # The untyped column of a source with columns is no longer part of the error.
+    assert "ordered_at" not in text
 
 
 def _single_model_manifest(source_name: str, table: str, raw_code: str) -> Manifest:

@@ -6,6 +6,12 @@ have stamped on, casts everything to the DBML type, and loads it. model2data's o
 warnings about the data it generated (columns it had to fill with generic text, tables
 stuck in an unresolved foreign-key cycle, ...) are collected onto the summary too, so the
 comment can tell a weak fixture from a strong one.
+
+A text column some model reads with a JSON function gets JSON instead of model2data's text,
+with every path the SQL reads present (`json_columns.py`): from the column's note in the
+DBML (`JSON, keys read: ...`) and from what the project's SQL reads, traced back to the
+source (`schema.json_reads`). The values come from the seed and the table and column names
+alone, and keep the column's nulls.
 """
 
 from __future__ import annotations
@@ -26,6 +32,14 @@ from model2data.parse.dbml import get_parse_warnings
 from model2data.utils import normalize_identifier
 
 from dbt_preflight.config import PreflightConfig
+from dbt_preflight.json_columns import (
+    JSON_CAPABLE_TYPES,
+    Shape,
+    json_values,
+    merge_shape,
+    opted_out,
+    parse_note,
+)
 from dbt_preflight.manifest import SourceTable
 from dbt_preflight.schema import InferredSource, ResolvedSchema, source_table_names
 
@@ -60,17 +74,45 @@ class LoadedTable:
 
 
 @dataclass
+class JsonColumn:
+    """A source column filled with JSON, and the shape it was filled with."""
+
+    schema: str
+    identifier: str
+    table: str  # the DBML table name, part of the values' seed
+    column: str
+    shape: Shape
+
+
+@dataclass
 class FixtureSummary:
     tables: list[LoadedTable] = field(default_factory=list)
     unmatched_sources: list[str] = field(default_factory=list)
     unused_dbml_tables: list[str] = field(default_factory=list)
     inferred_sources: list[InferredSource] = field(default_factory=list)
+    # "<source>.<table>" of the sources nothing reads, given no fixture (derived schema).
+    skipped_sources: list[str] = field(default_factory=list)
     # model2data's own warnings about the data it generated, surfaced so a reviewer can
     # tell a weak fixture (placeholder text, an unresolved cycle) from a strong one.
     unmapped_columns: list[tuple[str, str]] = field(default_factory=list)
     cyclic_tables: list[str] = field(default_factory=list)
     unresolved_composite_keys: list[str] = field(default_factory=list)
     parse_warnings: list[str] = field(default_factory=list)
+    # "<identifier>.<column>" of the text columns filled with JSON, because a model reads
+    # them with a JSON function (or the schema's note says one does).
+    json_columns: list[str] = field(default_factory=list)
+    # (source unique_id, column) -> how it was filled, for `widen_json`. Not in the summary.
+    json_shapes: dict[tuple[str, str], JsonColumn] = field(default_factory=dict)
+    # "<identifier>.<column>: <path>" for keys only the pull request reads, null in the
+    # fixture (`widen_json`).
+    json_new_keys: list[str] = field(default_factory=list)
+    # Only one branch compiled, so new JSON keys were found from raw SQL alone.
+    json_keys_partly_compared: bool = False
+
+    @property
+    def guessed_sources(self) -> int:
+        """Sources with at least one column whose type preflight guessed."""
+        return sum(1 for s in self.inferred_sources if s.guessed_columns)
 
     @property
     def total_rows(self) -> int:
@@ -118,6 +160,7 @@ def build_fixtures(
     used: set[str] = set()
     summary = FixtureSummary(
         inferred_sources=schema.inferred,
+        skipped_sources=list(schema.skipped),
         unmapped_columns=get_unmapped_columns(),
         cyclic_tables=get_cyclic_tables(),
         unresolved_composite_keys=get_unresolved_composite_keys(),
@@ -126,9 +169,13 @@ def build_fixtures(
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
+    unfilled_text: set[str] = set()  # text columns left as model2data made them
     try:
         table_names = source_table_names(sources)
+        skipped = set(schema.skipped)
         for src in sources:
+            if f"{src.source_name}.{src.name}" in skipped:
+                continue
             # A derived schema writes two same-named source tables under distinct names.
             match = (
                 by_key.get(normalize_identifier(table_names[src.unique_id]))
@@ -147,6 +194,17 @@ def build_fixtures(
                 if col not in df.columns:
                     df[col] = _loader_values(col, table_name, len(df), config.seed)
 
+            for col, shape in _fill_json(df, schema, src, table_name, config.seed):
+                summary.json_columns.append(f"{src.identifier}.{col}")
+                summary.json_shapes[(src.unique_id, col.lower())] = JsonColumn(
+                    src.schema, src.identifier, table_name, col, shape
+                )
+            unfilled_text |= {
+                c.name
+                for c in schema.tables[table_name].columns
+                if c.data_type.strip().lower().split("(")[0] in JSON_CAPABLE_TYPES
+                and (src.unique_id, c.name.lower()) not in summary.json_shapes
+            }
             _load(con, src.schema, src.identifier, df, schema.tables[table_name], loader_cols)
             summary.tables.append(
                 LoadedTable(
@@ -161,7 +219,109 @@ def build_fixtures(
         con.close()
 
     summary.unused_dbml_tables = sorted(set(generated) - used)
+    # model2data counted these as placeholder text; they hold JSON now. Its list names
+    # columns without their table, so a name is dropped only when no text column of that
+    # name anywhere was left as placeholder text.
+    filled = {c.split(".", 1)[1] for c in summary.json_columns} - unfilled_text
+    summary.unmapped_columns = [(c, t) for c, t in summary.unmapped_columns if c not in filled]
     return summary
+
+
+def _fill_json(
+    df: pd.DataFrame, schema: ResolvedSchema, src: SourceTable, table_name: str, seed: int
+) -> list[tuple[str, Shape]]:
+    """Replace, in place, the values of the columns read as JSON; return their names and
+    shapes.
+
+    Only a text column (or one typed `json`) qualifies: a column the schema types as a
+    number or a date stays what the schema says, whatever a model does with it. A column
+    whose note says `not JSON` is left alone too, whatever the SQL does."""
+    filled: list[tuple[str, Shape]] = []
+    for col in schema.tables[table_name].columns:
+        base = col.data_type.strip().lower().split("(")[0]
+        if base not in JSON_CAPABLE_TYPES or col.name not in df.columns:
+            continue
+        if opted_out(col.description):
+            continue
+        noted = parse_note(col.description)
+        read = schema.json_reads.get((src.unique_id, col.name.lower()))
+        if noted is None and read is None:
+            continue
+        shape = merge_shape(dict(noted or {}), read or {})
+        present = df[col.name].notna().tolist()
+        df[col.name] = json_values(shape, table_name, col.name, seed, present)
+        filled.append((col.name, shape))
+    return filled
+
+
+def widen_json(
+    db_path: Path,
+    summary: FixtureSummary,
+    base_reads: dict[tuple[str, str], Shape],
+    seed: int,
+    compare: tuple[dict[tuple[str, str], Shape], dict[tuple[str, str], Shape]] | None = None,
+) -> None:
+    """Refill the JSON columns with the base branch's paths as well as the head's.
+
+    The fixtures are built from the head before the base is parsed, so a path only the
+    base reads (`$.amount`, renamed to `$.amout` on the pull request) was missing, and
+    the base read NULLs where real data has values. Every path either side reads is put
+    in. A path only the head reads, on a column the base reads as JSON too, is put in as a
+    JSON null: the pull request's typo then reads NULL, as it would on real data that
+    lacks the key, instead of validating itself; `json_new_keys` lists them for the
+    comment. A column only the head parses keeps every value, so a new model reading JSON
+    is checked on real values.
+
+    `compare` (head reads, base reads) is for when the two sides were not read alike (only
+    one compiled): a side without its compiled SQL misses macro-hidden paths, so the new
+    keys are found from the raw SQL of both, which they read alike, and
+    `json_keys_partly_compared` says a key renamed inside a macro could not be caught.
+
+    Both branches build on this one fixture, so neither side's paths make the source
+    count as reshaped (`cli._reshaped_sources` leaves the JSON notes out)."""
+    updates: list[tuple[JsonColumn, Shape, set[str]]] = []
+    if compare is not None:
+        summary.json_keys_partly_compared = True
+    for key, filled in sorted(summary.json_shapes.items()):
+        base = base_reads.get(key)
+        if base is None:
+            continue
+        union = merge_shape(dict(filled.shape), base)
+        if compare is None:
+            new = {p for p in filled.shape if p and p not in base}
+        else:
+            head_raw, base_raw = compare[0].get(key, {}), compare[1].get(key)
+            new = {p for p in head_raw if p and p not in base_raw} if base_raw else set()
+        if union == filled.shape and not new:
+            continue
+        updates.append((filled, union, new))
+    if not updates:
+        return
+    con = duckdb.connect(str(db_path))
+    try:
+        for filled, union, new in updates:
+            relation = f'"{filled.schema}"."{filled.identifier}"'
+            col = f'"{filled.column}"'
+            rows = con.execute(
+                f"select rowid, {col} is not null from {relation} order by rowid"
+            ).fetchall()
+            ids = [r[0] for r in rows]
+            values = json_values(
+                union, filled.table, filled.column, seed, [r[1] for r in rows], new
+            )
+            frame = pd.DataFrame({"i": ids, "v": values})
+            con.register("_preflight_json", frame)
+            con.execute(
+                f"update {relation} set {col} = _preflight_json.v from _preflight_json "
+                f"where {relation}.rowid = _preflight_json.i"
+            )
+            con.unregister("_preflight_json")
+            filled.shape = union
+            summary.json_new_keys += [
+                f"{filled.identifier}.{filled.column}: {p}" for p in sorted(new)
+            ]
+    finally:
+        con.close()
 
 
 def _load(

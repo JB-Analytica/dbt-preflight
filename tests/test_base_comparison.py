@@ -330,10 +330,13 @@ def _break_int_orders_on_base(repo: Path) -> None:
     )
 
 
-def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_path: Path) -> None:
+def test_a_model_broken_on_base_too_is_flagged_and_what_the_change_reaches_counts(
+    webshop: Path, tmp_path: Path
+) -> None:
     # The pull request touches staging customers; the intermediate model is broken on main
-    # already, and the marts reading it are skipped on both branches. None of that is the
-    # change's doing: flagged at the top, not failed, not blamed.
+    # already. It is flagged at the top, not failed, not blamed. The mart reading both it
+    # and staging customers is skipped on both branches, but the change reaches it through
+    # staging customers, so its skip counts: the change to it was never checked.
     _break_int_orders_on_base(webshop)
     _commit_base_then_branch(webshop)
     _edit(
@@ -344,8 +347,8 @@ def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_pat
     )
 
     code, body, summary = _run(webshop, tmp_path)
-    assert code == 0, body
-    assert summary["verdict"] == "passed_with_warnings"
+    assert code == 1, body
+    assert summary["verdict"] == "failed"
     [broken] = summary["broken_on_base_models"]
     assert broken["name"] == "int_orders__items_aggregated"
     assert '"discount" not found' in broken["error"]
@@ -353,13 +356,13 @@ def test_a_model_broken_on_base_too_is_flagged_not_failed(webshop: Path, tmp_pat
     assert summary["counts"]["models"]["failed_on_base"] == 1
     statuses = {m["name"]: m for m in summary["models"]}
     assert statuses["dim_customers"]["status"] == "skipped"
-    assert statuses["dim_customers"]["skipped_by_base"]
-    assert summary["counts"]["models"]["skipped"] == 0
+    assert not statuses["dim_customers"]["skipped_by_base"]
+    assert summary["counts"]["models"]["skipped"] >= 1
 
     top = body.split("### ⚠️ Broken on main too (1)")[1].split("### Changed models")[0]
     assert "These models also fail on `main`, without this change:" in top
     assert "- `int_orders__items_aggregated` — " in top
-    assert "Skipped because of it: " in top and "`dim_customers`" in top
+    assert "`dim_customers`" in top and "because the change reaches" in top
     assert "Unchanged models this change breaks" not in body
     assert "### Build errors" not in body
 
@@ -638,9 +641,8 @@ def test_a_model_broken_on_base_that_the_change_reaches_could_not_be_checked(
     assert summary["counts"]["models"]["unverified_broken_on_base"] == 1
     assert summary["broken_on_base_models"] == []
     section = body.split("### ❓ Could not be checked (1)")[1].split("###")[0]
-    assert "- `fct_orders` — fails on `main` too, and this change reaches it from upstream" in (
-        section
-    )
+    assert "- `fct_orders` — this change reaches it from upstream" in section
+    assert "fails on `main` too, the same way" in section
     assert "(`stg_webshop__orders`)" in section
     if "Unchanged models this change breaks" in body:
         breaks = body.split("Unchanged models this change breaks")[1].split("###")[0]
@@ -658,3 +660,54 @@ def test_a_new_hard_coded_table_reads_as_one(webshop: Path, tmp_path: Path) -> N
         "reads `finance.fx_rates`, which no model, seed or source in this project builds "
         "(a hard-coded table?)"
     ) in body.split("### Build errors")[1]
+
+
+def test_a_failure_over_a_guessed_column_is_not_broken_on_main(tmp_path: Path) -> None:
+    # Both staging models fail on both branches with the same error (they read a table no
+    # branch builds). One reads `status`, whose type preflight guessed: its failure may be
+    # the guess, so it cannot count as "broken on main". The other reads only typed columns.
+    repo = tmp_path / "guessed"
+    _write(
+        repo,
+        "dbt_project.yml",
+        'name: guessed\nversion: "1.0.0"\nconfig-version: 2\nprofile: guessed\n'
+        'model-paths: ["models"]\nflags:\n  send_anonymous_usage_stats: false\n',
+    )
+    _write(
+        repo,
+        "models/staging/_sources.yml",
+        "version: 2\nsources:\n  - name: shop\n    schema: raw\n    tables:\n"
+        "      - name: orders\n        columns:\n          - name: id\n            data_type: integer\n"
+        "          - name: status\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_status.sql",
+        "select o.id, o.status from finance.nowhere as n\n"
+        "join {{ source('shop', 'orders') }} as o on n.id = o.id\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_ids.sql",
+        "select o.id from finance.nowhere as n\n"
+        "join {{ source('shop', 'orders') }} as o on n.id = o.id\n",
+    )
+    _write(repo, "models/marts/m_status.sql", "select id from {{ ref('stg_status') }}\n")
+    _write(repo, "models/marts/m_ids.sql", "select id from {{ ref('stg_ids') }}\n")
+    _commit_base_then_branch(repo)
+    for mart in ("m_status", "m_ids"):
+        path = repo / f"models/marts/{mart}.sql"
+        path.write_text("-- touched\n" + path.read_text())
+    _git(repo, "commit", "-qam", "touch the marts")
+
+    code, body, summary = _run(repo, tmp_path, config=False)
+    assert [m["name"] for m in summary["broken_on_base_models"]] == ["stg_ids"]
+    # The change (the marts) does not reach `stg_status`: preflight's data cannot build it,
+    # a warning. The marts it skips are modified, so they still count.
+    assert summary["unverified_broken_on_base_models"] == []
+    [limited] = summary["fixture_limited_models"]
+    assert limited["name"] == "stg_status"
+    assert limited["guessed_inputs"] == ["orders.status"]
+    assert "reads `orders.status`, whose type preflight guessed" in body
+    assert "Preflight's generated data cannot build this model" in body
+    assert summary["verdict"] == "failed"
