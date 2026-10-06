@@ -495,6 +495,11 @@ def render(report: PreflightReport) -> str:
     lines.append(f"## 🛫 dbt preflight: {verdict}")
     lines.append("")
 
+    headline_text = headline_line(report)
+    if headline_text:
+        lines.append(headline_text)
+        lines.append("")
+
     if report.nothing_changed:
         lines.append("No models changed against the base branch, so there was nothing to build.")
         lines.append("")
@@ -897,6 +902,114 @@ def _pct_delta(base: float | int | None, head: float | int | None) -> str:
 
 def _delta(m: MetricDiff) -> str:
     return _pct_delta(m.base, m.head)
+
+
+# The folder under models/ the headline counts as "marts". Preflight does not carry the
+# conventions into the report, so the layer is read from the model's path.
+_MART_FOLDER = "marts"
+
+
+def _is_mart(m: ModelReport) -> bool:
+    return _MART_FOLDER in m.path.replace("\\", "/").split("/")[:-1]
+
+
+def _metric_size(m: MetricDiff) -> tuple[float, str, str]:
+    """Sort key for the biggest mover: absolute relative change; a metric whose base is zero
+    or missing is as big as it gets. Ties break on label, then name, so the pick is stable."""
+    if m.base is None or m.head is None or float(m.base) == 0:
+        size = float("inf")
+    else:
+        size = abs(float(m.head) - float(m.base)) / abs(float(m.base))
+    return (size, m.label, m.name)
+
+
+def _top_metric(report: PreflightReport) -> MetricDiff | None:
+    moved = [m for d in report.diffs for m in d.moved_metrics]
+    if not moved:
+        return None
+    # Largest size first, then alphabetical label and name.
+    return min(moved, key=lambda m: (-_metric_size(m)[0], _metric_size(m)[1], _metric_size(m)[2]))
+
+
+def headline(report: PreflightReport) -> dict[str, Any] | None:
+    """The one-line answer to "what did this pull request do", as data.
+
+    None when there is nothing to say: preflight could not run, or nothing changed. Without
+    a base branch there is no change to measure, so only the failures and what could not be
+    checked are filled in; `moved_metrics`, `top_metric`, `touched_models` and
+    `value_changed_models` are None then.
+    """
+    if report.fatal or report.nothing_changed:
+        return None
+    compared = report.base_ref is not None
+    top = _top_metric(report) if compared else None
+    value_changed = (
+        sum(1 for d in report.diffs if d.base_exists and (d.rows_changed or d.rows_differing))
+        if compared
+        else None
+    )
+    data: dict[str, Any] = {
+        # Failing models and new failing tests, plus convention errors, which fail the run
+        # as surely: "no new failures" under a red verdict would mislead. Models that could
+        # not be checked are counted apart, in `unverified`.
+        "new_failures": len(report.build_error_models)
+        + len(report.failing_tests)
+        + len(report.error_violations),
+        "moved_metrics": sum(len(d.moved_metrics) for d in report.diffs) if compared else None,
+        "metrics_defined": report.metrics_defined,
+        "top_metric": (
+            {"name": top.name, "label": top.label, "base": top.base, "head": top.head}
+            if top
+            else None
+        ),
+        "value_changed_models": value_changed,
+        "touched_models": len(report.models) if compared else None,
+        "touched_marts": sum(1 for m in report.models if _is_mart(m)) if compared else None,
+        "unverified": len(report.unverified_broken_models) + len(report.unverified_models),
+        "broken_on_base": len(report.broken_on_base_models),
+        # The change does not reach these, and preflight's generated data cannot build
+        # them: a warning, like broken on the base, not a failure.
+        "fixture_limited": len(report.fixture_limited_models),
+    }
+    data["text"] = _headline_text(report, data, top)
+    return data
+
+
+def _count(n: int, singular: str, plural: str | None = None) -> str:
+    return f"{n:,} {singular if n == 1 else plural or singular + 's'}"
+
+
+def _headline_text(report: PreflightReport, h: dict[str, Any], top: MetricDiff | None) -> str:
+    failures = h["new_failures"]
+    parts = [_count(failures, "new failure") if failures else "No new failures"]
+    moved = h["moved_metrics"]
+    if moved:
+        detail = ""
+        if top is not None:
+            delta = _delta(top)
+            detail = f" ({top.label}{'' if delta == '–' else f' {delta}'})"
+        parts.append(f"moves {_count(moved, 'metric')}{detail}")
+    elif moved == 0 and h["metrics_defined"]:
+        parts.append("moves no metrics")
+    elif h["value_changed_models"]:
+        parts.append(f"changes values in {_count(h['value_changed_models'], 'model')}")
+    if h["touched_models"] is not None:
+        if h["touched_marts"]:
+            parts.append(f"touches {_count(h['touched_marts'], 'mart')}")
+        else:
+            parts.append(f"touches {_count(h['touched_models'], 'model')}")
+    if h["unverified"]:
+        parts.append(f"{h['unverified']:,} could not be checked")
+    if h["broken_on_base"]:
+        parts.append(f"{h['broken_on_base']:,} broken on {_base_name(report)}")
+    if h["fixture_limited"]:
+        parts.append(f"{h['fixture_limited']:,} cannot be built on generated data")
+    return " · ".join(parts)
+
+
+def headline_line(report: PreflightReport) -> str | None:
+    h = headline(report)
+    return h["text"] if h else None
 
 
 def _metric_label(m: MetricDiff) -> str:

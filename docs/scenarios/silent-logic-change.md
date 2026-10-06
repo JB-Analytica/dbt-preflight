@@ -9,7 +9,9 @@ Expected: **pass**. Got: **pass**.
 <!-- dbt-preflight -->
 ## 🛫 dbt preflight: ✅ passed
 
-Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 convention issues · 9.9 s
+No new failures · moves 3 metrics (Average lifetime orders +4.8%) · touches 3 marts
+
+Built 7 of 7 models (1 changed) against synthetic data · 44 tests · 0 convention issues · 6.4 s
 
 ### Changed models
 
@@ -43,7 +45,7 @@ Synthetic source data from webshop.dbml, seed 42: 4 tables, 3,010 rows.
 
 `customers` 150, `products` 60, `orders` 800, `order_items` 2,000
 
-Compared against base `main`, head `c6a4ec0`.
+Compared against base `main`, head `d0d823f`.
 </details>
 
 <details><summary>What this checks, and what it cannot</summary>

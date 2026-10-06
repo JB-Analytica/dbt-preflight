@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A one-line summary directly under the verdict heading of the comment: new failures, the
+  metrics moved (naming the biggest, with its delta), models or marts touched, and what
+  could not be checked or is broken on the base branch, e.g. `No new failures · moves 3
+  metrics (Total lifetime value +4.6%) · touches 6 marts`. Parts that are zero are left out.
+  The summary JSON gains `headline` with the same fields (schema version unchanged).
 - `dbt-preflight schema` writes the schema a run derives from the project as a DBML file to
   keep and refine in model2data studio. It does the head's derivation (sources.yml, staging
   SQL, compiled SQL) with no warehouse, credentials or base ref. Columns `sources.yml` did
