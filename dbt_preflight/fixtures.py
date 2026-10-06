@@ -73,6 +73,11 @@ class FixtureSummary:
     parse_warnings: list[str] = field(default_factory=list)
 
     @property
+    def guessed_sources(self) -> int:
+        """Sources with at least one column whose type preflight guessed."""
+        return sum(1 for s in self.inferred_sources if s.guessed_columns)
+
+    @property
     def total_rows(self) -> int:
         return sum(t.rows for t in self.tables)
 

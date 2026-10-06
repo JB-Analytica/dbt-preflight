@@ -21,7 +21,7 @@ from dbt_preflight import __version__
 from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
 from dbt_preflight.compiled import CompiledSql, compile_selection
-from dbt_preflight.config import ConfigError, PreflightConfig, load_config
+from dbt_preflight.config import CONFIG_FILENAME, ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
     DbtError,
@@ -50,6 +50,7 @@ from dbt_preflight.report import (
     render,
 )
 from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema
+from dbt_preflight.schema_file import annotate, count_notes, default_output
 from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
 
@@ -331,13 +332,7 @@ def _run(
         db_path = workdir / f"{catalog}.duckdb"
         write_profiles(profiles_dir, project.profile, db_path)
 
-    dialect = (
-        config.dialect
-        if config.dialect is not None
-        else detect_dialect(config.project_dir, project.profile)
-    )
-    if dialect in {"duckdb", "none"}:
-        dialect = None
+    dialect = _project_dialect(config, project)
 
     # 2. Fixtures. A project with no sources takes its input from seeds, which dbt loads
     # itself during the build; there is nothing to generate and nothing to miss.
@@ -657,6 +652,16 @@ def _compile_for_inference(
     if outcome.manifest is None:
         return None
     return CompiledSql.load(outcome.manifest, outcome.failed, dialect)
+
+
+def _project_dialect(config: PreflightConfig, project) -> str | None:
+    """The SQL dialect to transpile from: configured, else read from the profile; None for DuckDB."""
+    dialect = (
+        config.dialect
+        if config.dialect is not None
+        else detect_dialect(config.project_dir, project.profile)
+    )
+    return None if dialect in {"duckdb", "none"} else dialect
 
 
 def _compiled_line(compiled: CompiledSql | None) -> str:
@@ -1132,6 +1137,119 @@ def _finish(
 
     if fail_on_error and not report.passed:
         sys.exit(1)
+
+
+@app.command()
+def schema(
+    config_path: Optional[Path] = typer.Option(
+        None, "--config", help="Path to .dbt-preflight.yml (default: repo root)."
+    ),
+    repo_root: Optional[Path] = typer.Option(
+        None,
+        "--repo-root",
+        help="Repository root (default: the git root of the current directory).",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        help="Where to write the DBML (default: source_system/<project name>.dbml, next to "
+        ".dbt-preflight.yml).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing file, and derive a schema even when the config already "
+        "has `schema:`.",
+    ),
+) -> None:
+    """Write the schema a run derives from the project as a DBML file to keep and refine.
+
+    Needs no warehouse, credentials or base ref: the same derivation a run does on the
+    head (sources.yml, the staging models' SQL, compiled SQL), written to a file. Columns
+    preflight typed itself carry a note saying where the type came from.
+    """
+    repo_root = (repo_root or git_root(Path.cwd())).resolve()
+    try:
+        config = load_config(repo_root, config_path)
+    except ConfigError as exc:
+        _say(f"❌ Configuration error: {exc}")
+        raise typer.Exit(1) from None
+
+    if config.schema is not None and not force:
+        typer.echo(
+            f"`schema:` in {_relative(config.path or repo_root, repo_root)} already points at "
+            f"{config.describe_schema_source()}; nothing written. Edit that file, or pass "
+            "--force to derive a fresh schema anyway."
+        )
+        return
+
+    config_file = config.path or (config_path or repo_root / CONFIG_FILENAME).resolve()
+    try:
+        project = read_project(config.project_dir)
+    except DbtError as exc:
+        _say(f"❌ {exc}")
+        raise typer.Exit(1) from None
+    target = (output or default_output(config_file.parent, project.name)).resolve()
+    if target.exists() and not force:
+        _say(f"❌ {target} already exists. Pass --force to overwrite it.")
+        raise typer.Exit(1)
+
+    workdir = config.workdir
+    if workdir.exists():
+        shutil.rmtree(workdir)
+    workdir.mkdir(parents=True)
+    try:
+        dbml = _derive_schema_file(config, project, workdir)
+    except (SchemaError, DbtError) as exc:
+        _say(f"❌ {exc}")
+        raise typer.Exit(1) from None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(dbml, encoding="utf-8")
+
+    notes = count_notes(dbml)
+    tables = len(re.findall(r"^Table ", dbml, re.MULTILINE))
+    typer.echo(f"Wrote {_relative(target, repo_root)}: {tables} tables, {len(dbml):,} bytes.")
+    if any(notes.values()):
+        typer.echo(
+            f"{sum(notes.values())} columns carry a note saying where their type came from: "
+            + ", ".join(f"{n} {k}" for k, n in notes.items() if n)
+            + "."
+        )
+    shown = _relative(target, config_file.parent)
+    typer.echo("")
+    typer.echo("Next:")
+    typer.echo(f"  1. Add `schema: {shown}` to {_relative(config_file, repo_root)}.")
+    typer.echo("  2. Commit the file.")
+    typer.echo(
+        "  3. Refine it in model2data studio (https://studio.jbanalytica.com/?ref=dbt-preflight): "
+        "paste it into the editor,\n     or open the repository as a repository project."
+    )
+    if config.schema is not None:
+        typer.echo(
+            f"\n`schema:` already points at {config.describe_schema_source()}; "
+            "it is unchanged and the new file is not used until you edit it."
+        )
+
+
+def _derive_schema_file(config: PreflightConfig, project, workdir: Path) -> str:
+    """The DBML a run on the head would derive, as a file to keep. No warehouse, no base."""
+    profiles_dir = workdir / "profiles"
+    write_profiles(profiles_dir, project.profile, workdir / "preflight.duckdb")
+    _say(f"🛫 dbt preflight {__version__} · schema for project `{project.name}`")
+    runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
+    runner.deps()
+    manifest = Manifest.load(runner.parse())
+    catalog = _database_name(manifest, "preflight")
+    dialect = _project_dialect(config, project)
+    compiled = _compile_for_inference(
+        project, manifest, catalog, workdir, "compiled", config.env, dialect
+    )
+    _say(f"   {_compiled_line(compiled)}")
+    dbml, inferred = derive_dbml(manifest, compiled)
+    return annotate(dbml, manifest, inferred)
 
 
 if __name__ == "__main__":

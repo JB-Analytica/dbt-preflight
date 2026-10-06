@@ -51,8 +51,11 @@ def test_example_passes_clean(example_copy: Path, tmp_path: Path) -> None:
     assert "| `dim_products` | ✅ built | 60 |" in body
     assert "### Not verified on DuckDB" not in body
     assert not (example_copy / ".preflight").exists()
+    # The example reads a DBML file: nothing was guessed, so the comment does not mention it.
+    assert "Columns were guessed" not in body
 
     summary = json.loads(summary_path.read_text())
+    assert summary["fixtures"]["guessed_sources"] == 0
     assert summary["verdict"] == "passed"
     assert summary["exit_code"] == 0
     assert summary["counts"]["models"]["built"] == 10

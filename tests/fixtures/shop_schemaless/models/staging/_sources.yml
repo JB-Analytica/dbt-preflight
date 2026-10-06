@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: raw_shop
+    schema: raw_shop
+    tables:
+      # No columns declared: the staging models are all preflight has to go on.
+      - name: customers
+      - name: orders
