@@ -135,12 +135,14 @@ runs them again. The results as of 0.5.0:
 | [dbt-labs/jaffle_shop](https://github.com/dbt-labs/jaffle_shop) (classic) | Seeds only, no config file | Passes with warnings, 5 of 5 models built | Caught |
 | [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) | Sources without declared columns, no config file | Passes with warnings, 8 of 8 built | Caught |
 | [mattermost-data-warehouse](https://github.com/michaelschiffmm/mattermost-data-warehouse) (fork) | Snowflake, in a subfolder, `env:` set | Fails: 1 model could not be checked, 7 of 10 built | Caught |
-| [fivetran/dbt_shopify](https://github.com/fivetran/dbt_shopify) | BigQuery, hand-written DBML schema | Passes with warnings, 45 of 45 built | Caught |
-| fivetran/dbt_shopify | No schema file: derived through Fivetran's macros | Passes with warnings, 46 of 46 built | Caught |
+| [fivetran/dbt_shopify](https://github.com/fivetran/dbt_shopify) | BigQuery, hand-written DBML schema | Fails: 45 of 49 built; 4 models the change reaches sit behind 2 that preflight's data cannot build | Caught |
+| fivetran/dbt_shopify | No schema file: derived through Fivetran's macros | Passes with warnings, 52 of 52 built | Caught |
 | [Velir/dbt-ga4](https://github.com/Velir/dbt-ga4) | BigQuery, GA4 nested records | Fails: nothing builds yet (BigQuery `partition_by`) | Not caught |
 
 The mattermost failure is the *Could not be checked* comment above: a model that also fails
-on `main` and reads columns whose type was guessed. dbt-ga4 is a known gap. No model in the
+on `main` and reads columns whose type was guessed. The hand-written Shopify schema types
+`parent_id` as text, so two models cannot be built on its data; preflight says so, and
+counts the four models behind them that the change reaches instead of excusing them. dbt-ga4 is a known gap. No model in the
 suite has been reported *not verified* for SQL DuckDB could not run.
 
 Shopify without a schema file is the hard case: Fivetran's staging models select their
