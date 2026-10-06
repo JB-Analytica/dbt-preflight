@@ -149,7 +149,9 @@ All notable changes to this project are documented here. The format follows
     so a difference in paths alone does not reshape a source. A key only the pull request
     reads, on a column the base parses too, is a JSON null, so a renamed key (`$.amount` to
     `$.amout`) reads NULL as on real data instead of validating itself; the comment and
-    `fixtures.json_new_keys` list such keys.
+    `fixtures.json_new_keys` list such keys. When only one branch compiled, keys are
+    compared in raw SQL alone, and the comment and `fixtures.json_keys_partly_compared`
+    say a key renamed inside a macro is not caught.
   - A qualified column (`o.payload` in a join) fills only the source its qualifier names.
   - A DBML column whose note contains `not JSON` keeps its generated text.
   - Leaf strings and integers carry the row number, so a `unique` test on a JSON column or
@@ -166,7 +168,11 @@ All notable changes to this project are documented here. The format follows
   tried; a missing column is never turned into a constant.
 - A model skipped on both branches behind a model broken on the base was excused even when
   the change reached it through another parent (a model reading both a broken model and a
-  modified one). It counts now.
+  modified one). It counts now, listed as skipped and never checked.
+- A model the pull request added or edited a test on (generic, unit, or a singular test
+  reading it) could be "broken on main" when it failed the same way there, which skipped
+  the new test unseen and excused what the model skips. It is "Could not be checked" now,
+  naming the test.
 - A derived table could get two `pk` columns (`id`, and a column whose staging alias was
   tested `unique` and `not_null`), which model2data reads as one composite key, so neither
   was unique and the staging model's `unique` test failed on the fixtures

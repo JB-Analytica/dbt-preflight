@@ -106,6 +106,8 @@ class FixtureSummary:
     # "<identifier>.<column>: <path>" for keys only the pull request reads, null in the
     # fixture (`widen_json`).
     json_new_keys: list[str] = field(default_factory=list)
+    # Only one branch compiled, so new JSON keys were found from raw SQL alone.
+    json_keys_partly_compared: bool = False
 
     @property
     def guessed_sources(self) -> int:
@@ -257,7 +259,7 @@ def widen_json(
     summary: FixtureSummary,
     base_reads: dict[tuple[str, str], Shape],
     seed: int,
-    mark_new: bool = True,
+    compare: tuple[dict[tuple[str, str], Shape], dict[tuple[str, str], Shape]] | None = None,
 ) -> None:
     """Refill the JSON columns with the base branch's paths as well as the head's.
 
@@ -268,18 +270,28 @@ def widen_json(
     JSON null: the pull request's typo then reads NULL, as it would on real data that
     lacks the key, instead of validating itself; `json_new_keys` lists them for the
     comment. A column only the head parses keeps every value, so a new model reading JSON
-    is checked on real values. `mark_new` False (the two sides were not read alike, e.g.
-    only one compiled) puts the paths in without nulls.
+    is checked on real values.
+
+    `compare` (head reads, base reads) is for when the two sides were not read alike (only
+    one compiled): a side without its compiled SQL misses macro-hidden paths, so the new
+    keys are found from the raw SQL of both, which they read alike, and
+    `json_keys_partly_compared` says a key renamed inside a macro could not be caught.
 
     Both branches build on this one fixture, so neither side's paths make the source
     count as reshaped (`cli._reshaped_sources` leaves the JSON notes out)."""
     updates: list[tuple[JsonColumn, Shape, set[str]]] = []
+    if compare is not None:
+        summary.json_keys_partly_compared = True
     for key, filled in sorted(summary.json_shapes.items()):
         base = base_reads.get(key)
         if base is None:
             continue
         union = merge_shape(dict(filled.shape), base)
-        new = {p for p in filled.shape if p and p not in base} if mark_new else set()
+        if compare is None:
+            new = {p for p in filled.shape if p and p not in base}
+        else:
+            head_raw, base_raw = compare[0].get(key, {}), compare[1].get(key)
+            new = {p for p in head_raw if p and p not in base_raw} if base_raw else set()
         if union == filled.shape and not new:
             continue
         updates.append((filled, union, new))

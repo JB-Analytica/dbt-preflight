@@ -64,6 +64,8 @@ class ModelReport:
     # Skipped on both branches behind a model broken on the base or one preflight's data
     # cannot build, but the change reaches it through another parent: it counts, unchecked.
     skipped_unchecked: bool = False
+    # Tests the change added or edited on it: why a model failing on the base too counts.
+    edited_tests: list[str] = field(default_factory=list)
 
     @property
     def not_this_change(self) -> bool:
@@ -742,6 +744,8 @@ def _guessed_list(m: ModelReport) -> str:
 def _unverified_reason(m: ModelReport) -> str:
     """Why one model failing the same way on the base still counts, in its own words."""
     via = ", ".join(f"`{n}`" for n in m.reached_from) or "upstream"
+    if m.edited_tests and not m.reached_from:
+        via = "a test on it: " + ", ".join(f"`{n}`" for n in m.edited_tests)
     if m.fixture_error:
         return (
             f"fails on a value preflight generated ({m.fixture_error}), and this change "
@@ -752,6 +756,11 @@ def _unverified_reason(m: ModelReport) -> str:
             f"reads {_guessed_list(m)}, whose type preflight guessed (see Fixtures), so the "
             "failure may be the guess rather than the project, and this change reaches it "
             f"({via})"
+        )
+    if m.edited_tests and not m.reached_from:
+        return (
+            f"this change adds or edits {via}, which needs the model built, so it cannot be "
+            "excused as broken on the base"
         )
     return (
         f"this change reaches it from upstream ({via}), and DuckDB reports only the first "
@@ -1270,6 +1279,13 @@ def _fixtures_block(report: PreflightReport) -> str:
             "JSON keys only this pull request reads, null in the fixture as in data that "
             "lacks them (a renamed key reads NULL here): "
             + ", ".join(f"`{k}`" for k in fx.json_new_keys),
+        ]
+    if fx.json_keys_partly_compared and fx.json_columns:
+        parts += [
+            "",
+            "Only one branch's models compiled, so JSON keys were compared with the base in "
+            "raw SQL alone: a key renamed inside a macro gets values on both sides and is not "
+            "caught here.",
         ]
     if fx.inferred_sources:
         parts += ["", "Columns inferred from the staging models that read them:"]

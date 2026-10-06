@@ -181,6 +181,7 @@ def _fixtures(report: PreflightReport) -> dict[str, Any] | None:
         "skipped_sources": list(fx.skipped_sources),
         "json_columns": list(fx.json_columns),
         "json_new_keys": list(fx.json_new_keys),
+        "json_keys_partly_compared": fx.json_keys_partly_compared,
         "guessed_sources": fx.guessed_sources,
         "warnings": {
             "unmatched_sources": list(fx.unmatched_sources),

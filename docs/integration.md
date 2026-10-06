@@ -95,7 +95,7 @@ written), and 1 when it cannot derive a schema or the output exists.
 | `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
-| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), the text columns filled with JSON because a model parses them as JSON (`json_columns`, as `identifier.column`), the JSON keys only the pull request reads, put in the fixture as nulls (`json_new_keys`, as `identifier.column: path`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
+| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), the text columns filled with JSON because a model parses them as JSON (`json_columns`, as `identifier.column`), the JSON keys only the pull request reads, put in the fixture as nulls (`json_new_keys`, as `identifier.column: path`; `json_keys_partly_compared` is true when only one branch compiled, so keys were compared in raw SQL alone and a key renamed inside a macro is not caught), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
 
 ### The headline
@@ -199,7 +199,9 @@ does not parse, a failed cast of a string - in a model with a source upstream
 `baseline.FIXTURE_SHAPED_ERRORS`). A compilation error is never one: it happens before any
 data is read. Where it goes depends on whether the change reaches the model (it modified
 it, the model reads fixtures the change reshaped, either is upstream of it, or the change
-added or edited a data test or unit test on it; `cli._reached`):
+added or edited a data test, unit test or singular test on it; `cli._reached`). A model with
+such a test is never *broken on the base too* either, whatever its error: the test needs it
+built, so it is *Could not be checked*, naming the test:
 
 - **Reached:** *Could not be checked*, with the reason named. It counts against the run
   (`unverified_broken_on_base: true`, in `counts.models.failed`).
@@ -279,7 +281,7 @@ wants every failure regardless reads `preexisting_failing_tests` and
 Added since, without a version bump (0.5.0): `fixture_limited_models`,
 `counts.models.fixture_limited` and `counts.models.skipped_by_fixture_limited`, per-model
 `fixture_limited` and `skipped_by_fixture_limited`, `fixture_error` and `guessed_inputs` on
-`unverified_broken_on_base_models`, `fixtures.json_columns`, `fixtures.json_new_keys`, and `headline.fixture_limited`.
+`unverified_broken_on_base_models`, `fixtures.json_columns`, `fixtures.json_new_keys`, `fixtures.json_keys_partly_compared`, per-model `skipped_unchecked`, and `headline.fixture_limited` / `headline.not_built`.
 
 ## The comment's marker
 

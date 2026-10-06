@@ -462,9 +462,11 @@ def _run(
                     report.fixtures,
                     json_reads(base_manifest, base_compiled),
                     config.seed,
-                    # A side read without its compiled SQL misses macro-hidden paths:
-                    # marking the other side's as new would null real reads.
-                    mark_new=(compiled is None) == (base_compiled is None),
+                    # A side read without its compiled SQL misses macro-hidden paths: then
+                    # new keys come from both sides' raw SQL, which they read alike.
+                    compare=None
+                    if (compiled is None) == (base_compiled is None)
+                    else (json_reads(manifest), json_reads(base_manifest)),
                 )
             # dbt's state comparison does not see vars or package versions. When a file
             # that can change what every model does changed, nothing is judged by the base.
@@ -540,7 +542,7 @@ def _run(
                     changed_upstream=untrusted | manifest.descendants(untrusted),
                     judge=judge,
                     guess_bound=_guess_bound(manifest, report),
-                    tested_by_change=manifest.tested_models(modified),
+                    tested_by_change=_tests_changed_on(manifest, modified),
                 ),
                 timer,
             )
@@ -794,8 +796,9 @@ class _Trust:
     # Nodes reading a source column whose type preflight guessed, directly or upstream:
     # uid -> "<table>.<column>". Never "broken on main", never a pre-existing failure.
     guess_bound: dict[str, list[str]] = field(default_factory=dict)
-    # Models a data test or unit test the change added or edited is declared on.
-    tested_by_change: set[str] = field(default_factory=set)
+    # Model -> the names of the data tests or unit tests the change added or edited on it
+    # (declared on it, or a singular test reading it): `_tests_changed_on`.
+    tested_by_change: dict[str, list[str]] = field(default_factory=dict)
     # False when a project-level file changed: nothing is judged by the base at all.
     judge: bool = True
 
@@ -1079,10 +1082,14 @@ def _judge_builds(
             if _reached(m.unique_id, trust):
                 m.unverified_broken_on_base = True
                 m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
+                m.edited_tests = trust.tested_by_change.get(m.unique_id, [])
             else:
                 m.fixture_limited = True
             continue
-        m.broken_on_base = is_broken_on_base(r, on_base, trust.changed_upstream)
+        # A model the change added or edited a test on is never excused: the test needs it.
+        m.broken_on_base = is_broken_on_base(
+            r, on_base, trust.changed_upstream | set(trust.tested_by_change)
+        )
         if (
             not m.broken_on_base
             # Not what the change modified, nor what reads fixtures it changed: there the
@@ -1097,6 +1104,7 @@ def _judge_builds(
             # not as something this change is known to have broken.
             m.unverified_broken_on_base = True
             m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
+            m.edited_tests = trust.tested_by_change.get(m.unique_id, [])
     broken = {m.unique_id for m in report.models if m.broken_on_base}
     unverified = {m.unique_id for m in report.models if m.unverified_broken_on_base}
     limited = {m.unique_id for m in report.models if m.fixture_limited}
@@ -1160,6 +1168,24 @@ def _judge_builds(
             and on_base is not None
             and on_base.status == "skipped"
         )
+
+
+def _tests_changed_on(manifest: Manifest, modified: set[str]) -> dict[str, list[str]]:
+    """{model: names of the tests the change added or edited on it}: generic tests by the
+    node they are declared on, unit tests by the model they exercise, and singular tests
+    (no attached node) by every model they read."""
+    out: dict[str, set[str]] = {}
+    for uid, test in manifest.tests.items():
+        if uid not in modified:
+            continue
+        targets = [test.attached_node] if test.attached_node else test.depends_on
+        for target in targets:
+            if target in manifest.models:
+                out.setdefault(target, set()).add(test.name)
+    for uid, unit in manifest.unit_tests.items():
+        if uid in modified and unit.model_uid in manifest.models:
+            out.setdefault(unit.model_uid, set()).add(uid.split(".")[-1])
+    return {uid: sorted(names) for uid, names in sorted(out.items())}
 
 
 def _reached(uid: str, trust: _Trust) -> bool:

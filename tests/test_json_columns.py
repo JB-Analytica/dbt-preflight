@@ -462,7 +462,7 @@ BINDER_ERROR = 'Runtime Error\n  Binder Error: Referenced column "x" not found i
 
 def _judge(manifest: Manifest, failing: dict[str, str], modified: set[str], **kw):
     """Judge head failures that fail the same way on the base, given what was modified."""
-    from dbt_preflight.cli import _BaseBuild, _judge_builds, _Trust
+    from dbt_preflight.cli import _BaseBuild, _judge_builds, _tests_changed_on, _Trust
     from dbt_preflight.dbt_runner import NodeResult, RunOutcome
     from dbt_preflight.report import ModelReport, PreflightReport
 
@@ -497,7 +497,7 @@ def _judge(manifest: Manifest, failing: dict[str, str], modified: set[str], **kw
         untrusted=set(modified),
         changed_upstream=descendants,
         guess_bound=kw.get("guess_bound", {}),
-        tested_by_change=manifest.tested_models(modified),
+        tested_by_change=_tests_changed_on(manifest, modified),
     )
     base = _BaseBuild(manifest=manifest, tables={r.unique_id: r for r in results}, trust=trust)
     _judge_builds(report, manifest, RunOutcome(True, results), base)
@@ -663,3 +663,74 @@ def test_a_dbml_column_noted_not_json_is_left_alone(manifest: Manifest) -> None:
     filled = _fill_json(df, schema, src, "customers", 42)
     assert [name for name, _ in filled] == ["attrs"]
     assert df["payload"].tolist() == ["Some text."]
+
+
+def test_a_model_with_an_edited_test_is_never_broken_on_main(manifest: Manifest) -> None:
+    # The change adds a test on stg_shop__customers, which fails on main with an ordinary
+    # error: excusing it would skip the new test unseen, and excuse what it skips.
+    report, m = _judge(
+        manifest, {CUST: BINDER_ERROR}, modified={"test.p.u1"}, statuses={MART: "skipped"}
+    )
+    assert not m[CUST].broken_on_base and m[CUST].unverified_broken_on_base
+    assert m[CUST].edited_tests == ["unique_customers_customer_id"]
+    assert not m[MART].skipped_by_base
+    assert not report.passed
+    assert "this change adds or edits a test on it: `unique_customers_customer_id`" in render(
+        report
+    )
+
+
+def test_a_singular_test_reaches_the_models_it_reads(manifest: Manifest) -> None:
+    from dbt_preflight.cli import _tests_changed_on
+    from dbt_preflight.manifest import TestNode
+
+    manifest.tests["test.p.assert_x"] = TestNode(
+        "test.p.assert_x", "assert_x", None, None, None, [CUST, ORDERS], {}, "tests/x.sql"
+    )
+    assert _tests_changed_on(manifest, {"test.p.assert_x"}) == {
+        CUST: ["assert_x"],
+        ORDERS: ["assert_x"],
+    }
+    report, m = _judge(manifest, {CUST: BINDER_ERROR}, modified={"test.p.assert_x"})
+    assert m[CUST].unverified_broken_on_base and not m[CUST].broken_on_base
+
+
+def _widened(tmp_path: Path, compare) -> tuple[dict, object]:
+    from dbt_preflight.fixtures import FixtureSummary, JsonColumn, widen_json
+
+    db = tmp_path / "w.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create schema raw; create table raw.parcels (payload varchar)")
+    con.execute("insert into raw.parcels values ('{}')")
+    con.close()
+    key = (SRC, "payload")
+    # `m` came from a macro the head compiled; `b` and `a` are in raw SQL.
+    head = {"a": None, "b": None, "m": None}
+    summary = FixtureSummary(
+        json_shapes={key: JsonColumn("raw", "parcels", "parcels", "payload", head)}
+    )
+    widen_json(db, summary, {key: {"a": None, "z": None}}, 42, compare)
+    con = duckdb.connect(str(db))
+    [(text,)] = con.execute("select payload from raw.parcels").fetchall()
+    return json.loads(text), summary
+
+
+def test_new_json_keys_when_both_sides_compiled(tmp_path: Path) -> None:
+    obj, summary = _widened(tmp_path, None)
+    assert obj["a"] and obj["z"] and obj["b"] is None and obj["m"] is None
+    assert not summary.json_keys_partly_compared
+
+
+def test_new_json_keys_from_raw_sql_when_only_one_side_compiled(tmp_path: Path) -> None:
+    # The base did not compile, so it cannot see `m`: only raw-SQL keys are compared.
+    key = (SRC, "payload")
+    obj, summary = _widened(tmp_path, ({key: {"a": None, "b": None}}, {key: {"a": None}}))
+    assert obj["b"] is None  # renamed in raw SQL: still caught
+    assert obj["m"] is not None  # macro-hidden: real values, and the summary says so
+    assert summary.json_keys_partly_compared
+    from dbt_preflight.report import PreflightReport
+
+    report = PreflightReport(fixtures=summary, base_ref="main")  # type: ignore[arg-type]
+    summary.json_columns = ["parcels.payload"]
+    assert "compared with the base in raw SQL alone" in render(report)
+    assert build_summary(report, 0, None)["fixtures"]["json_keys_partly_compared"]
