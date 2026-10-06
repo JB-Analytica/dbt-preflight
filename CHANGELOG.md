@@ -35,7 +35,8 @@ All notable changes to this project are documented here. The format follows
     When only the head compiles, every source counts as reshaped.
 
 - `vars:` in `.dbt-preflight.yml`: a mapping passed to every dbt command preflight runs as
-  `--vars`. A change to it counts as reshaping the fixtures, like `env:`.
+  `--vars`. A change to it counts as reshaping the fixtures, like `env:`. YAML dates are
+  passed as ISO strings, and a value JSON cannot carry is a config error.
 
 ### Changed
 
@@ -45,6 +46,19 @@ All notable changes to this project are documented here. The format follows
   summary (`unknown_columns`) say which are `varchar` for that reason. The run stops only
   when a read source has no column known at all, and the error points at `schema:` and
   `dbt-preflight schema`.
+- **A failure over a guessed column is never "broken on main".** A model that reads a
+  source column whose type preflight guessed, directly or upstream, and fails the same
+  way on both branches, is listed under "Could not be checked" with the guessed columns
+  named (`guessed_inputs` in the summary), and counts against the run. A compilation error
+  is exempt, since it happens before any data is read. A test over such a model, or over a
+  guessed source column, names the guessed columns it reads. When it *errors* (a type
+  mismatch, a failed cast) it is not judged against the base and counts. When it fails on
+  rows on both branches it stays pre-existing, annotated: an invariant that random data
+  breaks is not a typing question. The guesses are tied to the verdict instead of only appearing in the folded
+  Fixtures block.
+- A snapshot or a singular test reading a source counts as a reader that cannot be
+  followed, so that source's unread untyped columns are flagged `varchar` rather than
+  typed by name.
 - **Sources nothing reads are skipped.** A source no model, snapshot or test reads, and
   that `sources.yml` does not fully type, gets no fixture and no error. One line in the
   fixtures block names it, and the summary lists it as `fixtures.skipped_sources`. A fully
@@ -61,10 +75,11 @@ All notable changes to this project are documented here. The format follows
   its FROM and JOINs select, no longer through every earlier CTE it could see.
 - A source identifier DBML cannot spell (GA4's `events_*`) gets a sanitised table name in
   the derived schema. The fixture still loads under the identifier dbt expects.
-- For BigQuery (and the other dialects where `"..."` is a string), compiled SQL is parsed
-  in the project's dialect first, with dbt's relation names re-quoted, so `replace(x, " ",
-  "_")` no longer reads as two columns named ` ` and `_`. An inferred column name DBML
-  cannot spell is dropped.
+- Compiled SQL falls back to the project's own dialect when DuckDB's grammar cannot parse
+  it or finds column names no warehouse would use. Under DuckDB's grammar, BigQuery's
+  `replace(x, " ", "_")` reads as two columns named ` ` and `_`. For BigQuery-style
+  dialects, dbt's relation names are re-quoted for that attempt. An inferred column name
+  DBML cannot spell is dropped.
 - **Unread declared columns are typed by their name.** A column `sources.yml` declares
   without a `data_type` used to fail the run unless a model read it. Now it gets a type
   from its name and is listed as guessed, but only when every model reading the source is

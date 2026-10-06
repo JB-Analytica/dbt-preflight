@@ -115,6 +115,7 @@ def _failing_test(t: FailedTest, relations: set[tuple[str, str]] | None = None) 
         "failures": t.failures,
         "base_failures": t.base_failures,
         "reading": reading,
+        "guessed_inputs": list(t.guessed_inputs),
     }
 
 
@@ -234,6 +235,7 @@ def build_summary(
                 "unique_id": m.unique_id,
                 "error": broken_on_base_error(m),
                 "reached_from": list(m.reached_from),
+                "guessed_inputs": list(m.guessed_inputs),
             }
             for m in report.unverified_broken_models
         ],

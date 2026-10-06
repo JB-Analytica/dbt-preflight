@@ -157,7 +157,11 @@ class DbtRunner:
 
     def _vars_args(self) -> list[str]:
         """`--vars` for every invocation when `.dbt-preflight.yml` sets `vars:`."""
-        return ["--vars", json.dumps(self.dbt_vars, sort_keys=True)] if self.dbt_vars else []
+        if not self.dbt_vars:
+            return []
+        # `load_config` already turned dates into ISO strings; `default=str` is the backstop
+        # for a runner built some other way, so a stray value never crashes before a report.
+        return ["--vars", json.dumps(self.dbt_vars, sort_keys=True, default=str)]
 
     def _args(self, command: str, *extra: str) -> list[str]:
         return [

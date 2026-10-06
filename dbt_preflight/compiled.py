@@ -67,30 +67,40 @@ _BACKTICK_DIALECTS = {"bigquery", "spark", "databricks", "hive"}
 _QUOTED_PART = re.compile(r'"([^"\n]+)"(?=\.)|(?<=\.)"([^"\n]+)"')
 
 
+_COLUMN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _parse(sql: str, read: str | None) -> exp.Expr | None:
+    try:
+        return sqlglot.parse_one(sql, read=read)
+    except Exception:  # noqa: BLE001 - any parser failure just means "cannot infer"
+        return None
+
+
+def _odd_columns(tree: exp.Expr) -> bool:
+    """Whether a parse found a column no warehouse would name - ` `, `1` - which is what a
+    BigQuery string literal (`replace(x, " ", "_")`) becomes in DuckDB's grammar."""
+    return any(not _COLUMN_NAME.fullmatch(c.name) for c in tree.find_all(exp.Column) if c.name)
+
+
 def parse_compiled(sql: str, dialect: str | None = None) -> exp.Expr | None:
     """Parse compiled SQL: DuckDB first, since dbt rendered it for a DuckDB target and quotes
-    relations with double quotes; the default dialect next; then the project's own dialect,
-    since the model's body is still written in it. A dialect where double quotes make a
-    string (BigQuery) goes first instead, with dbt's `"db"."schema"."table"` re-quoted with
-    backticks. None when nothing parses it."""
-    attempts: list[tuple[str | None, str]] = [("duckdb", sql), (None, sql)]
+    relations with double quotes; then the default dialect. The project's own dialect only
+    as a fallback - when neither parses it, or DuckDB's reading has columns no warehouse
+    would name - since the model's body is still written in it. For a dialect where double
+    quotes make a string (BigQuery), dbt's `"db"."schema"."table"` is re-quoted with
+    backticks for that attempt. None when nothing parses it."""
+    first = _parse(sql, "duckdb") or _parse(sql, None)
+    if first is not None and not _odd_columns(first):
+        return first
     if dialect and dialect not in {"duckdb", "none"}:
+        own = sql
         if dialect in _BACKTICK_DIALECTS:
-            # Here a double-quoted token in the model's own body is a string (`replace(x,
-            # " ", "_")`), which DuckDB's grammar would read as a column: the project's
-            # dialect goes first, with dbt's relation names re-quoted for it.
             own = _QUOTED_PART.sub(lambda m: f"`{m.group(1) or m.group(2)}`", sql)
-            attempts.insert(0, (dialect, own))
-        else:
-            attempts.append((dialect, sql))
-    for read, text in attempts:
-        try:
-            tree = sqlglot.parse_one(text, read=read)
-        except Exception:  # noqa: BLE001 - any parser failure just means "cannot infer"
-            continue
-        if tree is not None:
-            return tree
-    return None
+        fallback = _parse(own, dialect)
+        if fallback is not None:
+            return fallback
+    return first
 
 
 @dataclass

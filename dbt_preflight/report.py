@@ -49,6 +49,9 @@ class ModelReport:
     # alone skips is `skipped_by_unverified`, and counts too.
     unverified_broken_on_base: bool = False
     reached_from: list[str] = field(default_factory=list)  # what the change modified upstream
+    # "<table>.<column>" source columns it reads, directly or upstream, whose type preflight
+    # guessed: a failure on both branches may be the guess, so it is not "broken on main".
+    guessed_inputs: list[str] = field(default_factory=list)
     skipped_by_unverified: bool = False
 
     @property
@@ -76,6 +79,9 @@ class FailedTest:
     # `base_failures` is the base branch's failing-row count when it had one to compare.
     preexisting: bool = False
     base_failures: int | None = None
+    # "<table>.<column>" source columns it reads, directly or upstream, whose type
+    # preflight guessed: never pre-existing, and the comment says so.
+    guessed_inputs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -362,7 +368,25 @@ def _test_entry_lines(
         icon = "❌"
     else:
         icon = "⚠️"
-    lines = [f"- {icon} {_test_label(t)}: {_test_detail(t)}"]
+    line = f"- {icon} {_test_label(t)}: {_test_detail(t)}"
+    if t.guessed_inputs and t.status in {"fail", "error"}:
+        cols = ", ".join(f"`{c}`" for c in t.guessed_inputs[:_GUESSED_SHOWN])
+        more = len(t.guessed_inputs) - _GUESSED_SHOWN
+        cols += f" and {more} more" if more > 0 else ""
+        if t.preexisting:
+            line += (
+                f". It reads {cols}, whose type preflight guessed (see Fixtures), so the "
+                "failure may be the guess rather than the project"
+            )
+        elif t.status == "error":
+            line += (
+                f". It reads {cols}, whose type preflight guessed (see Fixtures), so it "
+                "could not be checked against the base branch: the error may be the guess "
+                "rather than the project"
+            )
+        else:
+            line += f". It reads {cols}, whose type preflight guessed (see Fixtures)"
+    lines = [line]
     if not details:
         return lines
     if t.compiled_code or t.status == "error" or t.kind == "unit_test" or t.test_name:
@@ -647,6 +671,16 @@ def _unverified_section(report: PreflightReport) -> list[str]:
     ]
     skipped = [m for m in report.models if m.skipped_by_unverified]
     for m in unverified:
+        if m.guessed_inputs:
+            cols = ", ".join(f"`{c}`" for c in m.guessed_inputs[:_GUESSED_SHOWN])
+            more = len(m.guessed_inputs) - _GUESSED_SHOWN
+            cols += f" and {more} more" if more > 0 else ""
+            lines.append(
+                f"- `{m.name}` — fails on `{base}` too, but it reads {cols}, whose type "
+                "preflight guessed (see Fixtures), so the failure may be the guess rather "
+                f"than the project: {broken_on_base_error(m)}"
+            )
+            continue
         via = ", ".join(f"`{n}`" for n in m.reached_from) or "upstream"
         lines.append(
             f"- `{m.name}` — fails on `{base}` too, and this change reaches it from upstream "
@@ -668,6 +702,9 @@ def _unverified_section(report: PreflightReport) -> list[str]:
             ]
     lines.append("")
     return lines
+
+
+_GUESSED_SHOWN = 5  # guessed columns named per model before "and N more"
 
 
 def _base_name(report: PreflightReport) -> str:

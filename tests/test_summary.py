@@ -216,6 +216,7 @@ def test_preexisting_failures_have_their_own_list() -> None:
             "failures": 108,
             "base_failures": 108,
             "reading": None,
+            "guessed_inputs": [],
         }
     ]
     assert summary["counts"]["tests"] == {
