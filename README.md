@@ -273,7 +273,9 @@ from the name`, `type read from compiled SQL`, or `inferred from a staging cast`
 plain prose, so model2data treats them as descriptions and they change nothing about the
 generated data; delete a note once you have checked its column. (A note that is, whole, a
 JSON object is how model2data shapes generation: put those next to the prose notes, not in
-them.)
+them.) A column a model reads as JSON carries `JSON, keys read: address.city, weight
+(number)`: that one preflight does read, to fill the column with JSON holding those keys, so
+keep it while a model still parses the column.
 
 The default path is `source_system/<dbt project name>.dbml` in the folder that holds
 `.dbt-preflight.yml`, so the `schema:` line the command prints works as it is. `--output`
@@ -398,7 +400,11 @@ contract: every flag, the exit code, the JSON schema, and a worked pre-pull-requ
 
 1. `dbt parse` on the pull request, to learn the sources, models and tests.
 2. Fixtures: model2data generates data for every source table, cast to the declared types,
-   loaded into a DuckDB file whose catalog is named after the sources' `database`.
+   loaded into a DuckDB file whose catalog is named after the sources' `database`. A text
+   column some model reads with a JSON function (`json_extract_string(payload, '$.weight')`,
+   `payload ->> 'city'`, a macro that compiles to one), traced back through staging aliases,
+   gets JSON objects holding every key the SQL reads instead of placeholder text, derived
+   from the seed so they are the same on every run.
 3. `dbt parse` on the base branch in a temporary worktree, then `dbt ls --select
    state:modified` to find what changed.
 4. Each compiled model is transpiled from the project's dialect to DuckDB with sqlglot.

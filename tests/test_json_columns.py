@@ -1,0 +1,522 @@
+"""Columns a project reads as JSON: detection in raw and compiled SQL, tracing back to the
+source, the note in the derived DBML, the generated values, and the fallback for a model
+that fails on a value preflight generated."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+import sqlglot
+from typer.testing import CliRunner
+
+from dbt_preflight.baseline import fixture_shaped_error
+from dbt_preflight.cli import app
+from dbt_preflight.compiled import CompiledSql, json_compile_selection
+from dbt_preflight.json_columns import (
+    format_note,
+    json_reads_in_tree,
+    json_values,
+    parse_note,
+)
+from dbt_preflight.manifest import Manifest
+from dbt_preflight.report import render
+from dbt_preflight.schema import derive_dbml, json_reads
+from dbt_preflight.schema_file import NOTE_GUESSED, annotate, count_notes
+from dbt_preflight.summary import build_summary
+
+SRC = "source.p.shop.parcels"
+STG = "model.p.stg_shop__parcels"
+MART = "model.p.parcel_weights"
+
+
+def _reads(sql: str, dialect: str | None = "duckdb") -> dict:
+    return json_reads_in_tree(sqlglot.parse_one(sql, read=dialect))
+
+
+# --- reading the SQL ------------------------------------------------------------------
+
+
+def test_duckdb_functions_and_operators_are_read_with_their_paths() -> None:
+    reads = _reads(
+        "select json_extract(a, '$.address.city'), json_extract_string(b, '$.weight'), "
+        "c ->> 'colour', d -> '$.items[0]' ->> 'sku', e::json, json_valid(f), "
+        "json_keys(g), from_json(h, '{}'), json_array_length(i, '$.tags') from t"
+    )
+    assert reads == {
+        "a": {"address.city": None},
+        "b": {"weight": None},
+        "c": {"colour": None},
+        "d": {"items[].sku": None},
+        "e": {"": None},
+        "f": {"": None},
+        "g": {"": None},
+        "h": {"": None},
+        "i": {"tags[]": None},
+    }
+
+
+def test_a_cast_after_the_extraction_types_the_leaf() -> None:
+    reads = _reads(
+        "select json_extract_string(p, '$.weight')::double, "
+        "coalesce(cast(nullif(json_extract_string(p, '$.charges.data[0].rate'), '') "
+        "as numeric(28,6)), 1), cast(p ->> 'count' as integer), "
+        "cast(json_extract_string(p, '$.paid') as boolean), "
+        "cast(json_extract_string(p, '$.sent_at') as timestamp), "
+        "json_extract_string(p, '$.label') from t"
+    )
+    assert reads == {
+        "p": {
+            "weight": "number",
+            "charges.data[].rate": "number",
+            "count": "integer",
+            "paid": "boolean",
+            "sent_at": "timestamp",
+            "label": None,
+        }
+    }
+
+
+def test_bigquery_and_default_dialect_spellings() -> None:
+    assert _reads(
+        "select json_extract_scalar(p, '$.a.b'), json_value(q, '$.c'), parse_json(r) from t",
+        "bigquery",
+    ) == {"p": {"a.b": None}, "q": {"c": None}, "r": {"": None}}
+    # The default dialect leaves DuckDB's names anonymous; the raw SQL is parsed that way.
+    assert _reads("select json_extract_string(p, '$.x.y[*]') from t", None) == {
+        "p": {"x.y[]": None}
+    }
+
+
+def test_a_column_that_is_not_the_json_argument_is_not_read() -> None:
+    assert _reads("select json_extract_string('{\"a\": 1}', k), upper(p) from t") == {}
+
+
+# --- tracing back to the source ---------------------------------------------------------
+
+
+def _manifest(stg_sql: str, mart_sql: str, columns: dict | None = None) -> Manifest:
+    def model(uid: str, sql: str, deps: list[str]) -> dict:
+        name = uid.split(".")[-1]
+        return {
+            "resource_type": "model",
+            "name": name,
+            "path": f"{name}.sql",
+            "original_file_path": f"models/{name}.sql",
+            "database": "preflight",
+            "schema": "main",
+            "alias": name,
+            "depends_on": {"nodes": deps},
+            "config": {"materialized": "view"},
+            "columns": {},
+            "raw_code": sql,
+            "relation_name": f'"preflight"."main"."{name}"',
+        }
+
+    return Manifest.from_dict(
+        {
+            "sources": {
+                SRC: {
+                    "source_name": "shop",
+                    "name": "parcels",
+                    "identifier": "parcels",
+                    "database": "preflight",
+                    "schema": "raw_shop",
+                    "relation_name": '"preflight"."raw_shop"."parcels"',
+                    "columns": columns
+                    if columns is not None
+                    else {
+                        "id": {"name": "id", "data_type": "integer"},
+                        "payload": {"name": "payload", "data_type": "varchar"},
+                        "size": {"name": "size", "data_type": "integer"},
+                    },
+                }
+            },
+            "nodes": {
+                STG: model(STG, stg_sql, [SRC]),
+                MART: model(MART, mart_sql, [STG]),
+            },
+            "parent_map": {STG: [SRC], MART: [STG]},
+            "child_map": {SRC: [STG], STG: [MART], MART: []},
+        }
+    )
+
+
+STG_SQL = (
+    "select id as parcel_id, cast(payload as varchar) as parcel_payload, size\n"
+    "from {{ source('shop', 'parcels') }}"
+)
+MART_SQL = (
+    "with p as (select * from {{ ref('stg_shop__parcels') }})\n"
+    "select parcel_id, json_extract_string(parcel_payload, '$.address.city') as city,\n"
+    "  cast(json_extract_string(parcel_payload, '$.weight') as double) as weight\n"
+    "from p"
+)
+
+
+def test_a_staging_alias_is_traced_back_to_the_source_column() -> None:
+    reads = json_reads(_manifest(STG_SQL, MART_SQL))
+    assert reads[(SRC, "payload")] == {"address.city": None, "weight": "number"}
+    # The alias is a candidate too; the caller drops it, as the source has no such column.
+    assert set(reads) <= {(SRC, "payload"), (SRC, "parcel_payload")}
+
+
+def test_a_read_hidden_by_a_macro_is_found_in_the_compiled_sql() -> None:
+    mart_raw = (
+        "select cast({{ fivetran_utils.json_parse('parcel_payload', ['weight']) }} as float) "
+        "as weight from {{ ref('stg_shop__parcels') }}"
+    )
+    manifest = _manifest(STG_SQL, mart_raw)
+    assert json_reads(manifest) == {}
+    assert json_compile_selection(manifest) == [MART]
+    compiled = CompiledSql(
+        code={
+            MART: "select cast(json_extract_string(parcel_payload, '$.weight') as float) "
+            'as weight from "preflight"."main"."stg_shop__parcels"'
+        },
+        relations={
+            SRC: ("preflight", "raw_shop", "parcels"),
+            STG: ("preflight", "main", "stg_shop__parcels"),
+            MART: ("preflight", "main", "parcel_weights"),
+        },
+    )
+    assert json_reads(manifest, compiled)[(SRC, "payload")] == {"weight": "number"}
+
+
+def test_a_computed_column_is_not_traced_through() -> None:
+    stg = "select id, concat('{', size, '}') as payload_text from {{ source('shop', 'parcels') }}"
+    mart = "select json_extract(payload_text, '$.a') from {{ ref('stg_shop__parcels') }}"
+    assert json_reads(_manifest(stg, mart)) == {}
+
+
+def test_the_derived_schema_notes_the_json_column_only() -> None:
+    dbml, _ = derive_dbml(_manifest(STG_SQL, MART_SQL))
+    assert "  payload varchar [note: 'JSON, keys read: address.city, weight (number)']" in dbml
+    assert "  size int\n" in dbml or "  size int" in dbml.splitlines()
+
+
+def test_a_json_read_on_a_number_column_is_left_alone() -> None:
+    stg = "select json_extract(size, '$.a') as a, payload from {{ source('shop', 'parcels') }}"
+    dbml, _ = derive_dbml(_manifest(stg, "select 1"))
+    assert "note:" not in dbml
+
+
+def test_an_untyped_json_column_is_inferred_as_text_whatever_its_name() -> None:
+    columns: dict = {}
+    stg = (
+        "select id, json_extract_string(shipped_at, '$.when') as w "
+        "from {{ source('shop', 'parcels') }}"
+    )
+    dbml, inferred = derive_dbml(_manifest(stg, "select 1", columns))
+    assert "  shipped_at varchar [note: 'JSON, keys read: when']" in dbml
+    assert "shipped_at" in inferred[0].guessed_columns
+
+
+def test_schema_command_note_shares_the_json_note() -> None:
+    columns: dict = {}
+    stg = "select id, payload ->> 'weight' as w from {{ source('shop', 'parcels') }}"
+    manifest = _manifest(stg, "select 1", columns)
+    dbml, inferred = derive_dbml(manifest)
+    written = annotate(dbml, manifest, inferred)
+    assert f"  payload varchar [note: '{NOTE_GUESSED}; JSON, keys read: weight']" in written
+    assert count_notes(written)[NOTE_GUESSED] == 2  # `id` and `payload`
+    assert parse_note(f"{NOTE_GUESSED}; JSON, keys read: weight") == {"": None, "weight": None}
+
+
+# --- the note and the values ------------------------------------------------------------
+
+
+def test_note_round_trips() -> None:
+    shape = {"address.city": None, "items[].price": "number", "": None}
+    note = format_note(shape)
+    assert note == "JSON, keys read: address.city, items[].price (number)"
+    assert parse_note(note) == shape
+    assert parse_note("JSON") == {"": None}
+    assert parse_note("Free text about the column") is None
+    assert parse_note(None) is None
+
+
+def test_values_are_valid_json_with_every_path() -> None:
+    shape = {"address.city": None, "weight": "number", "items[].sku": None, "paid": "boolean"}
+    values = json_values(shape, "parcels", "payload", 42, [True] * 50)
+    for text in values:
+        assert text is not None
+        obj = json.loads(text)
+        assert isinstance(obj["address"]["city"], str)
+        assert isinstance(obj["weight"], float | int)
+        assert isinstance(obj["paid"], bool)
+        assert 1 <= len(obj["items"]) <= 3
+        assert all(isinstance(i["sku"], str) for i in obj["items"])
+
+
+def test_values_are_deterministic_and_seeded() -> None:
+    shape = {"a.b": "integer"}
+    first = json_values(shape, "parcels", "payload", 42, [True] * 20)
+    assert json_values(shape, "parcels", "payload", 42, [True] * 20) == first
+    assert json_values(shape, "parcels", "payload", 43, [True] * 20) != first
+    assert json_values(shape, "parcels", "other", 42, [True] * 20) != first
+
+
+def test_values_keep_the_null_rate() -> None:
+    present = [i % 4 != 0 for i in range(40)]
+    values = json_values({"x": None}, "t", "c", 1, present)
+    assert [v is not None for v in values] == present
+
+
+def test_nothing_read_but_the_whole_value_is_an_empty_object() -> None:
+    assert json_values({"": None}, "t", "c", 1, [True]) == ["{}"]
+
+
+# --- the fallback for errors about generated values -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [
+        (
+            "Invalid Input Error: Malformed JSON at byte 0 of input: unexpected character.  "
+            'Input: "Weight reason."',
+            "malformed JSON",
+        ),
+        (
+            'Conversion Error: invalid timestamp field format: "Do scene important.", '
+            "expected format is (YYYY-MM-DD HH:MM:SS)",
+            "an invalid timestamp",
+        ),
+        ('Conversion Error: invalid date field format: "abc"', "an invalid date"),
+        ("Conversion Error: Could not convert string 'x' to INT64", "a failed cast"),
+        (
+            'Invalid Input Error: Could not parse string "abc" according to format specifier '
+            '"%Y-%m-%d"',
+            "a date or time format it could not parse",
+        ),
+    ],
+)
+def test_fixture_shaped_errors_are_recognised(message: str, reason: str) -> None:
+    assert fixture_shaped_error(f"Runtime Error in model m (models/m.sql)\n  {message}") == reason
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'Binder Error: Referenced column "x" not found in FROM clause!',
+        "Binder Error: Cannot mix values of type VARCHAR and FLOAT in COALESCE operator",
+        "Compilation Error in model m: Malformed JSON in a macro argument",
+        "Catalog Error: Table with name nowhere does not exist!",
+        None,
+    ],
+)
+def test_other_errors_are_not_fixture_shaped(message: str | None) -> None:
+    assert fixture_shaped_error(message) is None
+
+
+# --- end to end ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _write(repo: Path, rel: str, text: str) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+@pytest.fixture
+def parcels(tmp_path: Path) -> Path:
+    """Sources typed in sources.yml; a mart parses `payload` as JSON, another casts a text
+    column to an integer, which no generated text survives."""
+    repo = tmp_path / "parcels"
+    _write(
+        repo,
+        "dbt_project.yml",
+        'name: parcels\nversion: "1.0.0"\nconfig-version: 2\nprofile: parcels\n'
+        'model-paths: ["models"]\nflags:\n  send_anonymous_usage_stats: false\n'
+        # Tables, not views: a view is created without reading a row.
+        "models:\n  parcels:\n    +materialized: table\n",
+    )
+    _write(
+        repo,
+        "models/staging/_sources.yml",
+        "version: 2\nsources:\n  - name: shop\n    schema: raw\n    tables:\n"
+        "      - name: parcels\n        columns:\n"
+        "          - name: id\n            data_type: integer\n"
+        "          - name: payload\n            data_type: string\n"
+        "          - name: label\n            data_type: string\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_parcels.sql",
+        "select id, payload, label from {{ source('shop', 'parcels') }}\n",
+    )
+    _write(
+        repo,
+        "models/marts/parcel_weights.sql",
+        "select id,\n"
+        "  json_extract_string(payload, '$.weight')::double as weight,\n"
+        "  json_extract_string(payload, '$.address.city') as city\n"
+        "from {{ ref('stg_parcels') }}\n",
+    )
+    _write(
+        repo,
+        "models/marts/label_numbers.sql",
+        "select cast(label as integer) as n from {{ ref('stg_parcels') }}\n",
+    )
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "change")
+    stg = repo / "models/staging/stg_parcels.sql"
+    stg.write_text("-- touched\n" + stg.read_text())
+    _git(repo, "commit", "-qam", "touch staging")
+    return repo
+
+
+def test_a_model_parsing_json_builds_on_both_sides(parcels: Path, tmp_path: Path) -> None:
+    comment, summary_file = tmp_path / "comment.md", tmp_path / "summary.json"
+    CliRunner().invoke(
+        app,
+        [
+            "run", "--base-ref", "main", "--repo-root", str(parcels),
+            "--comment-file", str(comment), "--summary-file", str(summary_file),
+        ],
+    )  # fmt: skip
+    summary = json.loads(summary_file.read_text())
+    body = comment.read_text()
+    statuses = {m["name"]: m["status"] for m in summary["models"]}
+    assert statuses["parcel_weights"] == "built"
+    assert summary["fixtures"]["json_columns"] == ["parcels.payload"]
+    assert "Filled with JSON" in body
+    assert "`parcels.payload`" in body
+
+    # The cast of generated text fails on both branches: not "broken on main".
+    assert summary["broken_on_base_models"] == []
+    [unverified] = summary["unverified_broken_on_base_models"]
+    assert unverified["name"] == "label_numbers"
+    assert unverified["fixture_error"] == "a failed cast"
+    assert "on a value preflight generated (a failed cast)" in body
+    assert summary["verdict"] == "failed"
+
+
+# --- reached or not: who answers for a failure on preflight's data ------------------------
+
+CUST, ORDERS, MART = (
+    "model.p.stg_shop__customers",
+    "model.p.stg_shop__orders",
+    "model.p.dim_customers",
+)
+JSON_ERROR = (
+    'Runtime Error\n  Invalid Input Error: Malformed JSON at byte 0. Input: "Weight reason."'
+)
+BINDER_ERROR = 'Runtime Error\n  Binder Error: Referenced column "x" not found in FROM clause!'
+
+
+def _judge(manifest: Manifest, failing: dict[str, str], modified: set[str], **kw):
+    """Judge head failures that fail the same way on the base, given what was modified."""
+    from dbt_preflight.cli import _BaseBuild, _judge_builds, _Trust
+    from dbt_preflight.dbt_runner import NodeResult, RunOutcome
+    from dbt_preflight.report import ModelReport, PreflightReport
+
+    def result(uid: str, status: str, message: str = "") -> NodeResult:
+        return NodeResult(uid, uid.split(".")[-1], "model", status, message, None, 0.0)
+
+    statuses = kw.get("statuses", {})
+    results = [
+        result(uid, "error", failing[uid])
+        if uid in failing
+        else result(uid, statuses.get(uid, "success"))
+        for uid in (CUST, ORDERS, MART)
+    ]
+    report = PreflightReport(
+        models=[
+            ModelReport(
+                r.unique_id,
+                r.name,
+                "",
+                {"error": "failed", "success": "built"}.get(r.status, r.status),
+                r.unique_id in modified,
+                message=r.message,
+            )
+            for r in results
+        ],
+        base_ref="main",
+    )
+    descendants = modified | manifest.descendants(modified)
+    trust = _Trust(
+        modified=modified,
+        fixture_bound=set(),
+        untrusted=set(modified),
+        changed_upstream=descendants,
+        guess_bound=kw.get("guess_bound", {}),
+    )
+    base = _BaseBuild(manifest=manifest, tables={r.unique_id: r for r in results}, trust=trust)
+    _judge_builds(report, manifest, RunOutcome(True, results), base)
+    return report, {m.unique_id: m for m in report.models}
+
+
+def test_unreached_failure_on_generated_data_is_a_warning(manifest: Manifest) -> None:
+    report, m = _judge(manifest, {CUST: JSON_ERROR}, modified={ORDERS})
+    assert m[CUST].fixture_limited and not m[CUST].unverified_broken_on_base
+    assert not m[CUST].broken_on_base
+    assert m[CUST].fixture_error == "malformed JSON"
+    assert report.failed_models == []
+    assert report.passed and report.has_warnings
+    body = render(report)
+    assert "Preflight's generated data cannot build this model" in body
+    assert "`stg_shop__customers` — malformed JSON:" in body
+
+
+def test_reached_failure_on_generated_data_could_not_be_checked(manifest: Manifest) -> None:
+    report, m = _judge(manifest, {MART: JSON_ERROR}, modified={ORDERS})
+    assert m[MART].unverified_broken_on_base and not m[MART].fixture_limited
+    assert m[MART].reached_from == ["stg_shop__orders"]
+    assert not report.passed
+    body = render(report)
+    assert (
+        "fails on a value preflight generated (malformed JSON), and this change reaches it" in body
+    )
+    assert "this change reaches them from upstream" not in body  # the intro is generic
+
+
+def test_unreached_other_failure_is_broken_on_main(manifest: Manifest) -> None:
+    report, m = _judge(manifest, {CUST: BINDER_ERROR}, modified={ORDERS})
+    assert m[CUST].broken_on_base and not m[CUST].fixture_limited
+    assert report.passed
+
+
+def test_unreached_failure_over_a_guessed_column_is_a_warning(manifest: Manifest) -> None:
+    report, m = _judge(
+        manifest, {CUST: BINDER_ERROR}, modified={ORDERS}, guess_bound={CUST: ["customers.email"]}
+    )
+    assert m[CUST].fixture_limited and m[CUST].fixture_error is None
+    assert report.passed
+    assert "reads `customers.email`, whose type preflight guessed" in render(report)
+    summary = build_summary(report, 0, None)
+    [entry] = summary["fixture_limited_models"]
+    assert entry["reason"] == "reads `customers.email`, whose type preflight guessed"
+    assert summary["counts"]["models"]["fixture_limited"] == 1
+
+
+def test_what_an_unbuildable_model_skips_is_not_counted(manifest: Manifest) -> None:
+    report, m = _judge(manifest, {CUST: JSON_ERROR}, modified=set(), statuses={MART: "skipped"})
+    assert m[CUST].fixture_limited
+    assert m[MART].skipped_by_fixture_limited
+    assert report.passed
+    assert "Skipped because of it: `dim_customers`." in render(report)
+
+
+def test_reached_failure_over_a_guessed_column_could_not_be_checked(manifest: Manifest) -> None:
+    report, m = _judge(
+        manifest, {MART: BINDER_ERROR}, modified={ORDERS}, guess_bound={MART: ["orders.x"]}
+    )
+    assert m[MART].unverified_broken_on_base and not m[MART].fixture_limited
+    assert not report.passed
+    assert "reads `orders.x`, whose type preflight guessed" in render(report)

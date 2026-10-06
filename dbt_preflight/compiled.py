@@ -165,6 +165,24 @@ def compile_selection(manifest: Manifest) -> list[str]:
     return sorted(direct | second)
 
 
+# A Jinja expression mentioning JSON: `{{ fivetran_utils.json_parse("receipt", [...]) }}`.
+_JINJA_JSON_RE = re.compile(r"\{\{(?:(?!\}\}).)*json", re.IGNORECASE | re.DOTALL)
+
+
+def json_compile_selection(
+    manifest: Manifest, already: set[str] | frozenset[str] = frozenset()
+) -> list[str]:
+    """Models whose raw SQL calls a macro with `json` in its name or arguments, minus
+    `already`. What such a model reads as JSON shows only in its compiled SQL, and a mart
+    is not otherwise compiled (`compile_selection`). A JSON function written out in the
+    raw SQL needs no compiling: the raw SQL is read too. Sorted unique ids."""
+    return sorted(
+        uid
+        for uid, model in manifest.models.items()
+        if uid not in already and _JINJA_JSON_RE.search(model.raw_code or "")
+    )
+
+
 def _is_star_select(tree: exp.Expr, upstream: RelationKey | None) -> bool:
     """`select * from <upstream>`, optionally with a `where`, and nothing else: no `limit`
     or `offset`, and a bare `*`, not one with `except`/`replace`/`rename`."""

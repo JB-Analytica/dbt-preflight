@@ -9,6 +9,10 @@ The notes are prose on purpose. model2data reads a column note that is, whole, a
 object as generation hints (null rates, weights, distributions); any other note becomes the
 column's description and shapes nothing. So these notes cannot change the data, which is
 what keeps a run with `schema:` pointing at the written file identical to the derived run.
+The one note that does shape the data is preflight's own, not model2data's: `JSON, keys
+read: ...` on a column some model reads as JSON (`json_columns.py`), which preflight's
+fixture step reads back from the description. Where a column has both, they share one note,
+`<where the type came from>; JSON, keys read: ...`.
 """
 
 from __future__ import annotations
@@ -86,7 +90,13 @@ def annotate(dbml: str, manifest: Manifest, inferred: list[InferredSource]) -> s
                 else:
                     note = NOTE_CAST
                 settings = col.group("settings")
-                joined = f"{settings}, note: '{note}'" if settings else f"note: '{note}'"
+                if settings and "note: '" in settings:
+                    # The JSON note `derive_dbml` wrote: one note per column, both in it.
+                    joined = settings.replace("note: '", f"note: '{note}; ", 1)
+                elif settings:
+                    joined = f"{settings}, note: '{note}'"
+                else:
+                    joined = f"note: '{note}'"
                 line = f"  {name} {col.group('type')} [{joined}]"
         out.append(line)
     return HEADER + "\n" + "\n".join(out).rstrip("\n") + "\n"
@@ -95,6 +105,6 @@ def annotate(dbml: str, manifest: Manifest, inferred: list[InferredSource]) -> s
 def count_notes(dbml: str) -> dict[str, int]:
     """How many columns carry each kind of note, for the command's closing summary."""
     return {
-        kind: dbml.count(f"note: '{kind}'")
+        kind: dbml.count(f"note: '{kind}")
         for kind in (NOTE_GUESSED, NOTE_UNKNOWN, NOTE_COMPILED, NOTE_CAST)
     }

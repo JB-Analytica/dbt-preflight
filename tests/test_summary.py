@@ -59,6 +59,8 @@ def test_verdict_passed() -> None:
         "failed_on_base": 0,
         "skipped_by_base": 0,
         "unverified_broken_on_base": 0,
+        "fixture_limited": 0,
+        "skipped_by_fixture_limited": 0,
     }
 
 

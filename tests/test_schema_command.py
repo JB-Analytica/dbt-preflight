@@ -273,6 +273,25 @@ def test_round_trip_fivetran_style_project(billing: Path, tmp_path: Path) -> Non
     _round_trip(billing, tmp_path)
 
 
+def test_schema_round_trip_keeps_the_json_column(tmp_path: Path) -> None:
+    repo = tmp_path / "shop"
+    shutil.copytree(FIXTURES / "shop_schemaless", repo)
+    (repo / "models/staging/stg_shop__customer_prefs.sql").write_text(
+        "select id as customer_id,\n"
+        "  json_extract_string(preferences, '$.newsletter.opt_in')::boolean as opt_in,\n"
+        "  preferences ->> 'language' as language\n"
+        "from {{ source('raw_shop', 'customers') }}\n"
+    )
+    _round_trip(repo, tmp_path)
+    (dbml,) = (repo / "source_system").glob("*.dbml")
+    assert "JSON, keys read: language, newsletter.opt_in (boolean)" in dbml.read_text()
+    cols, rows = _source_tables(repo)["raw_shop.customers"]
+    index = [name for name, _type in cols].index("preferences")
+    values = [json.loads(r[index]) for r in rows if r[index] is not None]
+    assert values
+    assert all(isinstance(v["newsletter"]["opt_in"], bool) and "language" in v for v in values)
+
+
 # --- the comment line and the summary field -------------------------------------------
 
 

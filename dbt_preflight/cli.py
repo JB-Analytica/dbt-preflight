@@ -18,9 +18,15 @@ import typer
 import yaml
 
 from dbt_preflight import __version__
-from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
+from dbt_preflight.baseline import (
+    FAILING,
+    fixture_shaped_error,
+    is_broken_on_base,
+    is_preexisting,
+    same_error,
+)
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
-from dbt_preflight.compiled import CompiledSql, compile_selection
+from dbt_preflight.compiled import CompiledSql, compile_selection, json_compile_selection
 from dbt_preflight.config import CONFIG_FILENAME, ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
@@ -346,6 +352,15 @@ def _run(
             project, manifest, catalog, workdir, "compiled", config.env, dialect, config.vars
         )
         timer.mark(f"   {_compiled_line(compiled)}")
+    elif manifest.sources and json_compile_selection(manifest):
+        # A DBML file gives the types, but what a model reads as JSON through a macro
+        # still only shows compiled (`schema.json_reads`).
+        compiled = _compile_for_inference(
+            project, manifest, catalog, workdir, "compiled", config.env, dialect, config.vars,
+            json_only=True,
+        )  # fmt: skip
+        n = len(compiled.code) if compiled is not None else 0
+        timer.mark(f"   compiled {n} models that read JSON through a macro")
     if manifest.sources:
         schema = resolve_schema(config.schema, manifest, workdir, compiled)
         if schema.derived:
@@ -646,8 +661,13 @@ def _compile_for_inference(
     env: dict[str, str],
     dialect: str | None = None,
     dbt_vars: dict | None = None,
+    json_only: bool = False,
 ) -> CompiledSql | None:
     """Compile the models that read sources, for the schema inference (`compiled.py`).
+
+    Then, in a second compile so a failure there cannot cost the inference anything, the
+    models that read JSON through a macro (`json_compile_selection`), for the columns that
+    get JSON fixtures. `json_only` compiles only those, for a run with a DBML file.
 
     Against a DuckDB file of its own, empty, under the catalog name the sources resolve
     to: the head and the base then see exactly the same database - no relation at all -
@@ -661,15 +681,35 @@ def _compile_for_inference(
         project, compile_profiles, workdir / f"{name}_target", workdir / "logs", env,
         dbt_vars=dbt_vars,
     )  # fmt: skip
-    selection = compile_selection(manifest)
+    selection = [] if json_only else compile_selection(manifest)
+    compiled: CompiledSql | None = None
+    if selection:
+        outcome = compile_models(
+            runner,
+            {u: manifest.selector(u) for u in selection},
+            {manifest.models[u].original_file_path: u for u in selection},
+        )
+        if outcome.manifest is None:
+            return None
+        # Read now: the second compile rewrites the same manifest.json.
+        compiled = CompiledSql.load(outcome.manifest, outcome.failed, dialect)
+    extra = json_compile_selection(manifest, set(selection))
+    if not extra or (compiled is None and not json_only):
+        return compiled
     outcome = compile_models(
         runner,
-        {u: manifest.selector(u) for u in selection},
-        {manifest.models[u].original_file_path: u for u in selection},
+        {u: manifest.selector(u) for u in extra},
+        {manifest.models[u].original_file_path: u for u in extra},
     )
     if outcome.manifest is None:
-        return None
-    return CompiledSql.load(outcome.manifest, outcome.failed, dialect)
+        return compiled
+    more = CompiledSql.load(outcome.manifest, dialect=dialect)
+    if compiled is None:
+        compiled = CompiledSql(relations=more.relations, dialect=dialect)
+    for uid in extra:
+        if uid in more.code:
+            compiled.code.setdefault(uid, more.code[uid])
+    return compiled
 
 
 def _project_dialect(config: PreflightConfig, project) -> str | None:
@@ -982,19 +1022,27 @@ def _judge_builds(
         if m.status != FAILED or r is None:
             continue
         guessed = trust.guess_bound.get(m.unique_id)
-        if (
-            guessed
-            # A compilation error happens before any data is read, so no fixture type can
-            # have caused it: that one is judged against the base as usual.
-            and "Compilation Error" not in (r.message or "")
-            and on_base is not None
+        same_on_base = (
+            on_base is not None
             and on_base.status == "error"
             and same_error(r.message, on_base.message)
-        ):
-            # Failing the same way on main proves nothing when the model reads a column
-            # whose type preflight guessed: both branches ran on the guess. It counts.
-            m.unverified_broken_on_base = True
-            m.guessed_inputs = guessed
+            # A compilation error happens before any data is read, so no fixture can have
+            # caused it: that one is judged against the base as usual.
+            and "Compilation Error" not in (r.message or "")
+        )
+        # Malformed JSON, a timestamp that does not parse, a failed cast: an error about a
+        # value, and the values are preflight's generated data on both branches.
+        shaped = fixture_shaped_error(r.message) if _reads_a_source(manifest, m.unique_id) else None
+        if same_on_base and (shaped or guessed):
+            # Failing the same way on main proves nothing about the project when the data
+            # is preflight's: not "broken on main". It counts only when the change reaches it.
+            m.fixture_error = shaped
+            m.guessed_inputs = guessed or []
+            if _reached(m.unique_id, trust):
+                m.unverified_broken_on_base = True
+                m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
+            else:
+                m.fixture_limited = True
             continue
         m.broken_on_base = is_broken_on_base(r, on_base, trust.changed_upstream)
         if (
@@ -1013,13 +1061,14 @@ def _judge_builds(
             m.reached_from = _changed_ancestors(manifest, m.unique_id, trust.modified)
     broken = {m.unique_id for m in report.models if m.broken_on_base}
     unverified = {m.unique_id for m in report.models if m.unverified_broken_on_base}
-    if not broken and not unverified:
+    limited = {m.unique_id for m in report.models if m.fixture_limited}
+    if not broken and not unverified and not limited:
         return
 
     roots = {
         m.unique_id
         for m in report.models
-        if m.status in {FAILED, NOT_VERIFIED} and not m.broken_on_base
+        if m.status in {FAILED, NOT_VERIFIED} and not m.broken_on_base and not m.fixture_limited
     }
     roots |= {
         uid
@@ -1032,6 +1081,7 @@ def _judge_builds(
             roots |= {d for d in test.depends_on if d.split(".", 1)[0] in _TABLE_KINDS}
     from_change = manifest.descendants(roots)
     from_base = manifest.descendants(broken)
+    from_limited = manifest.descendants(limited)
     # What only an unverified model is upstream of is skipped "because of it": still
     # counted, but not said to be broken by the change.
     from_unverified = manifest.descendants(unverified)
@@ -1051,6 +1101,39 @@ def _judge_builds(
             and on_base is not None
             and on_base.status == "skipped"
         )
+        # The same, behind a model preflight's data cannot build.
+        m.skipped_by_fixture_limited = (
+            m.status == SKIPPED
+            and not m.skipped_by_base
+            and m.unique_id in from_limited
+            and m.unique_id not in from_change
+            and m.unique_id not in trust.untrusted
+            and on_base is not None
+            and on_base.status == "skipped"
+        )
+
+
+def _reached(uid: str, trust: _Trust) -> bool:
+    """Whether the change can affect a node: it modified it, the node reads fixtures the
+    change reshaped, or either is upstream of it (`_Trust.changed_upstream`). Anything else
+    builds from identical SQL on identical data on both branches, so by determinism the
+    change cannot have affected it."""
+    return uid in trust.changed_upstream
+
+
+def _reads_a_source(manifest: Manifest, uid: str) -> bool:
+    """Whether a source is upstream of a node: only then is generated data in what it reads."""
+    seen: set[str] = set()
+    frontier = list(manifest.parent_map.get(uid, []))
+    while frontier:
+        parent = frontier.pop()
+        if parent in seen:
+            continue
+        if parent in manifest.sources:
+            return True
+        seen.add(parent)
+        frontier += manifest.parent_map.get(parent, [])
+    return False
 
 
 def _base_test_usable(r: NodeResult, trust: _Trust) -> bool:

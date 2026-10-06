@@ -73,3 +73,65 @@ def test_detect_dialect_honours_default_target(tmp_path: Path) -> None:
 
 def test_detect_dialect_without_profiles(tmp_path: Path) -> None:
     assert detect_dialect(tmp_path, "p") is None
+
+
+# The shape `dbt_utils.star` renders for the DuckDB target, as in Fivetran's
+# shopify__customers: double-quoted identifiers, one per line.
+STAR_SQL = """with customers as (
+
+    select
+        "customer_id",
+  "email",
+  "first_name"
+    from "memory"."s"."customer_metafields"
+
+)
+select customers.customer_id, initcap(customers.first_name) as first_name
+from customers
+where customers.email != "" and customers."customer_id" > 0
+"""
+
+
+def _star_db() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect()
+    con.execute("create schema s")
+    con.execute(
+        "create table s.customer_metafields as "
+        "select 1 as customer_id, 'a@b.c' as email, 'ada' as first_name"
+    )
+    return con
+
+
+def test_dbt_rendered_identifiers_stay_identifiers_from_bigquery() -> None:
+    out = transpile_sql(STAR_SQL, "bigquery")
+    assert "'customer_id'" not in out and "'email'" not in out
+    assert "email <> ''" in out  # BigQuery's own "" string is still a string
+    assert _star_db().execute(out).fetchall() == [(1, "Ada")]
+
+
+def test_bigquery_double_quoted_strings_stay_strings() -> None:
+    out = transpile_sql(
+        'select concat(first_name, " ", last_name) as n, if(paid, "yes", "no") as p, '
+        '\'single\' as s from `p`.`d`.`t` where status in ("paid", "shipped")',
+        "bigquery",
+    )
+    assert "' '" in out and "'yes'" in out and "'no'" in out
+    assert "'paid'" in out and "'shipped'" in out and "'single'" in out
+
+
+def test_duckdb_decides_when_a_token_could_be_either() -> None:
+    # A constant string column written BigQuery's way reads as a column under the dbt
+    # rule; DuckDB cannot plan that, so the plain reading wins.
+    con = _star_db()
+
+    def accepts(sql: str) -> bool:
+        try:
+            con.execute(f"explain {sql}")
+            return True
+        except duckdb.Error:
+            return False
+
+    sql = 'select "paid", customer_id from "memory"."s"."customer_metafields"'
+    assert "`paid`" not in transpile_sql(sql, "bigquery", accepts)
+    assert con.execute(transpile_sql(sql, "bigquery", accepts)).fetchall() == [("paid", 1)]
+    assert con.execute(transpile_sql(STAR_SQL, "bigquery", accepts)).fetchall() == [(1, "Ada")]

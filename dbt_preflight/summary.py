@@ -31,6 +31,7 @@ from dbt_preflight.report import (
     _generic_test_label,
     _human_reading,
     broken_on_base_error,
+    fixture_limited_reason,
 )
 from dbt_preflight.schema import InferredSource
 
@@ -59,6 +60,8 @@ def _model_counts(models: list[ModelReport]) -> dict[str, int]:
         "failed_on_base": 0,
         "skipped_by_base": 0,
         "unverified_broken_on_base": 0,
+        "fixture_limited": 0,
+        "skipped_by_fixture_limited": 0,
     }
     by_status = {
         BUILT: "built",
@@ -77,6 +80,12 @@ def _model_counts(models: list[ModelReport]) -> dict[str, int]:
             continue
         if m.skipped_by_base:
             counts["skipped_by_base"] += 1
+            continue
+        if m.fixture_limited:
+            counts["fixture_limited"] += 1
+            continue
+        if m.skipped_by_fixture_limited:
+            counts["skipped_by_fixture_limited"] += 1
             continue
         key = by_status.get(m.status)
         if key:
@@ -99,6 +108,8 @@ def _model(m: ModelReport) -> dict[str, Any]:
         "skipped_by_base": m.skipped_by_base,
         "unverified_broken_on_base": m.unverified_broken_on_base,
         "skipped_by_unverified": m.skipped_by_unverified,
+        "fixture_limited": m.fixture_limited,
+        "skipped_by_fixture_limited": m.skipped_by_fixture_limited,
         "dialect_function": m.dialect_function,
     }
 
@@ -165,6 +176,7 @@ def _fixtures(report: PreflightReport) -> dict[str, Any] | None:
         "total_rows": fx.total_rows,
         "inferred_sources": [_inferred_source(s) for s in fx.inferred_sources],
         "skipped_sources": list(fx.skipped_sources),
+        "json_columns": list(fx.json_columns),
         "guessed_sources": fx.guessed_sources,
         "warnings": {
             "unmatched_sources": list(fx.unmatched_sources),
@@ -229,6 +241,17 @@ def build_summary(
             }
             for m in report.broken_on_base_models
         ],
+        "fixture_limited_models": [
+            {
+                "name": m.name,
+                "unique_id": m.unique_id,
+                "error": broken_on_base_error(m),
+                "reason": fixture_limited_reason(m),
+                "fixture_error": m.fixture_error,
+                "guessed_inputs": list(m.guessed_inputs),
+            }
+            for m in report.fixture_limited_models
+        ],
         "unverified_broken_on_base_models": [
             {
                 "name": m.name,
@@ -236,6 +259,7 @@ def build_summary(
                 "error": broken_on_base_error(m),
                 "reached_from": list(m.reached_from),
                 "guessed_inputs": list(m.guessed_inputs),
+                "fixture_error": m.fixture_error,
             }
             for m in report.unverified_broken_models
         ],

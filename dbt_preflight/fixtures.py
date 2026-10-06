@@ -6,6 +6,12 @@ have stamped on, casts everything to the DBML type, and loads it. model2data's o
 warnings about the data it generated (columns it had to fill with generic text, tables
 stuck in an unresolved foreign-key cycle, ...) are collected onto the summary too, so the
 comment can tell a weak fixture from a strong one.
+
+A text column some model reads with a JSON function gets JSON instead of model2data's text,
+with every path the SQL reads present (`json_columns.py`): from the column's note in the
+DBML (`JSON, keys read: ...`) and from what the project's SQL reads, traced back to the
+source (`schema.json_reads`). The values come from the seed and the table and column names
+alone, and keep the column's nulls.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from model2data.parse.dbml import get_parse_warnings
 from model2data.utils import normalize_identifier
 
 from dbt_preflight.config import PreflightConfig
+from dbt_preflight.json_columns import JSON_CAPABLE_TYPES, json_values, merge_shape, parse_note
 from dbt_preflight.manifest import SourceTable
 from dbt_preflight.schema import InferredSource, ResolvedSchema, source_table_names
 
@@ -73,6 +80,9 @@ class FixtureSummary:
     cyclic_tables: list[str] = field(default_factory=list)
     unresolved_composite_keys: list[str] = field(default_factory=list)
     parse_warnings: list[str] = field(default_factory=list)
+    # "<identifier>.<column>" of the text columns filled with JSON, because a model reads
+    # them with a JSON function (or the schema's note says one does).
+    json_columns: list[str] = field(default_factory=list)
 
     @property
     def guessed_sources(self) -> int:
@@ -158,6 +168,8 @@ def build_fixtures(
                 if col not in df.columns:
                     df[col] = _loader_values(col, table_name, len(df), config.seed)
 
+            for col in _fill_json(df, schema, src, table_name, config.seed):
+                summary.json_columns.append(f"{src.identifier}.{col}")
             _load(con, src.schema, src.identifier, df, schema.tables[table_name], loader_cols)
             summary.tables.append(
                 LoadedTable(
@@ -172,7 +184,33 @@ def build_fixtures(
         con.close()
 
     summary.unused_dbml_tables = sorted(set(generated) - used)
+    # model2data counted these as placeholder text; they hold JSON now.
+    filled = {c.split(".", 1)[1] for c in summary.json_columns}
+    summary.unmapped_columns = [(c, t) for c, t in summary.unmapped_columns if c not in filled]
     return summary
+
+
+def _fill_json(
+    df: pd.DataFrame, schema: ResolvedSchema, src: SourceTable, table_name: str, seed: int
+) -> list[str]:
+    """Replace, in place, the values of the columns read as JSON; return their names.
+
+    Only a text column (or one typed `json`) qualifies: a column the schema types as a
+    number or a date stays what the schema says, whatever a model does with it."""
+    filled: list[str] = []
+    for col in schema.tables[table_name].columns:
+        base = col.data_type.strip().lower().split("(")[0]
+        if base not in JSON_CAPABLE_TYPES or col.name not in df.columns:
+            continue
+        noted = parse_note(col.description)
+        read = schema.json_reads.get((src.unique_id, col.name.lower()))
+        if noted is None and read is None:
+            continue
+        shape = merge_shape(dict(noted or {}), read or {})
+        present = df[col.name].notna().tolist()
+        df[col.name] = json_values(shape, table_name, col.name, seed, present)
+        filled.append(col.name)
+    return filled
 
 
 def _load(

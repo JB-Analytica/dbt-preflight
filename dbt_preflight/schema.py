@@ -34,6 +34,14 @@ from dbt_preflight.compiled import (
     is_empty_stand_in,
     null_casts,
 )
+from dbt_preflight.json_columns import (
+    JSON_CAPABLE_TYPES,
+    Shape,
+    format_note,
+    is_json_argument,
+    json_reads_in_tree,
+    merge_shape,
+)
 from dbt_preflight.manifest import Manifest, ModelNode, SourceColumn, SourceTable, TestNode
 
 # dbt / warehouse type names -> the DBML types model2data understands.
@@ -103,6 +111,8 @@ class ResolvedSchema:
     derived: bool
     inferred: list[InferredSource] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)  # sources nothing reads: no fixture
+    # (source unique_id, column) -> what the models read from it as JSON (`json_reads`).
+    json_reads: dict[tuple[str, str], Shape] = field(default_factory=dict)
 
 
 def _dbml_type(data_type: str) -> str:
@@ -402,6 +412,9 @@ def _column_hint(col: exp.Column) -> str | None:
     `avg(`, `round(`, reads as numeric. Compared to a string literal, or passed to
     `lower(`/`upper(`/`trim(`/`concat(`, reads as varchar.
     """
+    # `json_extract_string(payload, '$.weight')`: whatever its name, the column is text.
+    if is_json_argument(col):
+        return "varchar"
     parent = col.parent
     # `where opportunity.iswon`, `and not x`: a bare predicate is a boolean.
     if isinstance(parent, (exp.Where, exp.Not, exp.And, exp.Or)):
@@ -1407,6 +1420,88 @@ def _is_read(src: SourceTable, manifest: Manifest, view: CompiledView | None) ->
     )
 
 
+def _has_star(tree: exp.Expr) -> bool:
+    return any(
+        isinstance(e, exp.Star) or (isinstance(e, exp.Column) and isinstance(e.this, exp.Star))
+        for select in tree.find_all(exp.Select)
+        for e in select.expressions
+    )
+
+
+def json_reads(
+    manifest: Manifest, compiled: CompiledSql | None = None, view: CompiledView | None = None
+) -> dict[tuple[str, str], Shape]:
+    """{(source unique_id, column): the paths read from it} for every source column some
+    model reads with a JSON function (`json_columns.json_reads_in_tree`), in its raw SQL or
+    its compiled SQL.
+
+    The column a model passes to the function is followed back by name, the way a cast in
+    a staging model is: into each model it depends on that has the name among its output
+    aliases (`cast(receipt as varchar) as receipt`, `payload as order_payload`) or selects
+    a `*`, or whose SQL shows no select at all (Fivetran's `{{ union_data(...) }}`, when it
+    was not compiled); through a pass-through to its source; and to a
+    source it reads directly. The result is a candidate list: a name that reaches a source
+    without such a column, or one typed as something JSON cannot be, is dropped by the
+    caller, which knows the source's columns.
+    """
+    if view is None and compiled is not None:
+        view = CompiledView(manifest, compiled)
+    trees: dict[str, list[exp.Expr]] = {}
+    aliases: dict[str, dict[str, str]] = {}
+
+    def _trees(uid: str) -> list[exp.Expr]:
+        if uid not in trees:
+            found: list[exp.Expr] = []
+            if view is not None and (tree := view.tree(uid)) is not None:
+                found.append(tree)
+            raw = _parse_staging_sql(manifest.models[uid].raw_code)
+            if raw is not None:
+                found.append(raw)
+            trees[uid] = found
+            amap: dict[str, str] = {}
+            for tree in found:
+                for k, v in _alias_map_of_tree(tree).items():
+                    amap.setdefault(k, v)
+            aliases[uid] = amap
+        return trees[uid]
+
+    traced: dict[tuple[str, str], set[tuple[str, str]]] = {}
+
+    def _trace(uid: str, name: str) -> set[tuple[str, str]]:
+        if (uid, name) in traced:
+            return traced[(uid, name)]
+        traced[(uid, name)] = set()  # a guard: the graph is a DAG, but stay safe
+        _trees(uid)
+        names = [name]
+        while (nxt := aliases[uid].get(names[-1])) is not None and nxt not in names:
+            names.append(nxt)  # a rename inside the model: `payload as p` in a CTE
+        out: set[tuple[str, str]] = set()
+        for dep in manifest.models[uid].depends_on:
+            for n in names:
+                if dep in manifest.sources:
+                    out.add((dep, n))
+                elif view is not None and dep in view.pass_through:
+                    out.add((view.pass_through[dep], n))
+                elif dep in manifest.models:
+                    dep_trees = _trees(dep)
+                    opaque = not any(t.find(exp.Select) for t in dep_trees)
+                    if opaque or n in aliases[dep] or any(map(_has_star, dep_trees)):
+                        out |= _trace(dep, n)
+        traced[(uid, name)] = out
+        return out
+
+    out: dict[tuple[str, str], Shape] = {}
+    for uid in sorted(manifest.models):
+        reads: dict[str, Shape] = {}
+        for tree in _trees(uid):
+            for name, shape in json_reads_in_tree(tree).items():
+                merge_shape(reads.setdefault(name, {}), shape)
+        for name, shape in sorted(reads.items()):
+            for key in sorted(_trace(uid, name)):
+                merge_shape(out.setdefault(key, {}), shape)
+    return out
+
+
 def derive_dbml(
     manifest: Manifest, compiled: CompiledSql | None = None
 ) -> tuple[str, list[InferredSource]]:
@@ -1436,6 +1531,8 @@ class DerivedSchema:
     text: str
     inferred: list[InferredSource]
     skipped: list[str]  # "<source>.<table>" of the sources nothing reads, sorted
+    # (source unique_id, column) -> the JSON paths read, for the columns given a JSON note.
+    json_reads: dict[tuple[str, str], Shape] = field(default_factory=dict)
 
 
 def derive_schema(manifest: Manifest, compiled: CompiledSql | None = None) -> DerivedSchema:
@@ -1485,6 +1582,8 @@ def derive_schema(manifest: Manifest, compiled: CompiledSql | None = None) -> De
             if values:
                 col_values[key] = values  # declared on the source itself: it wins
 
+    reads = json_reads(manifest, view=view)
+    json_columns: dict[tuple[str, str], Shape] = {}
     enum_blocks: list[str] = []
     table_lines: list[str] = []
     for src in sources.values():
@@ -1530,6 +1629,14 @@ def derive_schema(manifest: Manifest, compiled: CompiledSql | None = None) -> De
                     f"Enum {enum_name} {{\n" + "".join(f'  "{v}"\n' for v in values) + "}\n"
                 )
                 col_type = enum_name
+            # A column a model reads with a JSON function gets JSON in the fixtures
+            # (`fixtures.build_fixtures`). The note says so in prose, which model2data reads
+            # as a description, so the file `dbt-preflight schema` writes builds the same.
+            shape = reads.get((src.unique_id, col.name.lower()))
+            if shape is not None and col_type in JSON_CAPABLE_TYPES:
+                json_columns[(src.unique_id, col.name.lower())] = shape
+                settings.append(f"note: '{format_note(shape)}'")
+                suffix = f" [{', '.join(settings)}]"
             table_lines.append(f"  {col.name} {col_type}{suffix}")
         if src.description:
             note = src.description.strip().replace("'", "\\'").splitlines()[0]
@@ -1540,7 +1647,10 @@ def derive_schema(manifest: Manifest, compiled: CompiledSql | None = None) -> De
     lines += enum_blocks  # enums first, so a column's type is defined before it is used
     lines += table_lines
     return DerivedSchema(
-        "\n".join(lines), inferred, sorted(f"{s.source_name}.{s.name}" for s in skipped)
+        "\n".join(lines),
+        inferred,
+        sorted(f"{s.source_name}.{s.name}" for s in skipped),
+        json_columns,
     )
 
 
@@ -1554,7 +1664,13 @@ def resolve_schema(
         tables, refs = parse_dbml(schema_file)
         if not tables:
             raise SchemaError(f"{schema_file} contains no tables.")
-        return ResolvedSchema(tables=tables, refs=refs, dbml_path=schema_file, derived=False)
+        return ResolvedSchema(
+            tables=tables,
+            refs=refs,
+            dbml_path=schema_file,
+            derived=False,
+            json_reads=json_reads(manifest, compiled),
+        )
 
     derived = derive_schema(manifest, compiled)
     text, inferred = derived.text, derived.inferred
@@ -1575,4 +1691,5 @@ def resolve_schema(
         derived=True,
         inferred=inferred,
         skipped=derived.skipped,
+        json_reads=derived.json_reads,
     )

@@ -85,15 +85,16 @@ written), and 1 when it cannot derive a schema or the output exists.
 | `elapsed_seconds` | number | Total run time. |
 | `fatal` | string or null | Set only on `could_not_run`: why preflight could not run at all. |
 | `note` | string or null | One line of context also shown under the comment's summary line, e.g. why every source counted as modified. |
-| `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base/unverified_broken_on_base), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, and `tests.failed_on_base` the tests that also fail on the base branch. |
-| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, unverified_broken_on_base, skipped_by_unverified, dialect_function. `status` stays dbt's (`failed`, `skipped`); the two booleans say it is not this change's doing. |
+| `counts` | object | `models` (built/failed/skipped/not_verified/no_result/failed_on_base/skipped_by_base/unverified_broken_on_base/fixture_limited/skipped_by_fixture_limited), `tests` (passed/failed/warned/failed_on_base), `violations` (error/warn), `metrics` (defined/moved). `models.failed`, `models.skipped` and `tests.failed` count only what the change answers for; `models.failed_on_base` counts models that fail to build on the base branch too, `models.skipped_by_base` the models skipped only because of one of those, `models.fixture_limited` the models the change does not reach that preflight's generated data cannot build, `models.skipped_by_fixture_limited` what only those skipped (neither is in `failed` or `skipped`), and `tests.failed_on_base` the tests that also fail on the base branch. |
+| `models` | array | Every model in the run's selection: name, path, status, changed, rows, tests_passed/failed/warned, tests_failed_on_base, broken_on_base, skipped_by_base, unverified_broken_on_base, skipped_by_unverified, fixture_limited, skipped_by_fixture_limited, dialect_function. `status` stays dbt's (`failed`, `skipped`); the two booleans say it is not this change's doing. |
 | `failing_tests` | array | Every failing or warning test the change answers for: name (dbt's own), readable_name (a generic test's own name and target, when it has one), model, status, failures, base_failures (the base branch's failing-row count whenever the same, unedited test also failed there with rows; null when it passed, errored or is new or edited. In this list a non-null value is always smaller than `failures`: the test got worse), reading (a one-line plain-English reading of the DuckDB error, when there is one), guessed_inputs (source columns it reads, directly or upstream, whose type preflight guessed; an error there is not judged against the base, failing rows still can be pre-existing). A test that fails the same way on the base branch is not here but in `preexisting_failing_tests`. |
 | `preexisting_failing_tests` | array | Failing tests that fail on the base branch the same way, on at least as many rows: same keys as `failing_tests`. They do not fail the run. Empty without `--base-ref`. |
-| `unverified_broken_on_base_models` | array | Models that fail on the base branch the same way, but that the change reaches from upstream, so they could not be checked: name, unique_id, error, reached_from (what the change modified upstream of it), guessed_inputs (the source columns it reads, as `table.column`, whose type preflight guessed; when set, that is why it could not be checked). They do fail the run, and are counted in `counts.models.failed`. Empty without `--base-ref`. |
+| `fixture_limited_models` | array | Models the change does not reach that fail the same way on the base branch over preflight's generated data: name, unique_id, error, reason (the kind of value, e.g. `malformed JSON`, or "reads `x.y`, whose type preflight guessed"), fixture_error, guessed_inputs. A warning: they do not fail the run (`passed_with_warnings`). Empty without `--base-ref`. |
+| `unverified_broken_on_base_models` | array | Models that fail on the base branch the same way, but that the change reaches, so they could not be checked: name, unique_id, error, reached_from (what the change modified upstream of it), guessed_inputs (the source columns it reads, as `table.column`, whose type preflight guessed; when set, that is why it could not be checked), fixture_error (when the shared error is about a generated value, what kind: `malformed JSON`, `an invalid timestamp`, `an invalid date`, `an invalid time`, `a date or time format it could not parse`, `a failed cast`; null otherwise). They do fail the run, and are counted in `counts.models.failed`. Empty without `--base-ref`. |
 | `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
-| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
+| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), the text columns filled with JSON because a model parses them as JSON (`json_columns`, as `identifier.column`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
 
 ### Failing tests and the base branch
@@ -151,17 +152,33 @@ fail). Anything else skipped counts. The comment lists broken models and what th
 in an unfolded *Broken on main too* section above *Changed models*, and points there at
 the tests already failing on the base, whose details stay folded further down.
 
-A model that fails on the base the same way while reading a source column whose type
-preflight guessed (no DBML, and the column untyped in `sources.yml` and in the SQL) is not
-*broken on the base too* either: both branches ran on the guess, so the shared failure may
-be the guess's. It goes under *Could not be checked*, naming the guessed columns
-(`guessed_inputs`), and counts against the run, unless the error is a compilation error,
-which happens before any data is read. A test over such a model, or over a guessed source
-column, carries `guessed_inputs` too. If it errors on the base (a type mismatch or failed
-cast on guessed data), its base result is dropped, so it counts. If it fails on rows on
-both branches, it stays pre-existing, with the guessed columns named. "Reads" is column by column, as far as inference can tell: the models whose
-SQL names the column (for a column typed `varchar` because a reader could not be followed,
-those readers), and everything downstream of them.
+A model that fails on the base the same way over preflight's own data is not *broken on the
+base too* either, since main is not what failed. Over preflight's data means one of two
+things: it reads a source column whose type preflight guessed (no DBML, and the column
+untyped in `sources.yml` and in the SQL), directly or upstream (`guessed_inputs`); or the
+error is about a value rather than the SQL - malformed JSON, a timestamp, date or time that
+does not parse, a failed cast of a string - in a model with a source upstream
+(`fixture_error`; the patterns are DuckDB's error text, listed in one place,
+`baseline.FIXTURE_SHAPED_ERRORS`). A compilation error is never one: it happens before any
+data is read. Where it goes depends on whether the change reaches the model (it modified
+it, the model reads fixtures the change reshaped, or either is upstream of it,
+`cli._reached`):
+
+- **Reached:** *Could not be checked*, with the reason named. It counts against the run
+  (`unverified_broken_on_base: true`, in `counts.models.failed`).
+- **Not reached:** the model builds from identical SQL on identical data on both branches,
+  so the change cannot have affected it. It goes in an unfolded *Preflight's generated data
+  cannot build this model* section next to *Broken on main too*, with the reason, and is a
+  warning (`fixture_limited: true`, in `fixture_limited_models` and
+  `counts.models.fixture_limited`). What only it skips is listed with it
+  (`skipped_by_fixture_limited`) and does not count either.
+
+A test over a model reading a guessed column, or over a guessed source column, carries
+`guessed_inputs` too. If it errors on the base (a type mismatch or failed cast on guessed
+data), its base result is dropped, so it counts. If it fails on rows on both branches, it
+stays pre-existing, with the guessed columns named. "Reads" is column by column, as far as
+inference can tell: the models whose SQL names the column (for a column typed `varchar`
+because a reader could not be followed, those readers), and everything downstream of them.
 
 A model that fails on the base the same way but has something the change modified upstream
 of it is neither (below a source whose fixtures changed the base ran on the change's data,
@@ -215,6 +232,11 @@ Added: `preexisting_failing_tests`, `broken_on_base_models`, `counts.tests.faile
 failing test. A consumer that only reads `verdict` or `exit_code` needs no change; one that
 wants every failure regardless reads `preexisting_failing_tests` and
 `broken_on_base_models` alongside the narrowed keys.
+
+Added since, without a version bump (0.5.0): `fixture_limited_models`,
+`counts.models.fixture_limited` and `counts.models.skipped_by_fixture_limited`, per-model
+`fixture_limited` and `skipped_by_fixture_limited`, `fixture_error` and `guessed_inputs` on
+`unverified_broken_on_base_models`, and `fixtures.json_columns`.
 
 ## The comment's marker
 

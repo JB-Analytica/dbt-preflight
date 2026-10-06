@@ -101,3 +101,36 @@ def is_broken_on_base(head: NodeResult, base: NodeResult | None, untrusted: set[
     if base is None or base.status != "error":
         return False
     return same_error(head.message, base.message)
+
+
+# DuckDB errors about the shape of a value rather than about the SQL, each with the words
+# the comment uses for it. When a model fails with one of these on both branches, the value
+# is preflight's generated data as likely as the project's: "broken on main" would blame
+# the project for the fixture. Kept narrow on purpose: a missing column, a type mismatch
+# between two expressions or a failing test say something about the SQL, and stay out.
+FIXTURE_SHAPED_ERRORS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"Malformed JSON"), "malformed JSON"),
+    (
+        re.compile(r"invalid timestamp field format|timestamp field value out of range"),
+        "an invalid timestamp",
+    ),
+    (re.compile(r"invalid date field format|date field value out of range"), "an invalid date"),
+    (re.compile(r"invalid time field format|time field value out of range"), "an invalid time"),
+    (
+        re.compile(r"Could not parse string \"[^\n]*\" according to format specifier"),
+        "a date or time format it could not parse",
+    ),
+    (re.compile(r"Conversion Error: Could not convert string"), "a failed cast"),
+)
+
+
+def fixture_shaped_error(message: str | None) -> str | None:
+    """What kind of generated value a dbt error is about (`FIXTURE_SHAPED_ERRORS`), or
+    None when it is about something else. A compilation error never is: it happens before
+    any data is read."""
+    if not message or "Compilation Error" in message:
+        return None
+    for pattern, reason in FIXTURE_SHAPED_ERRORS:
+        if pattern.search(message):
+            return reason
+    return None

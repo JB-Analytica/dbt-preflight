@@ -51,13 +51,32 @@ All notable changes to this project are documented here. The format follows
 - **A failure over a guessed column is never "broken on main".** A model that reads a
   source column whose type preflight guessed, directly or upstream, and fails the same
   way on both branches, is listed under "Could not be checked" with the guessed columns
-  named (`guessed_inputs` in the summary), and counts against the run. A compilation error
-  is exempt, since it happens before any data is read. A test over such a model, or over a
+  named (`guessed_inputs` in the summary), and counts against the run, when the change
+  reaches it; when it does not, it is a warning (see "preflight's own data" below). A
+  compilation error is exempt, since it happens before any data is read. A test over such
+  a model, or over a
   guessed source column, names the guessed columns it reads. When it *errors* (a type
   mismatch, a failed cast) it is not judged against the base and counts. When it fails on
   rows on both branches it stays pre-existing, annotated: an invariant that random data
   breaks is not a typing question. The guesses are tied to the verdict instead of only appearing in the folded
   Fixtures block.
+- **A failure on preflight's own data is never "broken on main".** A model that fails the
+  same way on both branches with an error about the shape of a value - malformed JSON, a
+  timestamp, date or time that does not parse, a failed cast of a string - fails on a value
+  preflight generated (`baseline.FIXTURE_SHAPED_ERRORS`, DuckDB's error text in one list;
+  a compilation error and a model with no source upstream are exempt). Such a model, and
+  one failing over a guessed column, is split by whether the change reaches it (modifies
+  it, reshapes its fixtures, or either upstream): reached, it is "Could not be checked" and
+  counts; not reached, it builds from identical SQL on identical data on both sides, so it
+  goes in a new warning section, "Preflight's generated data cannot build this model", with
+  the reason, and what only it skips is not counted either. The summary gains
+  `fixture_limited_models`, `counts.models.fixture_limited` and
+  `counts.models.skipped_by_fixture_limited`, per-model `fixture_limited` and
+  `skipped_by_fixture_limited`, and `fixture_error` on `unverified_broken_on_base_models`
+  (schema version unchanged).
+- "Could not be checked" gives each model its own reason (a generated value, a guessed
+  column, or a change upstream hiding behind DuckDB's first error) under a generic intro,
+  instead of saying of every model that the change reaches it from upstream.
 - A snapshot or a singular test reading a source counts as a reader that cannot be
   followed, so that source's unread untyped columns are flagged `varchar` rather than
   typed by name.
@@ -100,6 +119,32 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A column a model parses as JSON gets valid JSON.** It used to get model2data's
+  placeholder sentences, so a model doing `json_extract` failed on both branches and was
+  reported "broken on main" over preflight's own data (Fivetran's `shopify__orders` and
+  `shopify__transactions`: `Malformed JSON ... Input: "Weight reason."`). Preflight now finds
+  the source columns read with a JSON function (DuckDB's `json_extract*`, `->`, `->>`,
+  `json_value`, `json_valid`, `json_keys`, `from_json`, `::json`; BigQuery's
+  `json_extract*`, `json_value`, `parse_json` where they survive), in raw and compiled SQL,
+  traced back through staging aliases, `select *` and pass-throughs, together with the
+  paths read and the type a cast after the extraction implies. The fixture step fills those
+  columns with JSON objects holding every path (nested objects, arrays where the SQL
+  indexes one), derived from the seed, table and column name, with the column's nulls kept.
+  Only a text column qualifies; model2data is untouched. Models whose raw SQL calls a macro
+  mentioning JSON are compiled too, in a second compile that cannot cost the inference
+  anything, also on a run with a DBML file. The derived schema, and the file
+  `dbt-preflight schema` writes, note such a column as `JSON, keys read: ...`, and a run on
+  that file builds the same fixtures. The fixtures block lists the columns, and the summary
+  JSON gains `fixtures.json_columns` (schema version unchanged).
+- Transpiling from BigQuery (and Spark, Databricks, Hive) turned identifiers dbt rendered
+  in double quotes for the DuckDB target into string literals: `dbt_utils.star` became
+  `SELECT 'customer_id', 'email'`, and Fivetran's `shopify__customers` failed with
+  `Values list "customers" does not have a column named "customer_id"`. A double-quoted
+  token is now an identifier where only an identifier can stand (next to a `.`, after
+  `as`, or alone as a select-list item outside a function call); BigQuery's own
+  double-quoted strings elsewhere (`status = "paid"`, `concat(a, " ", b)`) stay strings,
+  and single-quoted strings and comments are untouched. When DuckDB cannot plan that
+  reading, the previous one is used, so DuckDB decides where a token could be either.
 - A derived table could get two `pk` columns (`id`, and a column whose staging alias was
   tested `unique` and `not_null`), which model2data reads as one composite key, so neither
   was unique and the staging model's `unique` test failed on the fixtures

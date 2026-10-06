@@ -638,9 +638,8 @@ def test_a_model_broken_on_base_that_the_change_reaches_could_not_be_checked(
     assert summary["counts"]["models"]["unverified_broken_on_base"] == 1
     assert summary["broken_on_base_models"] == []
     section = body.split("### ❓ Could not be checked (1)")[1].split("###")[0]
-    assert "- `fct_orders` — fails on `main` too, and this change reaches it from upstream" in (
-        section
-    )
+    assert "- `fct_orders` — this change reaches it from upstream" in section
+    assert "fails on `main` too, the same way" in section
     assert "(`stg_webshop__orders`)" in section
     if "Unchanged models this change breaks" in body:
         breaks = body.split("Unchanged models this change breaks")[1].split("###")[0]
@@ -700,8 +699,12 @@ def test_a_failure_over_a_guessed_column_is_not_broken_on_main(tmp_path: Path) -
 
     code, body, summary = _run(repo, tmp_path, config=False)
     assert [m["name"] for m in summary["broken_on_base_models"]] == ["stg_ids"]
-    [unverified] = summary["unverified_broken_on_base_models"]
-    assert unverified["name"] == "stg_status"
-    assert unverified["guessed_inputs"] == ["orders.status"]
+    # The change (the marts) does not reach `stg_status`: preflight's data cannot build it,
+    # a warning. The marts it skips are modified, so they still count.
+    assert summary["unverified_broken_on_base_models"] == []
+    [limited] = summary["fixture_limited_models"]
+    assert limited["name"] == "stg_status"
+    assert limited["guessed_inputs"] == ["orders.status"]
     assert "reads `orders.status`, whose type preflight guessed" in body
+    assert "Preflight's generated data cannot build this model" in body
     assert summary["verdict"] == "failed"

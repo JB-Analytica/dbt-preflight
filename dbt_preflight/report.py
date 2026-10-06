@@ -52,11 +52,24 @@ class ModelReport:
     # "<table>.<column>" source columns it reads, directly or upstream, whose type preflight
     # guessed: a failure on both branches may be the guess, so it is not "broken on main".
     guessed_inputs: list[str] = field(default_factory=list)
+    # Fails on both branches with an error about a generated value (`baseline.
+    # FIXTURE_SHAPED_ERRORS`): what kind, e.g. "malformed JSON". Not "broken on main".
+    fixture_error: str | None = None
     skipped_by_unverified: bool = False
+    # Fails the same way on both branches over preflight's data (`fixture_error`, or a
+    # guessed column in `guessed_inputs`), and the change does not reach it: identical SQL
+    # on identical data, so the change cannot affect it. A warning, never a failure.
+    fixture_limited: bool = False
+    skipped_by_fixture_limited: bool = False  # skipped only because of a model like that
 
     @property
     def not_this_change(self) -> bool:
-        return self.broken_on_base or self.skipped_by_base
+        return (
+            self.broken_on_base
+            or self.skipped_by_base
+            or self.fixture_limited
+            or self.skipped_by_fixture_limited
+        )
 
 
 @dataclass
@@ -116,12 +129,21 @@ class PreflightReport:
     @property
     def failed_models(self) -> list[ModelReport]:
         """Models that failed to build because of this change."""
-        return [m for m in self.models if m.status == FAILED and not m.broken_on_base]
+        return [
+            m
+            for m in self.models
+            if m.status == FAILED and not m.broken_on_base and not m.fixture_limited
+        ]
 
     @property
     def broken_on_base_models(self) -> list[ModelReport]:
         """Models that fail to build on the base branch too, the same way."""
         return [m for m in self.models if m.broken_on_base]
+
+    @property
+    def fixture_limited_models(self) -> list[ModelReport]:
+        """Models the change does not reach that preflight's generated data cannot build."""
+        return [m for m in self.models if m.fixture_limited]
 
     @property
     def unverified_broken_models(self) -> list[ModelReport]:
@@ -169,7 +191,11 @@ class PreflightReport:
     def unbuilt_models(self) -> list[ModelReport]:
         """Models in the selection that never produced a table: skipped or without a result."""
         return [
-            m for m in self.models if m.status in {SKIPPED, NO_RESULT} and not m.skipped_by_base
+            m
+            for m in self.models
+            if m.status in {SKIPPED, NO_RESULT}
+            and not m.skipped_by_base
+            and not m.skipped_by_fixture_limited
         ]
 
     @property
@@ -198,6 +224,7 @@ class PreflightReport:
             or self.breaking_diffs
             or self.preexisting_tests
             or self.broken_on_base_models
+            or self.fixture_limited_models
         )
 
 
@@ -501,6 +528,7 @@ def render(report: PreflightReport) -> str:
         lines.append("")
 
     lines += _broken_on_base_section(report)
+    lines += _fixture_limited_section(report)
 
     # Changed models. When there is no base to diff against, every model is "changed".
     rows = report.changed or report.models
@@ -514,10 +542,14 @@ def render(report: PreflightReport) -> str:
         build_cell = _STATUS_LABEL.get(m.status, m.status)
         if m.broken_on_base:
             build_cell = f"⚠️ fails on {_base_name(report)} too"
+        elif m.fixture_limited:
+            build_cell = "⚠️ preflight's data cannot build it"
         elif m.unverified_broken_on_base:
             build_cell = "❓ could not be checked"
         elif m.skipped_by_base:
             build_cell += f" (broken on {_base_name(report)} upstream)"
+        elif m.skipped_by_fixture_limited:
+            build_cell += " (preflight's data cannot build what it reads)"
         if m.status == NOT_VERIFIED and m.dialect_function:
             build_cell += f" (`{m.dialect_function}`)"
         lines.append(f"| `{m.name}` | {build_cell} | {rows_cell} | {_tests_cell(m)} |")
@@ -658,34 +690,18 @@ def _unverified_section(report: PreflightReport) -> list[str]:
     if not unverified:
         return []
     base = _base_name(report)
+    one = len(unverified) == 1
     lines = [
         f"### ❓ Could not be checked ({len(unverified)})",
         "",
-        f"{'This model fails' if len(unverified) == 1 else 'These models fail'} on `{base}` "
-        "too, the same way, but this change reaches "
-        f"{'it' if len(unverified) == 1 else 'them'} from upstream. DuckDB reports only the "
-        "first error in a statement, so a new one could be hiding behind the old one, and "
-        f"{'it counts' if len(unverified) == 1 else 'they count'} against this pull request "
-        "until that error is fixed.",
+        f"{'This model fails' if one else 'These models fail'} on `{base}` too, the same way, "
+        f"but for the reason given {'it still counts' if one else 'each still counts'} "
+        "against this pull request.",
         "",
     ]
     skipped = [m for m in report.models if m.skipped_by_unverified]
     for m in unverified:
-        if m.guessed_inputs:
-            cols = ", ".join(f"`{c}`" for c in m.guessed_inputs[:_GUESSED_SHOWN])
-            more = len(m.guessed_inputs) - _GUESSED_SHOWN
-            cols += f" and {more} more" if more > 0 else ""
-            lines.append(
-                f"- `{m.name}` — fails on `{base}` too, but it reads {cols}, whose type "
-                "preflight guessed (see Fixtures), so the failure may be the guess rather "
-                f"than the project: {broken_on_base_error(m)}"
-            )
-            continue
-        via = ", ".join(f"`{n}`" for n in m.reached_from) or "upstream"
-        lines.append(
-            f"- `{m.name}` — fails on `{base}` too, and this change reaches it from upstream "
-            f"({via}): {broken_on_base_error(m)}"
-        )
+        lines.append(f"- `{m.name}` — {_unverified_reason(m)}: {broken_on_base_error(m)}")
     if skipped:
         names = [f"`{m.name}`" for m in skipped]
         shown, rest = names[:_SKIPPED_BY_BASE_SHOWN], names[_SKIPPED_BY_BASE_SHOWN:]
@@ -705,6 +721,78 @@ def _unverified_section(report: PreflightReport) -> list[str]:
 
 
 _GUESSED_SHOWN = 5  # guessed columns named per model before "and N more"
+
+
+def _guessed_list(m: ModelReport) -> str:
+    cols = ", ".join(f"`{c}`" for c in m.guessed_inputs[:_GUESSED_SHOWN])
+    more = len(m.guessed_inputs) - _GUESSED_SHOWN
+    return cols + (f" and {more} more" if more > 0 else "")
+
+
+def _unverified_reason(m: ModelReport) -> str:
+    """Why one model failing the same way on the base still counts, in its own words."""
+    via = ", ".join(f"`{n}`" for n in m.reached_from) or "upstream"
+    if m.fixture_error:
+        return (
+            f"fails on a value preflight generated ({m.fixture_error}), and this change "
+            f"reaches it ({via}), so a new error could be hiding behind that one"
+        )
+    if m.guessed_inputs:
+        return (
+            f"reads {_guessed_list(m)}, whose type preflight guessed (see Fixtures), so the "
+            "failure may be the guess rather than the project, and this change reaches it "
+            f"({via})"
+        )
+    return (
+        f"this change reaches it from upstream ({via}), and DuckDB reports only the first "
+        "error in a statement, so a new one could be hiding behind the old one"
+    )
+
+
+def fixture_limited_reason(m: ModelReport) -> str:
+    """`malformed JSON`, or "reads `x.y`, whose type preflight guessed"."""
+    if m.fixture_error:
+        return m.fixture_error
+    return f"reads {_guessed_list(m)}, whose type preflight guessed"
+
+
+def _fixture_limited_section(report: PreflightReport) -> list[str]:
+    """Models the change cannot affect that preflight's data cannot build: a warning.
+
+    Next to "Broken on main too", because it is the same kind of news: these were not
+    checked, and the change did not do it. Unlike that section, main is not to blame
+    either: the failure is in the data preflight generated."""
+    limited = report.fixture_limited_models
+    if not limited:
+        return []
+    one = len(limited) == 1
+    lines = [
+        f"### ⚠️ Preflight's generated data cannot build {'this model' if one else 'these models'}"
+        f" ({len(limited)})",
+        "",
+        f"{'It fails' if one else 'They fail'} the same way on `{_base_name(report)}`, on "
+        "values preflight generated, and this change does not reach "
+        f"{'it' if one else 'them'}, so it does not fail this check. Typing the columns "
+        "involved, in `sources.yml` or a schema file (`dbt-preflight schema`), usually fixes "
+        "it.",
+        "",
+    ]
+    for m in limited:
+        lines.append(f"- `{m.name}` — {fixture_limited_reason(m)}: {broken_on_base_error(m)}")
+    lines.append("")
+    skipped = [f"`{m.name}`" for m in report.models if m.skipped_by_fixture_limited]
+    if skipped:
+        shown, rest = skipped[:_SKIPPED_BY_BASE_SHOWN], skipped[_SKIPPED_BY_BASE_SHOWN:]
+        lines.append(f"Skipped because of {'it' if one else 'them'}: {', '.join(shown)}.")
+        if rest:
+            lines += [
+                f"<details><summary>{len(rest)} more skipped</summary>",
+                "",
+                ", ".join(rest) + ".",
+                "</details>",
+            ]
+        lines.append("")
+    return lines
 
 
 def _base_name(report: PreflightReport) -> str:
@@ -1021,6 +1109,12 @@ def _fixtures_block(report: PreflightReport) -> str:
             "",
             "Read by no model, snapshot or test, so no fixture: "
             + ", ".join(f"`{s}`" for s in fx.skipped_sources),
+        ]
+    if fx.json_columns:
+        parts += [
+            "",
+            "Filled with JSON, with the keys the models read, because a model parses them as "
+            "JSON: " + ", ".join(f"`{c}`" for c in fx.json_columns),
         ]
     if fx.inferred_sources:
         parts += ["", "Columns inferred from the staging models that read them:"]
