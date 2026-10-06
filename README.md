@@ -153,7 +153,7 @@ jobs:
       - uses: JB-Analytica/dbt-preflight@v0
 ```
 
-`@v0` follows the latest 0.x release; pin a release tag such as `@v0.4.0` for an exact version. Pull requests
+`@v0` follows the latest 0.x release; pin a release tag such as `@v0.5.0` for an exact version. Pull requests
 from forks run with a read-only token, so for those the report lands in the job summary
 only, with a note saying so.
 
