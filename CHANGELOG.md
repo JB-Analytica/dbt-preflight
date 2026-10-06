@@ -14,6 +14,30 @@ All notable changes to this project are documented here. The format follows
   column. Fivetran's dbt_shopify now derives a schema without a hand-written DBML file
   (87 sources). The raw SQL wins where it already says something, and the fixtures block
   says how many columns came from compiled SQL.
+  - Tests carry back from compiled SQL only from a model that reads that one source and
+    keeps its rows (no join, grouping, distinct, filter or aggregate), and only through a
+    column that resolves to the source in its own scope. A mart's grain test never
+    becomes a key on the source.
+  - A model that fails to compile is excluded by its exact selector and read from raw SQL.
+    When only the head compiles, every source counts as reshaped.
+
+### Changed
+
+- **Unread declared columns are typed by their name.** A column `sources.yml` declares
+  without a `data_type` used to fail the run unless a model read it. Now it gets a type
+  from its name and is listed as guessed, but only when every model reading the source is
+  accounted for: its compiled SQL parsed (in DuckDB's grammar, the default one or the
+  project's own dialect), names the source's relation (in full, or as an unambiguous
+  `schema.table`), passes no `*` over it to its output, and reads no unqualified column
+  next to a join. Anything less keeps the error. Fivetran documents more columns than its
+  staging macros select.
+- **Numeric keys from a typed null become integers with a ref.** A column typed by a
+  compiled `cast(null as numeric(...))` and named `id` or `*_id` is an `int`. Fivetran
+  types every id `numeric(28,6)`, and decimal keys neither joined nor took a ref. A `*_id`
+  column typed this way gets a foreign-key ref when the target's `id` is an integer too.
+- `timestampntz` and `timestampltz` now read as `timestamp`. This also changes the raw-SQL
+  path: a Snowflake staging model casting to either spelling used to give the fixture
+  column that literal type name, and now gives it a timestamp.
 
 ### Fixed
 

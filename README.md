@@ -238,10 +238,14 @@ Preflight needs to know what the source tables look like. Three options:
    a macro renders when the source does not exist yet) counts as that source, and in a model
    that reads one source and nothing else, `cast(null as T) as col` means the package
    expects `col` of type `T` - a `numeric` key is taken as an integer, and keeps its
-   foreign-key ref. The raw SQL wins wherever it says something; a compiled type that
-   disagrees with it is listed in the comment. Once every reader's compiled SQL is in hand,
-   a column `sources.yml` declares but no model reads is typed by its name rather than
-   failing the run. A model that does not compile is read from its raw SQL alone.
+   foreign-key ref when its name ends in `_id` and the target's `id` is an integer. The raw
+   SQL wins wherever it says something; a compiled type that disagrees with it is listed in
+   the comment. Tests carry back from compiled SQL only from a model that reads that one
+   source and keeps its rows (no join, grouping, filter or aggregate), so a mart's grain
+   test never becomes a source key. Once every reader is accounted for - its compiled SQL
+   parsed, names the source, passes no `*` over it on, reads no unqualified column next to
+   a join - a column `sources.yml` declares but no model reads is typed by its name rather
+   than failing the run. A model that does not compile is read from its raw SQL alone.
 
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.

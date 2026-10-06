@@ -391,11 +391,13 @@ def test_compile_selection_is_source_readers_and_pass_through_readers() -> None:
 
 
 class _FakeRunner:
-    """Stands in for DbtRunner: fails on the named models until they are excluded."""
+    """Stands in for DbtRunner: fails on the given models (unique id -> file path) until
+    their exact selectors are excluded."""
 
-    def __init__(self, tmp_path, failing: list[str]) -> None:
+    def __init__(self, tmp_path, failing: dict[str, str], selectors: dict[str, str]) -> None:
         self.target_path = tmp_path
         self.failing = failing
+        self.selectors = selectors
         self.calls: list[list[str]] = []
 
     def _args(self, command: str, *extra: str) -> list[str]:
@@ -404,29 +406,206 @@ class _FakeRunner:
     def _invoke(self, args: list[str], quiet: bool = False):
         self.calls.append(args)
         excluded = args[args.index("--exclude") + 1 :] if "--exclude" in args else []
-        left = [m for m in self.failing if m not in excluded]
+        left = [u for u in sorted(self.failing) if self.selectors[u] not in excluded]
         if left:
-            msg = f"Runtime Error\n  Compilation Error in model {left[0]} (models/{left[0]}.sql)"
+            name = left[0].rsplit(".", 1)[-1]
+            msg = f"Runtime Error\n  Compilation Error in model {name} ({self.failing[left[0]]})"
             return SimpleNamespace(success=False, exception=msg, result=None)
         (self.target_path / "manifest.json").write_text("{}")
         return SimpleNamespace(success=True, exception=None, result=None)
 
 
-def test_compile_leaves_out_failing_models_and_retries(tmp_path) -> None:
-    runner = _FakeRunner(tmp_path, ["metafields", "broken"])
-    outcome = compile_models(runner, ["a", "b"])  # type: ignore[arg-type]
+_SELECTORS = {
+    "model.p.metafields": "resource_type:model,fqn:p.metafields",
+    "model.p.dim_customer.v1": "resource_type:model,fqn:p.dim_customer.v1",
+    "model.p.dim_customer.v2": "resource_type:model,fqn:p.dim_customer.v2",
+}
+_PATHS = {
+    "models/metafields.sql": "model.p.metafields",
+    "models/dim_customer_v1.sql": "model.p.dim_customer.v1",
+    "models/dim_customer_v2.sql": "model.p.dim_customer.v2",
+}
+
+
+def test_compile_leaves_out_failing_models_by_exact_selector(tmp_path) -> None:
+    # Version 1 of a versioned model fails; version 2 must still compile, so the exclusion
+    # is by selector, never by the bare name `dim_customer`.
+    failing = {"model.p.metafields": "models/metafields.sql",
+               "model.p.dim_customer.v1": "models/dim_customer_v1.sql"}  # fmt: skip
+    runner = _FakeRunner(tmp_path, failing, _SELECTORS)
+    outcome = compile_models(runner, _SELECTORS, _PATHS)  # type: ignore[arg-type]
     assert outcome.manifest == tmp_path / "manifest.json"
-    assert outcome.failed == ["broken", "metafields"]
+    assert outcome.failed == ["model.p.dim_customer.v1", "model.p.metafields"]
     assert len(runner.calls) == 3
+    last = runner.calls[-1]
+    excluded = last[last.index("--exclude") + 1 :]
+    assert excluded == [_SELECTORS["model.p.dim_customer.v1"], _SELECTORS["model.p.metafields"]]
+    assert _SELECTORS["model.p.dim_customer.v2"] in last[: last.index("--exclude")]
+    assert "dim_customer" not in last
 
 
 def test_compile_gives_up_on_an_error_it_cannot_attribute(tmp_path) -> None:
-    runner = _FakeRunner(tmp_path, [])
+    runner = _FakeRunner(tmp_path, {}, _SELECTORS)
     runner._invoke = lambda args, quiet=False: SimpleNamespace(  # type: ignore[method-assign]
         success=False, exception="Database Error: disk full", result=None
     )
-    outcome = compile_models(runner, ["a"])  # type: ignore[arg-type]
+    outcome = compile_models(runner, _SELECTORS, _PATHS)  # type: ignore[arg-type]
     assert outcome.manifest is None
+
+
+def test_a_side_that_did_not_compile_counts_every_source_as_reshaped() -> None:
+    from dbt_preflight.cli import _reshaped_sources
+
+    raw = _fivetran()
+    manifest = Manifest.from_dict(raw)
+    compiled = CompiledSql.from_dict(raw)
+    # Only the head compiled: the two derivations are not like for like.
+    assert _reshaped_sources(manifest, manifest, compiled, None) == {SRC}
+    # Both compiled the same way: nothing differs.
+    assert _reshaped_sources(manifest, manifest, compiled, compiled) == set()
+
+
+# --- Review findings: carry-back from the wrong model, readers that are not accounted for
+
+
+def _cols(d: dict) -> dict:
+    return {k: {"name": k, "data_type": v} for k, v in d.items()}
+
+
+def _fan_out(typed: bool) -> dict:
+    """A `customer_orders` mart joining a `select *` staging model of orders with
+    customers, testing its own grain (`customer_id` unique and not null)."""
+    orders = {"id": "integer", "customer_id": "integer" if typed else None,
+              "amount": "numeric" if typed else None}  # fmt: skip
+    customers = {"id": "integer", "name": "varchar" if typed else None}
+    o, c = "source.p.s.orders", "source.p.s.customers"
+    raw = {
+        "sources": {o: _source("s", "orders", _cols(orders)),
+                    c: _source("s", "customers", _cols(customers))},  # fmt: skip
+        "nodes": {
+            "model.p.stg_orders": _model(
+                "stg_orders", [o], "select * from {{ source('s','orders') }}",
+                f'select * from "{DB}"."raw_s"."orders"',
+            ),
+            "model.p.stg_customers": _model(
+                "stg_customers", [c], "select id, name from {{ source('s','customers') }}",
+                f'select id, name from "{DB}"."raw_s"."customers"',
+            ),
+            "model.p.customer_orders": _model(
+                "customer_orders", ["model.p.stg_orders", "model.p.stg_customers"], "x",
+                f'select o.customer_id, c.name, sum(o.amount) as total '
+                f'from "{DB}"."main"."stg_orders" o join "{DB}"."main"."stg_customers" c '
+                f"on c.id = o.customer_id group by 1, 2",
+            ),
+            "test.p.u": _test("u", "unique", "customer_id", "model.p.customer_orders"),
+            "test.p.n": _test("n", "not_null", "customer_id", "model.p.customer_orders"),
+        },
+    }  # fmt: skip
+    return raw
+
+
+def test_a_marts_grain_test_is_not_carried_back_through_a_pass_through() -> None:
+    dbml, _ = _derive(_fan_out(typed=False))
+    table = _table(dbml, "orders")
+    assert "  customer_id int [ref: > customers.id]" in table  # a key, not a unique one
+    assert "unique" not in table and "not null" not in table
+
+
+def test_fully_typed_project_with_a_mart_over_select_star_is_byte_identical() -> None:
+    raw = _fan_out(typed=True)
+    assert _derive(raw)[0] == _derive(raw, with_compiled=False)[0]
+
+
+def test_a_single_source_model_that_groups_carries_nothing_back() -> None:
+    raw = _fan_out(typed=False)
+    raw["nodes"]["model.p.customer_orders"].update(
+        depends_on={"nodes": ["model.p.stg_orders"]},
+        compiled_code=f'select customer_id, count(*) as n from "{DB}"."main"."stg_orders" '
+        "group by 1",
+    )
+    dbml, _ = _derive(raw)
+    assert "unique" not in _table(dbml, "orders")
+
+
+def _events(compiled_sql: str) -> dict:
+    src = "source.p.s.events"
+    return {
+        "sources": {src: _source("s", "events", _cols({"id": "integer", "occurred": None}))},
+        "nodes": {
+            "model.p.stg_events": _model(
+                "stg_events", [src], "select {{ cols() }} from {{ my_rel('s', 'events') }}",
+                compiled_sql,
+            ),
+        },
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "compiled_sql",
+    [
+        # sqlglot cannot parse it in any dialect
+        f'select id, amount ->>> 2 from "{DB}"."raw_s"."events"',
+        # the relation is not one preflight knows
+        'select id from "elsewhere"."raw_s"."events_v2"',
+        # a star that is not a pass-through hands unknown columns on
+        f'select *, now() as loaded_at from "{DB}"."raw_s"."events"',
+        f'select * exclude (id) from "{DB}"."raw_s"."events"',
+        f'with s as (select * from "{DB}"."raw_s"."events") select s.*, 1 as one from s',
+        # an unqualified column next to a join could be the source's
+        f'select e.id, occurred from "{DB}"."raw_s"."events" e join "{DB}"."main"."x" x '
+        "on x.id = e.id",
+    ],
+)
+def test_an_unaccounted_reader_keeps_the_unread_column_error(compiled_sql: str) -> None:
+    with pytest.raises(SchemaError, match="- name: occurred"):
+        _derive(_events(compiled_sql))
+
+
+def test_two_part_relation_names_match_an_unambiguous_source() -> None:
+    dbml, inferred = _derive(_events("select id, cast(occurred as date) as d from raw_s.events"))
+    assert "  occurred date\n" in _table(dbml, "events")
+    assert inferred[0].guessed_columns == []
+
+
+def test_the_projects_dialect_parses_what_duckdb_cannot() -> None:
+    raw = _events(f'select id, occurred\nfrom "{DB}"."raw_s"."events" # a BigQuery comment')
+    with pytest.raises(SchemaError):  # DuckDB's and the default grammar reject `#`
+        derive_dbml(Manifest.from_dict(raw), CompiledSql.from_dict(raw))
+    dbml, _ = derive_dbml(Manifest.from_dict(raw), CompiledSql.from_dict(raw, dialect="bigquery"))
+    assert "  occurred " in _table(dbml, "events")
+
+
+def test_typed_null_refs_only_for_id_names_to_integer_keys() -> None:
+    raw = _fivetran()
+    orders_src, accounts_src = "source.p.shopify.orders", "source.p.shopify.accounts"
+    raw["sources"][orders_src] = _source("shopify", "orders")
+    raw["sources"][accounts_src] = _source(
+        "shopify", "accounts", _cols({"id": "varchar", "name": "varchar"})
+    )
+    raw["nodes"]["model.p.stg_shopify__orders"] = _model(
+        "stg_shopify__orders", [orders_src], "{{ fill() }}",
+        "select cast(null as numeric(28,6)) as id, cast(null as integer) as customer, "
+        "cast(null as integer) as account_id, cast(null as numeric(28,6)) as customer_id",
+    )  # fmt: skip
+    table = _table(_derive(raw)[0], "orders")
+    assert "  customer int\n" in table  # a count as often as a key: no ref
+    assert "  account_id int\n" in table  # accounts.id is a varchar: no ref
+    assert "  customer_id int [ref: > customer.id]" in table
+
+
+@pytest.mark.parametrize(
+    "tmp_sql",
+    [
+        f'select * from "{DB}"."raw_shopify"."customer" limit 10',
+        f'select * from "{DB}"."raw_shopify"."customer" offset 1',
+        f'select * replace (1 as id) from "{DB}"."raw_shopify"."customer"',
+        f'select * exclude (id) from "{DB}"."raw_shopify"."customer"',
+    ],
+)
+def test_star_with_limit_or_modifiers_is_not_a_pass_through(tmp_sql: str) -> None:
+    raw = _fivetran(tmp_compiled=tmp_sql)
+    view = CompiledView(Manifest.from_dict(raw), CompiledSql.from_dict(raw))
+    assert view.pass_through == {}
 
 
 # --- End to end: dbt really compiles and builds ----------------------------------------
@@ -493,3 +672,12 @@ def test_source_or_empty_project_whole_build(tmp_path: Path) -> None:
     # `id` is the key, and creditor_number unique on its own: both unique tests pass.
     assert "| `stg_billing__creditors` | ✅ built | 200 | 4 passed |" in body
     assert "| `stg_billing__debtors` | ✅ built | 200 | 2 passed |" in body
+
+
+def test_a_test_carries_back_through_a_typed_null_placeholder() -> None:
+    # Fivetran's `final` reads `accepts_marketing` from `fields`, where it is the typed null
+    # standing for the source column: a not_null test on it is a claim about the source.
+    raw = _fivetran()
+    raw["nodes"]["test.p.nn"] = _test("nn", "not_null", "accepts_marketing", STG)
+    table = _table(_derive(raw)[0], "customer")
+    assert "  accepts_marketing boolean [not null]" in table

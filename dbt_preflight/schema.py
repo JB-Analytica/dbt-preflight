@@ -32,9 +32,8 @@ from dbt_preflight.compiled import (
     CompiledSql,
     CompiledView,
     null_casts,
-    with_target,
 )
-from dbt_preflight.manifest import Manifest, SourceColumn, SourceTable, TestNode
+from dbt_preflight.manifest import Manifest, ModelNode, SourceColumn, SourceTable, TestNode
 
 # dbt / warehouse type names -> the DBML types model2data understands.
 _TYPE_ALIASES = {
@@ -713,27 +712,22 @@ def _carried_tests_for_source(
     source rows by - carry the same settings, so the fixtures satisfy tests the
     project's own YAML already documents instead of leaving them to chance.
 
-    With compiled SQL, a model reading the source through a pass-through counts as a
-    reader too, and an alias only the compiled SQL shows (`cast(id as integer) as
-    creditor_id`, where the raw SQL said `{{ dbt.type_int() }}` inside a macro-built CTE)
-    is added to the raw SQL's aliases, never in place of one.
+    With compiled SQL, more aliases are added to the raw SQL's, never in place of one,
+    under stricter rules (`_compiled_alias_map`): a test is a claim about the model's grain,
+    and carried back from the wrong model it hands the fixtures a key the source does not
+    have - which makes a fan-out pass.
     """
     carried: dict[str, set[str]] = {}
     carried_values: dict[str, list[str]] = {}
-    readers = {uid for uid, m in manifest.models.items() if source.unique_id in m.depends_on}
-    if view is not None:
-        readers |= {m.unique_id for m in view.readers(source.unique_id)}
     for uid, model in manifest.models.items():
-        if uid not in readers:
-            continue
-        alias_map = _model_alias_map(model.raw_code) if source.unique_id in model.depends_on else {}
-        tree = view.tree(uid) if view is not None else None
-        if tree is not None:
-            for alias, column in _alias_map_of_tree(tree).items():
+        direct = source.unique_id in model.depends_on
+        alias_map = _model_alias_map(model.raw_code) if direct else {}
+        if view is not None:
+            for alias, column in _compiled_alias_map(view, model, source).items():
                 alias_map.setdefault(alias, column)
         if not alias_map:
             continue
-        for test in manifest.tests_for_model(model.unique_id):
+        for test in manifest.tests_for_model(uid):
             if not test.column_name:
                 continue
             source_col = alias_map.get(test.column_name.lower())
@@ -746,6 +740,125 @@ def _carried_tests_for_source(
                 if values:
                     carried_values.setdefault(source_col, values)
     return carried, carried_values
+
+
+# What can change a query's grain or drop rows: grouping, distinct, aggregates, set
+# operations, joins, filters. A model with any of these does not have its source's rows.
+_GRAIN_CHANGES = (
+    exp.Group, exp.Distinct, exp.AggFunc, exp.SetOperation, exp.Join, exp.Where,
+    exp.Having, exp.Qualify, exp.Limit, exp.Unnest, exp.Lateral,
+)  # fmt: skip
+
+
+def _compiled_alias_map(
+    view: CompiledView, model: ModelNode, source: SourceTable
+) -> dict[str, str]:
+    """{output alias: source column} from a model's compiled SQL, for test carry-back.
+
+    Only from a model that reads this source and nothing else, directly or through a
+    pass-through, and has the source's rows exactly (`_GRAIN_CHANGES`): a mart over a
+    `select *` staging model and another table, or one that groups, tests its own grain, not
+    the source's. And only where the aliased column resolves to the source in its own scope
+    (`_column_is_from_target`), not by its bare name.
+    """
+    if view.single_source(model) != source.unique_id:
+        return {}
+    found = view.target_tree(model, source.unique_id)
+    if found is None or not found[1]:
+        return {}
+    tree = found[0]
+    if any(True for _ in tree.find_all(*_GRAIN_CHANGES)):
+        return {}
+    aliases: dict[str, str] = {}
+    for scope in traverse_scope(tree):
+        select = scope.expression
+        if not isinstance(select, exp.Select):
+            continue
+        for e in select.expressions:
+            alias = e.alias_or_name.lower() if isinstance(e, (exp.Alias, exp.Column)) else ""
+            inner = _unwrap_null_preserving(e.this) if isinstance(e, exp.Alias) else e
+            if not alias or not isinstance(inner, exp.Column) or isinstance(inner.this, exp.Star):
+                continue
+            if _column_is_from_target(inner, scope, source.name) or _is_typed_null_column(
+                inner, scope
+            ):
+                aliases.setdefault(alias, inner.name.lower())
+    return aliases
+
+
+def _is_typed_null_column(col: exp.Column, scope: Scope) -> bool:
+    """Whether a column is read from a CTE or subquery that defines it as a typed null of
+    the same name (`cast(null as T) as customer_id`). In a model that reads one source
+    and nothing else, that is the package's placeholder for the source column - Fivetran's
+    `fill_staging_columns` selects the real column there once the source exists - so it
+    resolves to that source column, exactly as the typed null types it."""
+    selected = {name: src for name, (_node, src) in scope.selected_sources.items()}
+    if col.table:
+        source = selected.get(col.table)
+    elif len(selected) == 1:
+        source = next(iter(selected.values()))
+    else:
+        return False
+    if not isinstance(source, Scope) or not isinstance(source.expression, exp.Select):
+        return False
+    name = col.name.lower()
+    return any(
+        isinstance(e, exp.Alias)
+        and e.alias_or_name.lower() == name
+        and isinstance(e.this, exp.Cast)
+        and isinstance(e.this.this, exp.Null)
+        for e in source.expression.expressions
+    )
+
+
+def _star_reaches_target(scope: Scope) -> bool:
+    """Whether a `*` in this scope's output, followed down through CTEs and subqueries,
+    reaches the source - so the model passes on columns no SQL names. A star whose
+    qualifier cannot be resolved counts as reaching it."""
+    if isinstance(scope.expression, exp.SetOperation):
+        return any(_star_reaches_target(s) for s in scope.union_scopes)
+    select = scope.expression
+    if not isinstance(select, exp.Select):
+        return True
+    # What the FROM and JOINs select from, not every CTE in sight (`scope.sources`).
+    selected = {name: src for name, (_node, src) in scope.selected_sources.items()}
+    for e in select.expressions:
+        if isinstance(e, exp.Star):
+            sources = list(selected.values())
+        elif isinstance(e, exp.Column) and isinstance(e.this, exp.Star):
+            sources = [selected.get(e.table)] if e.table else list(selected.values())
+        else:
+            continue
+        for src in sources:
+            if src is None:
+                return True
+            if isinstance(src, exp.Table) and src.name == _TARGET_PLACEHOLDER:
+                return True
+            if isinstance(src, Scope) and _star_reaches_target(src):
+                return True
+    return False
+
+
+def _reader_accounted_for(view: CompiledView, model: ModelNode, source: SourceTable) -> bool:
+    """Whether every column this model reads from the source is known: its compiled SQL
+    parsed, names the source's relation (or a pass-through's), passes no `*` over it on to
+    its output, and reads no unqualified column in a scope that joins the source with
+    something else. A pass-through hands every column on, so it is its readers that count.
+    Anything short of that is "cannot tell"."""
+    if model.unique_id in view.pass_through:
+        return True
+    found = view.target_tree(model, source.unique_id)
+    if found is None or not found[1]:
+        return False
+    scopes = traverse_scope(found[0])
+    if not scopes or _star_reaches_target(scopes[-1]):
+        return False
+    for scope in scopes:
+        leaves = [_leaf_tables(src) for _node, src in scope.selected_sources.values()]
+        if len(leaves) > 1 and any(lv is None or _TARGET_PLACEHOLDER in lv for lv in leaves):
+            if any(not col.table for col in scope.columns):
+                return False
+    return True
 
 
 @dataclass
@@ -804,12 +917,12 @@ def _compiled_source_columns(
     typed_nulls: set[str] = set()
     for model in view.readers(source.unique_id):
         tree = view.tree(model.unique_id)
-        if tree is None:
+        target = view.target_tree(model, source.unique_id)
+        if tree is None or target is None:
             continue
         found: dict[str, tuple[str | None, str | None]] = {}
-        target, present = with_target(tree, view.relation_keys(model, source.unique_id))
-        if present:
-            found = _columns_in_tree(target, source.name)
+        if target[1]:
+            found = _columns_in_tree(target[0], source.name)
         nulls: set[str] = set()
         if view.single_source(model) == source.unique_id:
             for name, cast_type in null_casts(tree).items():
@@ -877,12 +990,24 @@ def _is_key_name(name: str) -> bool:
     return n == "id" or n.endswith("_id")
 
 
+def _id_is_int(src: SourceTable, inferred: _Inferred) -> bool:
+    """Whether a source's `id` column ends up an integer in the derived schema."""
+    for col in src.columns:
+        if col.name.lower() == "id" and col.data_type:
+            return _dbml_type(col.data_type) == "int"
+    cast_type, hint = inferred.columns.get("id", (None, None))
+    if cast_type is None:
+        return hint not in {"varchar", "boolean"}
+    dtype = _dbml_type(cast_type)
+    return dtype == "int" or ("id" in inferred.typed_nulls and dtype in {"decimal", "numeric"})
+
+
 def _typed_null_type_and_ref(
     name: str,
     cast_type: str,
     src: SourceTable,
     all_sources: list[SourceTable],
-    id_tables: set[str],
+    int_id_tables: set[str],
 ) -> tuple[str, SourceTable | None]:
     """The DBML type for a column a compiled `cast(null as T)` typed, and its foreign-key
     ref.
@@ -892,14 +1017,16 @@ def _typed_null_type_and_ref(
     fixture of fractional ids neither joins nor takes a ref from an integer column. A key
     that ends up an integer keeps the foreign-key ref its name points at, which an explicit
     cast in a staging model does not get: this is the package describing the source, not a
-    model reshaping it.
+    model reshaping it. Only a `*_id` name gets one, and only to a table whose `id` is an
+    integer too (`int_id_tables`): `cast(null as integer) as customer` is a count as often
+    as it is a key.
     """
     dtype = _dbml_type(cast_type)
     if dtype in {"decimal", "numeric"} and _is_key_name(name):
         dtype = "int"
-    if dtype != "int":
+    if dtype != "int" or not name.lower().endswith("_id"):
         return dtype, None
-    return dtype, _fk_ref_target(name, src, all_sources, id_tables)
+    return dtype, _fk_ref_target(name, src, all_sources, int_id_tables)
 
 
 def _missing_types_patch(sources: list[SourceTable]) -> str:
@@ -988,6 +1115,7 @@ def _resolve_columns(
             or "id" in found_by_source[src.unique_id].columns
         ):
             id_tables.add(src.unique_id)
+    int_id_tables = {uid for uid in id_tables if _id_is_int(sources[uid], found_by_source[uid])}
 
     for src in all_sources:
         src_tests, src_values = _carried_tests_for_source(src, manifest, view)
@@ -1018,7 +1146,7 @@ def _resolve_columns(
         ) -> str:
             if cast_type is not None and name in typed_nulls:
                 dtype, target = _typed_null_type_and_ref(
-                    name, cast_type, src, all_sources, id_tables
+                    name, cast_type, src, all_sources, int_id_tables
                 )
             else:
                 dtype, target = _resolve_type_and_ref(
@@ -1035,7 +1163,9 @@ def _resolve_columns(
         # staging macros select), so its type cannot break a model: it is typed by its name
         # and listed as guessed, rather than failing the whole run. Without that certainty
         # it stays an error, as before.
-        unread_ok = view is not None and view.every_reader_compiled(src.unique_id)
+        unread_ok = view is not None and all(
+            _reader_accounted_for(view, m, src) for m in view.readers(src.unique_id)
+        )
         for col in src.columns:
             if col.data_type:
                 merged.append(col)

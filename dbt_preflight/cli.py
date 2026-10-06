@@ -331,16 +331,27 @@ def _run(
         db_path = workdir / f"{catalog}.duckdb"
         write_profiles(profiles_dir, project.profile, db_path)
 
+    dialect = (
+        config.dialect
+        if config.dialect is not None
+        else detect_dialect(config.project_dir, project.profile)
+    )
+    if dialect in {"duckdb", "none"}:
+        dialect = None
+
     # 2. Fixtures. A project with no sources takes its input from seeds, which dbt loads
     # itself during the build; there is nothing to generate and nothing to miss.
     compiled: CompiledSql | None = None
+    head_dbml: str | None = None
     if manifest.sources and config.schema is None:
         compiled = _compile_for_inference(
-            project, manifest, catalog, workdir, "compiled", config.env
+            project, manifest, catalog, workdir, "compiled", config.env, dialect
         )
         timer.mark(f"   {_compiled_line(compiled)}")
     if manifest.sources:
         schema = resolve_schema(config.schema, manifest, workdir, compiled)
+        if schema.derived:
+            head_dbml = schema.dbml_path.read_text(encoding="utf-8")
         fixtures = build_fixtures(config, schema, list(manifest.sources.values()), db_path)
         report.fixtures = fixtures
         timer.mark(
@@ -360,12 +371,7 @@ def _run(
     # 3. Base manifest, for state:modified. The worktree stays checked out until the end of
     # the run: before the head build, the base is built too, into its own schemas, on the
     # same fixtures, so its test results and its tables can be compared with the head's.
-    dialect = (
-        config.dialect
-        if config.dialect is not None
-        else detect_dialect(config.project_dir, project.profile)
-    )
-    if dialect and dialect not in {"duckdb", "none"}:
+    if dialect:
         report.dialect = dialect
         _say(f"   transpiling model SQL from {dialect} to DuckDB")
     changed_ids: set[str] = set()
@@ -408,9 +414,12 @@ def _run(
                     workdir,
                     "base_compiled",
                     config.env,
+                    dialect,
                 )
                 timer.mark(f"   base {_compiled_line(base_compiled)}")
-                reshaped = _reshaped_sources(manifest, base_manifest, compiled, base_compiled)
+                reshaped = _reshaped_sources(
+                    manifest, base_manifest, compiled, base_compiled, head_dbml
+                )
                 if reshaped - modified:
                     names = ", ".join(
                         f"`{manifest.sources[u].identifier}`" for u in sorted(reshaped - modified)
@@ -584,6 +593,7 @@ def _reshaped_sources(
     base: Manifest,
     head_compiled: CompiledSql | None = None,
     base_compiled: CompiledSql | None = None,
+    head_text: str | None = None,
 ) -> set[str]:
     """Head sources whose derived fixture table differs from the one the base derives.
 
@@ -591,12 +601,21 @@ def _reshaped_sources(
     staging SQL when there is no DBML file, so a pull request that edits a cast or a test
     in one staging model changes the data every reader of that source gets. When the base
     cannot be derived at all, every source counts. Each side is derived from its own
-    compiled SQL, compiled the same way, so a difference is the change's.
+    compiled SQL, compiled the same way, so a difference is the change's. When only the
+    head compiled, the two cannot be compared like for like, and every source counts too;
+    when only the base did, it is derived without it, as the head was.
+
+    `head_text` is the DBML the run already derived for the head, when there is one.
     """
-    try:
-        head_text, _ = derive_dbml(head, head_compiled)
-    except SchemaError:
-        return set()  # the head run reports this itself
+    if head_compiled is not None and base_compiled is None:
+        return set(head.sources)
+    if head_compiled is None:
+        base_compiled = None
+    if head_text is None:
+        try:
+            head_text, _ = derive_dbml(head, head_compiled)
+        except SchemaError:
+            return set()  # the head run reports this itself
     try:
         base_text, _ = derive_dbml(base, base_compiled)
     except SchemaError:
@@ -616,6 +635,7 @@ def _compile_for_inference(
     workdir: Path,
     name: str,
     env: dict[str, str],
+    dialect: str | None = None,
 ) -> CompiledSql | None:
     """Compile the models that read sources, for the schema inference (`compiled.py`).
 
@@ -628,10 +648,15 @@ def _compile_for_inference(
     (workdir / name).mkdir(parents=True, exist_ok=True)
     write_profiles(compile_profiles, project.profile, workdir / name / f"{catalog}.duckdb")
     runner = DbtRunner(project, compile_profiles, workdir / f"{name}_target", workdir / "logs", env)
-    outcome = compile_models(runner, [manifest.selector(u) for u in compile_selection(manifest)])
+    selection = compile_selection(manifest)
+    outcome = compile_models(
+        runner,
+        {u: manifest.selector(u) for u in selection},
+        {manifest.models[u].original_file_path: u for u in selection},
+    )
     if outcome.manifest is None:
         return None
-    return CompiledSql.load(outcome.manifest, outcome.failed)
+    return CompiledSql.load(outcome.manifest, outcome.failed, dialect)
 
 
 def _compiled_line(compiled: CompiledSql | None) -> str:

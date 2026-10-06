@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -61,13 +62,26 @@ def table_key(table: exp.Table) -> RelationKey | None:
     return parts or None
 
 
-def parse_compiled(sql: str) -> exp.Expr | None:
+# Dialects where a double-quoted token is a string, not an identifier (as in transpile.py).
+_BACKTICK_DIALECTS = {"bigquery", "spark", "databricks", "hive"}
+_QUOTED_PART = re.compile(r'"([^"\n]+)"(?=\.)|(?<=\.)"([^"\n]+)"')
+
+
+def parse_compiled(sql: str, dialect: str | None = None) -> exp.Expr | None:
     """Parse compiled SQL: DuckDB first, since dbt rendered it for a DuckDB target and quotes
-    relations with double quotes; the default dialect as a fallback for what DuckDB's
-    grammar in sqlglot rejects. None when neither parses it."""
-    for dialect in ("duckdb", None):
+    relations with double quotes; the default dialect next; then the project's own dialect,
+    since the model's body is still written in it (`safe_cast`, BigQuery's `except`). For a
+    dialect where double quotes make a string, dbt's `"db"."schema"."table"` is re-quoted
+    with backticks first. None when nothing parses it."""
+    attempts: list[tuple[str | None, str]] = [("duckdb", sql), (None, sql)]
+    if dialect and dialect not in {"duckdb", "none"}:
+        own = sql
+        if dialect in _BACKTICK_DIALECTS:
+            own = _QUOTED_PART.sub(lambda m: f"`{m.group(1) or m.group(2)}`", sql)
+        attempts.append((dialect, own))
+    for read, text in attempts:
         try:
-            tree = sqlglot.parse_one(sql, read=dialect)
+            tree = sqlglot.parse_one(text, read=read)
         except Exception:  # noqa: BLE001 - any parser failure just means "cannot infer"
             continue
         if tree is not None:
@@ -81,11 +95,14 @@ class CompiledSql:
 
     code: dict[str, str] = field(default_factory=dict)  # model unique_id -> compiled SQL
     relations: dict[str, RelationKey] = field(default_factory=dict)  # source/model uid -> key
-    failed: list[str] = field(default_factory=list)  # models dbt could not compile
+    failed: list[str] = field(default_factory=list)  # unique ids dbt could not compile
+    dialect: str | None = None  # the project's own SQL dialect, a parsing fallback
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any], failed: list[str] | None = None) -> CompiledSql:
-        out = cls(failed=sorted(failed or []))
+    def from_dict(
+        cls, raw: dict[str, Any], failed: list[str] | None = None, dialect: str | None = None
+    ) -> CompiledSql:
+        out = cls(failed=sorted(failed or []), dialect=dialect)
         for uid, src in (raw.get("sources") or {}).items():
             key = relation_key(src.get("relation_name"))
             if key:
@@ -102,9 +119,11 @@ class CompiledSql:
         return out
 
     @classmethod
-    def load(cls, manifest_path: Path, failed: list[str] | None = None) -> CompiledSql:
+    def load(
+        cls, manifest_path: Path, failed: list[str] | None = None, dialect: str | None = None
+    ) -> CompiledSql:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return cls.from_dict(raw, failed)
+        return cls.from_dict(raw, failed, dialect)
 
 
 def compile_selection(manifest: Manifest) -> list[str]:
@@ -133,13 +152,19 @@ def compile_selection(manifest: Manifest) -> list[str]:
 
 
 def _is_star_select(tree: exp.Expr, upstream: RelationKey | None) -> bool:
-    """`select * from <upstream>`, optionally with a `where`, and nothing else."""
+    """`select * from <upstream>`, optionally with a `where`, and nothing else: no `limit`
+    or `offset`, and a bare `*`, not one with `except`/`replace`/`rename`."""
     if not isinstance(tree, exp.Select) or upstream is None:
         return False
-    for arg in ("with_", "joins", "group", "having", "qualify", "order", "distinct", "laterals"):
+    for arg in (
+        "with_", "joins", "group", "having", "qualify", "order", "distinct", "laterals",
+        "limit", "offset", "windows", "pivots", "sample",
+    ):  # fmt: skip
         if tree.args.get(arg):
             return False
     if len(tree.expressions) != 1 or not isinstance(tree.expressions[0], exp.Star):
+        return False
+    if any(tree.expressions[0].args.get(a) for a in ("except_", "replace", "rename", "ilike")):
         return False
     from_ = tree.args.get("from_")
     table = from_.this if from_ is not None else None
@@ -210,14 +235,14 @@ def null_casts(tree: exp.Expr) -> dict[str, str]:
     return out
 
 
-def with_target(tree: exp.Expr, keys: set[RelationKey]) -> tuple[exp.Expr, bool]:
-    """A copy of `tree` with every reference to one of `keys` replaced by the placeholder
-    the column walk in `schema.py` looks for. A reference with no alias keeps its own
-    table name as one, so `customer.id` still resolves. Also whether any was found."""
+def with_target(tree: exp.Expr, is_target: Callable[[exp.Table], bool]) -> tuple[exp.Expr, bool]:
+    """A copy of `tree` with every table reference `is_target` accepts replaced by the
+    placeholder the column walk in `schema.py` looks for. A reference with no alias keeps
+    its own table name as one, so `customer.id` still resolves. Also whether any was found."""
     tree = tree.copy()
     found = False
     for table in list(tree.find_all(exp.Table)):
-        if table_key(table) not in keys:
+        if not is_target(table):
             continue
         found = True
         alias = table.alias or table.name
@@ -240,17 +265,39 @@ class CompiledView:
         self.manifest = manifest
         self.compiled = compiled
         self._trees: dict[str, exp.Expr | None] = {}
+        self._by_key: dict[RelationKey, str] = {}
+        by_suffix: dict[RelationKey, set[str]] = {}
+        for uid, key in sorted(compiled.relations.items()):
+            self._by_key.setdefault(key, uid)
+            by_suffix.setdefault(key[-2:], set()).add(uid)
+        # `schema.table` with no database names a node only when one node has that suffix.
+        self._by_suffix = {k: next(iter(v)) for k, v in by_suffix.items() if len(v) == 1}
         self.pass_through: dict[str, str] = {}
         for uid in sorted(manifest.models):
             src = self._pass_through_source(uid, frozenset())
             if src is not None:
                 self.pass_through[uid] = src
+        self._readers: dict[str, list[ModelNode]] = {}
+        for uid in sorted(manifest.models):
+            model = manifest.models[uid]
+            for src in sorted(set(self.upstream_sources(model).values())):
+                self._readers.setdefault(src, []).append(model)
 
     def tree(self, uid: str) -> exp.Expr | None:
         if uid not in self._trees:
             code = self.compiled.code.get(uid)
-            self._trees[uid] = parse_compiled(code) if code else None
+            self._trees[uid] = parse_compiled(code, self.compiled.dialect) if code else None
         return self._trees[uid]
+
+    def node_for(self, table: exp.Table) -> str | None:
+        """The source or model a table reference in compiled SQL names, if any: by its full
+        relation name, or by `schema.table` when exactly one node ends that way."""
+        key = table_key(table)
+        if key is None:
+            return None
+        if key in self._by_key:
+            return self._by_key[key]
+        return self._by_suffix.get(key) if len(key) == 2 else None
 
     def _pass_through_source(self, uid: str, seen: frozenset[str]) -> str | None:
         model = self.manifest.models.get(uid)
@@ -298,23 +345,14 @@ class CompiledView:
 
     def readers(self, source_uid: str) -> list[ModelNode]:
         """Models reading a source directly or through a pass-through, by unique id."""
-        return [
-            self.manifest.models[uid]
-            for uid in sorted(self.manifest.models)
-            if source_uid in self.upstream_sources(self.manifest.models[uid]).values()
-        ]
+        return self._readers.get(source_uid, [])
 
-    def relation_keys(self, model: ModelNode, source_uid: str) -> set[RelationKey]:
-        """The relations in a model's compiled SQL that stand for one source."""
-        return {
-            key
-            for dep, src in self.upstream_sources(model).items()
-            if src == source_uid and (key := self.compiled.relations.get(dep)) is not None
-        }
-
-    def every_reader_compiled(self, source_uid: str) -> bool:
-        """Whether the compiled SQL of every model reading a source, directly or through a
-        pass-through, is in hand - vacuously true for a source nothing reads. Then a column
-        neither the raw nor the compiled SQL mentions is one no model reads."""
-        readers = {m.unique_id for m in self.readers(source_uid)}
-        return all(uid in self.compiled.code for uid in readers)
+    def target_tree(self, model: ModelNode, source_uid: str) -> tuple[exp.Expr, bool] | None:
+        """The model's compiled SQL with every relation that stands for the source (the
+        source itself, or a pass-through of it) swapped for the placeholder, and whether
+        there was one. None when there is no parsed compiled SQL for the model."""
+        tree = self.tree(model.unique_id)
+        if tree is None:
+            return None
+        stands_for = {d for d, s in self.upstream_sources(model).items() if s == source_uid}
+        return with_target(tree, lambda t: self.node_for(t) in stands_for)
