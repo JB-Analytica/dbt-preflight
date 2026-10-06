@@ -17,10 +17,15 @@ warehouse credentials anywhere.
 The comment shows what the tests did not: lifetime value up 4.6%, and by how much per
 segment.*
 
+Free and open source (MIT), measured on every release against five public dbt projects, and
+built by [JB Analytica](https://www.jbanalytica.com/?ref=dbt-preflight), a data platform
+and analytics engineering practice.
+
 ## Why
 
-Changing a dbt project without a warehouse to test against is guesswork, and more of those
-changes are now written by coding agents. The honest check is to run the change on data,
+A staging model renames a column, every test passes, and the first sign of trouble is a
+dashboard that is wrong three days later. Changing a dbt project without a warehouse to test
+against is guesswork, and more of those changes are now written by coding agents. The honest check is to run the change on data,
 but the data lives in a warehouse whose credentials most teams will not put in CI. dbt
 Cloud's CI jobs and data-diff tools run against that warehouse, so they need access to it.
 Preflight needs none: the data is synthetic and relationship-preserving,
@@ -109,13 +114,12 @@ blocking.
 
 ![A preflight comment that fails a pull request because one model could not be checked: it fails on main too, but the change reaches it from upstream and it reads columns whose type preflight guessed](https://raw.githubusercontent.com/JB-Analytica/dbt-preflight/main/assets/comment-could-not-be-checked.png)
 
-When a model is broken on `main` but the change reaches it from upstream, preflight cannot
-tell whether the change broke it too, since DuckDB reports only the first error. It lists
-the model under ❓ *Could not be checked* and counts it against the pull request. The same
-goes for a failure on preflight's own data (a column whose type it had to guess, a value it
-generated that does not parse or cast) in a model the change reaches; one the change does
-not reach builds from identical SQL on identical data on both sides, so it is only a
-warning, ⚠️ *Preflight's generated data cannot build this model*.
+When preflight cannot tell whether the change broke a model, it says so and counts it
+against the pull request: ❓ *Could not be checked*. That happens when a model the change
+reaches is already broken on `main` (DuckDB reports only the first error, so a new one can
+hide behind it), or fails on data preflight had to guess. A model the change does not reach
+builds from identical SQL on identical data on both sides, so a failure there is only a
+warning. The rule throughout: when in doubt, the pull request answers for it.
 
 House conventions (naming, layering, a tested primary key, descriptions, column names) are
 checked on the changed models: as warnings by default, as errors once the config opts in.
@@ -134,16 +138,17 @@ runs them again. The results as of 0.5.0:
 | --- | --- | --- | --- |
 | [dbt-labs/jaffle_shop](https://github.com/dbt-labs/jaffle_shop) (classic) | Seeds only, no config file | Passes with warnings, 5 of 5 models built | Caught |
 | [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) | Sources without declared columns, no config file | Passes with warnings, 8 of 8 built | Caught |
+| [fivetran/dbt_shopify](https://github.com/fivetran/dbt_shopify) | No schema file: derived through Fivetran's macros | Passes with warnings, 52 of 52 built | Caught |
 | [mattermost-data-warehouse](https://github.com/michaelschiffmm/mattermost-data-warehouse) (fork) | Snowflake, in a subfolder, `env:` set | Fails: 1 model could not be checked, 7 of 10 built | Caught |
-| [fivetran/dbt_shopify](https://github.com/fivetran/dbt_shopify) | BigQuery, hand-written DBML schema | Fails: 45 of 49 built; 4 models the change reaches sit behind 2 that preflight's data cannot build | Caught |
-| fivetran/dbt_shopify | No schema file: derived through Fivetran's macros | Passes with warnings, 52 of 52 built | Caught |
+| fivetran/dbt_shopify | BigQuery, hand-written DBML schema | Fails: 45 of 49 built; 4 models the change reaches sit behind 2 that preflight's data cannot build | Caught |
 | [Velir/dbt-ga4](https://github.com/Velir/dbt-ga4) | BigQuery, GA4 nested records | Fails: nothing builds yet (BigQuery `partition_by`) | Not caught |
 
-The mattermost failure is the *Could not be checked* comment above: a model that also fails
-on `main` and reads columns whose type was guessed. The hand-written Shopify schema types
-`parent_id` as text, so two models cannot be built on its data; preflight says so, and
-counts the four models behind them that the change reaches instead of excusing them. dbt-ga4 is a known gap. No model in the
-suite has been reported *not verified* for SQL DuckDB could not run.
+The failures stay in the table, because they say where the edges are. The mattermost
+failure is the *Could not be checked* comment above. The hand-written Shopify
+schema types `parent_id` as text, so two models cannot be built on its data; preflight says
+so, and counts the four models behind them that the change reaches instead of excusing them.
+dbt-ga4 is a known gap. No model in the suite has been reported *not verified* for SQL
+DuckDB could not run.
 
 Shopify without a schema file is the hard case: Fivetran's staging models select their
 columns through macros such as `fill_staging_columns`, so the source columns are not in the
@@ -188,6 +193,18 @@ statuses, null rates and skewed keys carry through to the generated data.
 - **Keep invariants across columns.** The generated data respects the types, keys, foreign
   keys and accepted values it knows about, not rules such as "shipped after ordered". Tests that rely on one
   fail on both branches and are folded as already failing.
+
+## Rolling it out in your team
+
+The Action is free and stays open source. Getting the most from it on a real project is
+mostly about the parts around it: a source schema that behaves like your business, the
+conventions your team actually follows, metrics worth comparing, and instructions that keep
+coding agents inside them. [JB Analytica](https://www.jbanalytica.com/how-we-work/?ref=dbt-preflight)
+sets that up with your team and hands it over, so your engineers run it without us
+afterwards.
+
+[Book a 30-minute call](https://calendar.app.google/8gdDatFU3WQp5s71A) to talk through your
+project, or write to [jarich@jbanalytica.com](mailto:jarich@jbanalytica.com).
 
 ## Configuration
 
@@ -250,5 +267,9 @@ MIT. See [LICENSE](https://github.com/JB-Analytica/dbt-preflight/blob/main/LICEN
 
 ## Built by JB Analytica
 
-Built and maintained by [JB Analytica](https://www.jbanalytica.com/): data platform
-architecture and analytics engineering.
+Built and maintained by [JB Analytica](https://www.jbanalytica.com/?ref=dbt-preflight):
+data platform architecture and analytics engineering, from assessment to a team that runs it
+without us. The synthetic data comes from
+[model2data](https://github.com/JB-Analytica/model2data), our open-source generator, and the
+schema behind it can be designed and refined in
+[model2data studio](https://studio.jbanalytica.com/?ref=dbt-preflight-readme).
