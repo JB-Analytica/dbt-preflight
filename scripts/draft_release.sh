@@ -7,14 +7,20 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+# The first `version = "..."` in pyproject.toml is [project]'s. Read with sed, so no Python is needed.
+read_version() { sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1; }
+version=$(read_version < pyproject.toml)
 tag="v$version"
 
 git fetch -q origin main --tags
-main_version=$(git show origin/main:pyproject.toml | python3 -c "import sys, tomllib; print(tomllib.loads(sys.stdin.read())['project']['version'])")
+main_version=$(git show origin/main:pyproject.toml | read_version)
 [ "$main_version" = "$version" ] || { echo "origin/main is at $main_version, not $version: merge the version bump first" >&2; exit 1; }
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
   echo "$tag already exists" >&2; exit 1
+fi
+# A draft has no tag yet, so look for the release itself too.
+if gh release view "$tag" >/dev/null 2>&1; then
+  echo "a release or draft named $tag already exists: edit that one instead" >&2; exit 1
 fi
 
 notes=$(mktemp)
