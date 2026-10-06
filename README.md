@@ -171,6 +171,8 @@ seed: 42                            # same seed, same data, on every run
 locale: nl_BE                       # Faker locale for names and addresses
 env:                                # variables your profiles.yml / sources.yml expect
   GCP_PROJECT: preflight
+vars:                               # dbt vars, passed to every dbt command as --vars
+  shopify_api: rest
 dialect: bigquery                   # SQL dialect to transpile from (default: read from profiles.yml)
 metrics:                            # extra metrics to compare, for projects with none defined elsewhere
   - name: gross_revenue
@@ -211,9 +213,15 @@ Preflight needs to know what the source tables look like. Three options:
    `raw_customers` source exists - is typed as an integer and gets a `ref:` to that table's
    `id` when one can be found, the same referential integrity an explicit `relationships`
    test would have set up. The comment says which columns were guessed, so a reviewer can
-   tighten them in `sources.yml` if a guess is wrong. Only a column no model reads either is
-   reported rather than guessed, because a fixture with the wrong type is worse than no
-   fixture.
+   tighten them in `sources.yml` if a guess is wrong. Nothing untyped stops the run: a
+   declared column no SQL types is typed by its name when every model reading the source
+   could be followed (so none of them reads it), and is a `varchar` when one could not;
+   the comment lists both, and says which were typed `varchar` for that reason. A source
+   nothing reads (no model, snapshot or test) that `sources.yml` does not fully type gets
+   no fixture at all, and the comment names it. The run only stops when a source that
+   is read has no column known at all - nothing declared, nothing a model names - since
+   there is no table to invent; the error points at `schema:` and at `dbt-preflight
+   schema`, and gives the YAML to fill in.
 
    A source column named `id` is always the primary key, and a table never gets more than
    one: without an `id`, the first column carrying both `unique` and `not_null` is the key.
@@ -242,10 +250,11 @@ Preflight needs to know what the source tables look like. Three options:
    SQL wins wherever it says something; a compiled type that disagrees with it is listed in
    the comment. Tests carry back from compiled SQL only from a model that reads that one
    source and keeps its rows (no join, grouping, filter or aggregate), so a mart's grain
-   test never becomes a source key. Once every reader is accounted for - its compiled SQL
-   parsed, names the source, passes no `*` over it on, reads no unqualified column next to
-   a join - a column `sources.yml` declares but no model reads is typed by its name rather
-   than failing the run. A model that does not compile is read from its raw SQL alone.
+   test never becomes a source key; the same holds for tests read off the raw SQL. A reader
+   counts as followed when its compiled SQL parsed, names the source, passes no `*` over it
+   on, puts no `*` inside a join or an expression (`struct_pack(o.*)`), makes no whole-row
+   reference (`to_json(o)`) and reads no unqualified column next to a join. A model that
+   does not compile is read from its raw SQL alone.
 
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.

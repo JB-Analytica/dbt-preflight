@@ -65,6 +65,8 @@ class FixtureSummary:
     unmatched_sources: list[str] = field(default_factory=list)
     unused_dbml_tables: list[str] = field(default_factory=list)
     inferred_sources: list[InferredSource] = field(default_factory=list)
+    # "<source>.<table>" of the sources nothing reads, given no fixture (derived schema).
+    skipped_sources: list[str] = field(default_factory=list)
     # model2data's own warnings about the data it generated, surfaced so a reviewer can
     # tell a weak fixture (placeholder text, an unresolved cycle) from a strong one.
     unmapped_columns: list[tuple[str, str]] = field(default_factory=list)
@@ -118,6 +120,7 @@ def build_fixtures(
     used: set[str] = set()
     summary = FixtureSummary(
         inferred_sources=schema.inferred,
+        skipped_sources=list(schema.skipped),
         unmapped_columns=get_unmapped_columns(),
         cyclic_tables=get_cyclic_tables(),
         unresolved_composite_keys=get_unresolved_composite_keys(),
@@ -128,7 +131,10 @@ def build_fixtures(
     con = duckdb.connect(str(db_path))
     try:
         table_names = source_table_names(sources)
+        skipped = set(schema.skipped)
         for src in sources:
+            if f"{src.source_name}.{src.name}" in skipped:
+                continue
             # A derived schema writes two same-named source tables under distinct names.
             match = (
                 by_key.get(normalize_identifier(table_names[src.unique_id]))

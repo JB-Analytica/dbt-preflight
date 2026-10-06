@@ -21,16 +21,45 @@ All notable changes to this project are documented here. The format follows
   - A model that fails to compile is excluded by its exact selector and read from raw SQL.
     When only the head compiles, every source counts as reshaped.
 
+- `vars:` in `.dbt-preflight.yml`: a mapping passed to every dbt command preflight runs as
+  `--vars`. A change to it counts as reshaping the fixtures, like `env:`.
+
 ### Changed
 
+- **No untyped column stops the run any more.** A column still untyped after the raw and
+  compiled SQL is typed by its name when every reader could be followed, and is a
+  `varchar` when one could not. Both are listed as guessed, and the comment and the
+  summary (`unknown_columns`) say which are `varchar` for that reason. The run stops only
+  when a read source has no column known at all, and the error points at `schema:` and
+  `dbt-preflight schema`.
+- **Sources nothing reads are skipped.** A source no model, snapshot or test reads, and
+  that `sources.yml` does not fully type, gets no fixture and no error. One line in the
+  fixtures block names it, and the summary lists it as `fixtures.skipped_sources`. A fully
+  typed source keeps its fixture, since another source's foreign key may point at it.
+- **Tests carry back only from a model that has the source's rows.** This applies to raw
+  SQL too, which changes 0.4.0's behaviour. A `unique`/`not_null`/`accepted_values` test
+  carries back only from a model that reads that one source, directly or through an
+  unfiltered pass-through, with no join, grouping, distinct, aggregate, filter, sampling,
+  paging, unnest/explode/`generate_series` or pivot. A staging model with a `where` or a
+  join no longer hands its tests to the source; a mart reading a source directly never
+  did legitimately.
+- A reader of a source is "followed" only without a `*` inside a join or an expression
+  and without whole-row references. A CTE counts as reading the source only through what
+  its FROM and JOINs select, no longer through every earlier CTE it could see.
+- A source identifier DBML cannot spell (GA4's `events_*`) gets a sanitised table name in
+  the derived schema. The fixture still loads under the identifier dbt expects.
+- For BigQuery (and the other dialects where `"..."` is a string), compiled SQL is parsed
+  in the project's dialect first, with dbt's relation names re-quoted, so `replace(x, " ",
+  "_")` no longer reads as two columns named ` ` and `_`. An inferred column name DBML
+  cannot spell is dropped.
 - **Unread declared columns are typed by their name.** A column `sources.yml` declares
   without a `data_type` used to fail the run unless a model read it. Now it gets a type
   from its name and is listed as guessed, but only when every model reading the source is
   accounted for: its compiled SQL parsed (in DuckDB's grammar, the default one or the
   project's own dialect), names the source's relation (in full, or as an unambiguous
   `schema.table`), passes no `*` over it to its output, and reads no unqualified column
-  next to a join. Anything less keeps the error. Fivetran documents more columns than its
-  staging macros select.
+  next to a join. With anything less, the column is a flagged `varchar` (see above).
+  Fivetran documents more columns than its staging macros select.
 - **Numeric keys from a typed null become integers with a ref.** A column typed by a
   compiled `cast(null as numeric(...))` and named `id` or `*_id` is an `int`. Fivetran
   types every id `numeric(28,6)`, and decimal keys neither joined nor took a ref. A `*_id`

@@ -70,15 +70,19 @@ _QUOTED_PART = re.compile(r'"([^"\n]+)"(?=\.)|(?<=\.)"([^"\n]+)"')
 def parse_compiled(sql: str, dialect: str | None = None) -> exp.Expr | None:
     """Parse compiled SQL: DuckDB first, since dbt rendered it for a DuckDB target and quotes
     relations with double quotes; the default dialect next; then the project's own dialect,
-    since the model's body is still written in it (`safe_cast`, BigQuery's `except`). For a
-    dialect where double quotes make a string, dbt's `"db"."schema"."table"` is re-quoted
-    with backticks first. None when nothing parses it."""
+    since the model's body is still written in it. A dialect where double quotes make a
+    string (BigQuery) goes first instead, with dbt's `"db"."schema"."table"` re-quoted with
+    backticks. None when nothing parses it."""
     attempts: list[tuple[str | None, str]] = [("duckdb", sql), (None, sql)]
     if dialect and dialect not in {"duckdb", "none"}:
-        own = sql
         if dialect in _BACKTICK_DIALECTS:
+            # Here a double-quoted token in the model's own body is a string (`replace(x,
+            # " ", "_")`), which DuckDB's grammar would read as a column: the project's
+            # dialect goes first, with dbt's relation names re-quoted for it.
             own = _QUOTED_PART.sub(lambda m: f"`{m.group(1) or m.group(2)}`", sql)
-        attempts.append((dialect, own))
+            attempts.insert(0, (dialect, own))
+        else:
+            attempts.append((dialect, sql))
     for read, text in attempts:
         try:
             tree = sqlglot.parse_one(text, read=read)
@@ -171,7 +175,7 @@ def _is_star_select(tree: exp.Expr, upstream: RelationKey | None) -> bool:
     return isinstance(table, exp.Table) and table_key(table) == upstream
 
 
-def _is_empty_stand_in(tree: exp.Expr) -> bool:
+def is_empty_stand_in(tree: exp.Expr) -> bool:
     """A select of typed nulls that reads no table and returns no rows: what a macro
     renders in place of a source that does not exist yet (`union_connections`,
     `source_or_empty`). `limit 0` or `where false` says it returns nothing."""
@@ -200,19 +204,21 @@ def _is_null_cast(e: exp.Expr) -> bool:
     return isinstance(e, exp.Cast) and isinstance(e.this, exp.Null)
 
 
-def _raw_is_star_select(raw_code: str) -> bool:
-    """The raw-SQL spelling of a pass-through: `select * from {{ source(...) }}` with at most
-    a `where` and a `config()` call. Anything else in Jinja and it is not one."""
+def _raw_star_select_tree(raw_code: str) -> exp.Expr | None:
+    """The parsed raw SQL of a pass-through - `select * from {{ source(...) }}` with at most
+    a `where` and a `config()` call - or None. Anything else in Jinja and it is not one."""
     sql = _RAW_CONFIG_RE.sub("", raw_code)
     sql = _RAW_COMMENT_RE.sub("", sql)
     sql, n = _RAW_CALL_RE.subn(TARGET_PLACEHOLDER, sql)
     if n != 1 or "{{" in sql or "{%" in sql:
-        return False
+        return None
     try:
         tree = sqlglot.parse_one(sql, read=None)
     except Exception:  # noqa: BLE001
-        return False
-    return tree is not None and _is_star_select(tree, (TARGET_PLACEHOLDER.lower(),))
+        return None
+    if tree is None or not _is_star_select(tree, (TARGET_PLACEHOLDER.lower(),)):
+        return None
+    return tree
 
 
 def null_casts(tree: exp.Expr) -> dict[str, str]:
@@ -273,6 +279,9 @@ class CompiledView:
         # `schema.table` with no database names a node only when one node has that suffix.
         self._by_suffix = {k: next(iter(v)) for k, v in by_suffix.items() if len(v) == 1}
         self.pass_through: dict[str, str] = {}
+        # Pass-throughs with a `where` somewhere along the chain: still the source's
+        # columns, but not its rows, so no test carries back through one.
+        self.filtered: set[str] = set()
         for uid in sorted(manifest.models):
             src = self._pass_through_source(uid, frozenset())
             if src is not None:
@@ -313,12 +322,19 @@ class CompiledView:
         if source is None:
             return None
         tree = self.tree(uid)
+        filtered = upstream in self.filtered
         if tree is not None:
-            ok = _is_star_select(tree, self.compiled.relations.get(upstream)) or (
-                upstream in self.manifest.sources and _is_empty_stand_in(tree)
-            )
+            star = _is_star_select(tree, self.compiled.relations.get(upstream))
+            filtered = filtered or (star and tree.args.get("where") is not None)
+            # An empty stand-in is a source that did not exist at compile time, not a
+            # filter: once the source exists, the macro renders `select *` from it.
+            ok = star or (upstream in self.manifest.sources and is_empty_stand_in(tree))
         else:
-            ok = upstream in self.manifest.sources and _raw_is_star_select(model.raw_code)
+            raw_tree = _raw_star_select_tree(model.raw_code)
+            ok = upstream in self.manifest.sources and raw_tree is not None
+            filtered = filtered or (raw_tree is not None and raw_tree.args.get("where") is not None)
+        if ok and filtered:
+            self.filtered.add(uid)
         return source if ok else None
 
     def upstream_sources(self, model: ModelNode) -> dict[str, str]:

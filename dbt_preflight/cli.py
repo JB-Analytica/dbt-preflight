@@ -318,7 +318,10 @@ def _run(
     timer = _StepTimer()
 
     # 1. Parse the head so we know the sources and where they think they live.
-    head_runner = DbtRunner(project, profiles_dir, workdir / "target", workdir / "logs", config.env)
+    head_runner = DbtRunner(
+        project, profiles_dir, workdir / "target", workdir / "logs", config.env,
+        dbt_vars=config.vars,
+    )  # fmt: skip
     head_runner.deps()
     manifest = Manifest.load(head_runner.parse())
     report.relations = manifest.relations()
@@ -345,7 +348,7 @@ def _run(
     head_dbml: str | None = None
     if manifest.sources and config.schema is None:
         compiled = _compile_for_inference(
-            project, manifest, catalog, workdir, "compiled", config.env, dialect
+            project, manifest, catalog, workdir, "compiled", config.env, dialect, config.vars
         )
         timer.mark(f"   {_compiled_line(compiled)}")
     if manifest.sources:
@@ -383,8 +386,9 @@ def _run(
             )
             base_project = read_project(base_root / config.project_relpath)
             base_runner = DbtRunner(
-                base_project, profiles_dir, workdir / "base_target", workdir / "logs", config.env
-            )
+                base_project, profiles_dir, workdir / "base_target", workdir / "logs", config.env,
+                dbt_vars=config.vars,
+            )  # fmt: skip
             base_runner.deps()
             base_runner.parse()
             timer.mark("   base parsed")
@@ -415,6 +419,7 @@ def _run(
                     "base_compiled",
                     config.env,
                     dialect,
+                    config.vars,
                 )
                 timer.mark(f"   base {_compiled_line(base_compiled)}")
                 reshaped = _reshaped_sources(
@@ -562,6 +567,7 @@ _FIXTURE_KEYS = (
     "seed",
     "locale",
     "env",
+    "vars",
     "loader_columns",
     "dialect",
 )
@@ -636,6 +642,7 @@ def _compile_for_inference(
     name: str,
     env: dict[str, str],
     dialect: str | None = None,
+    dbt_vars: dict | None = None,
 ) -> CompiledSql | None:
     """Compile the models that read sources, for the schema inference (`compiled.py`).
 
@@ -647,7 +654,10 @@ def _compile_for_inference(
     compile_profiles = workdir / f"{name}_profiles"
     (workdir / name).mkdir(parents=True, exist_ok=True)
     write_profiles(compile_profiles, project.profile, workdir / name / f"{catalog}.duckdb")
-    runner = DbtRunner(project, compile_profiles, workdir / f"{name}_target", workdir / "logs", env)
+    runner = DbtRunner(
+        project, compile_profiles, workdir / f"{name}_target", workdir / "logs", env,
+        dbt_vars=dbt_vars,
+    )  # fmt: skip
     selection = compile_selection(manifest)
     outcome = compile_models(
         runner,
@@ -756,6 +766,7 @@ def _build_base(
         workdir / "logs",
         config.env,
         target=BASE_TARGET_NAME,
+        dbt_vars=config.vars,
     )
     if not names:
         runner.parse()

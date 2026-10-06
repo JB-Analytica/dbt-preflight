@@ -31,6 +31,7 @@ from dbt_preflight.compiled import (
     TARGET_PLACEHOLDER,
     CompiledSql,
     CompiledView,
+    is_empty_stand_in,
     null_casts,
 )
 from dbt_preflight.manifest import Manifest, ModelNode, SourceColumn, SourceTable, TestNode
@@ -85,6 +86,9 @@ class InferredSource:
     compiled_columns: list[str] = field(default_factory=list)
     # "`col`: int in the raw SQL, varchar compiled": the raw SQL's type was kept.
     type_conflicts: list[str] = field(default_factory=list)
+    # Typed varchar because a model reading the source could not be followed in full, so
+    # nothing could say what it reads (a subset of guessed_columns).
+    unknown_columns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -94,6 +98,7 @@ class ResolvedSchema:
     dbml_path: Path
     derived: bool
     inferred: list[InferredSource] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)  # sources nothing reads: no fixture
 
 
 def _dbml_type(data_type: str) -> str:
@@ -107,6 +112,9 @@ def _enum_name(table: str, column: str) -> str:
     Qualified by table, because two tables can each have a `status` with different values,
     and DBML resolves a column's type by name across the whole document."""
     return re.sub(r"[^a-z0-9_]", "_", f"{table}__{column}".lower())
+
+
+_DBML_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def source_table_names(sources: Iterable[SourceTable]) -> dict[str, str]:
@@ -126,10 +134,21 @@ def source_table_names(sources: Iterable[SourceTable]) -> dict[str, str]:
     taken = {key for key, n in counts.items() if n == 1}
     names: dict[str, str] = {}
     for src in srcs:
-        if counts[normalize_identifier(src.identifier)] == 1:
+        plain = counts[normalize_identifier(src.identifier)] == 1
+        if plain and _DBML_NAME_RE.fullmatch(src.identifier):
             names[src.unique_id] = src.identifier
             continue
-        base = re.sub(r"[^A-Za-z0-9_]", "_", f"{src.source_name}__{src.identifier}")
+        # A wildcard table (GA4's `events_*`) or another name DBML cannot spell gets one it
+        # can; the fixture still loads under the identifier dbt expects.
+        base = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            src.identifier if plain else f"{src.source_name}__{src.identifier}",
+        )
+        if not re.match(r"[A-Za-z_]", base):
+            base = f"t_{base}"
+        if plain:
+            taken.discard(normalize_identifier(src.identifier))
         name, n = base, 2
         while normalize_identifier(name) in taken:
             name, n = f"{base}_{n}", n + 1
@@ -528,7 +547,9 @@ def _columns_in_tree(tree: exp.Expr, table_name: str) -> dict[str, tuple[str | N
     for scope in traverse_scope(tree):
         for col in scope.columns:
             name = col.name.lower()
-            if not name or name.startswith("__preflight_"):
+            if not name or name.startswith("__preflight_") or not _DBML_NAME_RE.fullmatch(name):
+                continue
+            if not col.table and _is_row_reference(col, scope, table_name):
                 continue
             if not _column_is_from_target(col, scope, table_name):
                 continue
@@ -542,15 +563,30 @@ def _columns_in_tree(tree: exp.Expr, table_name: str) -> dict[str, tuple[str | N
     return columns
 
 
+def _is_row_reference(col: exp.Column, scope: Scope, table_name: str) -> bool:
+    """`to_json(o)` with `o` a table alias: the whole row, not a column called `o`. Only an
+    alias other than the table's own name counts, so a source that has a column named
+    after its own table keeps it."""
+    name = col.name.lower()
+    if name == table_name.lower():
+        return False
+    return any(alias.lower() == name for alias in scope.selected_sources)
+
+
 def _leaf_tables(source: object, seen: frozenset[int] = frozenset()) -> set[str] | None:
     """The names of the real tables a scope source ultimately reads from: the table itself,
-    or, for a CTE / derived table, every table underneath it. None when it cannot be told."""
+    or, for a CTE / derived table, every table underneath it. None when it cannot be told.
+
+    Underneath means what its FROM and JOINs select (or each branch of a union), not every
+    CTE it could see: `d as (select 1 as id)` defined after a CTE over the source does not
+    read the source."""
     if isinstance(source, exp.Table):
         return {source.name}
     if not isinstance(source, Scope) or id(source) in seen:
         return None
     out: set[str] = set()
-    for inner in source.sources.values():
+    inners = list(source.union_scopes) or [src for _n, src in source.selected_sources.values()]
+    for inner in inners:
         leaves = _leaf_tables(inner, seen | {id(source)})
         if leaves is None:
             return None
@@ -712,14 +748,19 @@ def _carried_tests_for_source(
     source rows by - carry the same settings, so the fixtures satisfy tests the
     project's own YAML already documents instead of leaving them to chance.
 
-    With compiled SQL, more aliases are added to the raw SQL's, never in place of one,
-    under stricter rules (`_compiled_alias_map`): a test is a claim about the model's grain,
-    and carried back from the wrong model it hands the fixtures a key the source does not
-    have - which makes a fan-out pass.
+    A test is a claim about the model's grain, and carried back from the wrong model it
+    hands the fixtures a key the source does not have - which makes a fan-out pass. So a
+    test only carries back from a model that reads this one source and nothing else and
+    keeps its rows (`_keeps_source_rows`), whether the alias comes from its raw SQL or its
+    compiled SQL. The compiled SQL adds aliases to the raw SQL's, never in place of one,
+    and only through a column that resolves to the source in its own scope
+    (`_compiled_alias_map`).
     """
     carried: dict[str, set[str]] = {}
     carried_values: dict[str, list[str]] = {}
     for uid, model in manifest.models.items():
+        if not _keeps_source_rows(model, source, view):
+            continue
         direct = source.unique_id in model.depends_on
         alias_map = _model_alias_map(model.raw_code) if direct else {}
         if view is not None:
@@ -743,11 +784,48 @@ def _carried_tests_for_source(
 
 
 # What can change a query's grain or drop rows: grouping, distinct, aggregates, set
-# operations, joins, filters. A model with any of these does not have its source's rows.
+# operations, joins, filters, sampling, paging, and anything that turns one row into many
+# (`unnest`, `explode`, `generate_series`, pivots). A model with any of these does not have
+# its source's rows.
 _GRAIN_CHANGES = (
     exp.Group, exp.Distinct, exp.AggFunc, exp.SetOperation, exp.Join, exp.Where,
-    exp.Having, exp.Qualify, exp.Limit, exp.Unnest, exp.Lateral,
+    exp.Having, exp.Qualify, exp.Limit, exp.Offset, exp.Fetch, exp.TableSample,
+    exp.Unnest, exp.Explode, exp.Inline, exp.GenerateSeries, exp.Lateral, exp.Pivot,
 )  # fmt: skip
+
+
+def _changes_grain(tree: exp.Expr) -> bool:
+    """Whether anything in `_GRAIN_CHANGES` occurs - outside an empty stand-in, whose
+    `where false` or `limit 0` is a source that did not exist at compile time, not a
+    filter the model applies."""
+    for node in tree.find_all(*_GRAIN_CHANGES):
+        select = node if isinstance(node, exp.Select) else node.find_ancestor(exp.Select)
+        if select is None or not is_empty_stand_in(select):
+            return True
+    return False
+
+
+def _keeps_source_rows(model: ModelNode, source: SourceTable, view: CompiledView | None) -> bool:
+    """Whether a model has exactly its source's rows, so a `unique`/`not_null` test on it
+    says something about the source: it reads that one source and nothing else (directly,
+    or with compiled SQL through unfiltered pass-throughs), and neither its raw SQL nor its
+    compiled SQL changes the grain (`_GRAIN_CHANGES`). SQL that does not parse cannot
+    carry anything back anyway."""
+    if view is not None:
+        if view.single_source(model) != source.unique_id:
+            return False
+        if any(dep in view.filtered for dep in model.depends_on):
+            return False
+        tree = view.tree(model.unique_id)
+        if tree is not None and _changes_grain(tree):
+            return False
+    elif set(model.depends_on) != {source.unique_id}:
+        return False
+    if source.unique_id in model.depends_on:
+        raw_tree = _parse_staging_sql(model.raw_code)
+        if raw_tree is not None and _changes_grain(raw_tree):
+            return False
+    return True
 
 
 def _compiled_alias_map(
@@ -767,7 +845,7 @@ def _compiled_alias_map(
     if found is None or not found[1]:
         return {}
     tree = found[0]
-    if any(True for _ in tree.find_all(*_GRAIN_CHANGES)):
+    if _changes_grain(tree):
         return {}
     aliases: dict[str, str] = {}
     for scope in traverse_scope(tree):
@@ -800,6 +878,9 @@ def _is_typed_null_column(col: exp.Column, scope: Scope) -> bool:
     else:
         return False
     if not isinstance(source, Scope) or not isinstance(source.expression, exp.Select):
+        return False
+    # It has to stand for this source: a CTE of typed nulls over nothing is not one.
+    if _leaf_tables(source) != {_TARGET_PLACEHOLDER}:
         return False
     name = col.name.lower()
     return any(
@@ -853,11 +934,52 @@ def _reader_accounted_for(view: CompiledView, model: ModelNode, source: SourceTa
     scopes = traverse_scope(found[0])
     if not scopes or _star_reaches_target(scopes[-1]):
         return False
-    for scope in scopes:
-        leaves = [_leaf_tables(src) for _node, src in scope.selected_sources.values()]
-        if len(leaves) > 1 and any(lv is None or _TARGET_PLACEHOLDER in lv for lv in leaves):
-            if any(not col.table for col in scope.columns):
-                return False
+    return all(_scope_accounted_for(scope) for scope in scopes)
+
+
+def _scope_accounted_for(scope: Scope) -> bool:
+    """One scope of `_reader_accounted_for`: False when it reads the source in a way the
+    column walk cannot follow."""
+    selected = {name.lower(): src for name, (_node, src) in scope.selected_sources.items()}
+    leaves = {name: _leaf_tables(src) for name, src in selected.items()}
+    reads_target = {n for n, lv in leaves.items() if lv is None or _TARGET_PLACEHOLDER in lv}
+    if not reads_target:
+        return True
+    joined = len(selected) > 1
+    # A star anywhere in a scope that joins the source with something else - its columns
+    # then reach the next scope under a name that is not the source's - or a star inside
+    # an expression (`struct_pack(o.*)`), or an unresolvable qualifier.
+    projections = (
+        {id(e) for e in scope.expression.expressions}
+        if isinstance(scope.expression, exp.Select)
+        else set()
+    )
+    stars = [
+        node
+        for node in scope.walk()
+        if isinstance(node, exp.Star)
+        and not (isinstance(node.parent, exp.Column) or isinstance(node.parent, exp.Count))
+    ] + list(scope.stars)
+    for star in stars:
+        qualifier = star.table.lower() if isinstance(star, exp.Column) and star.table else None
+        over = {qualifier} if qualifier else set(selected)
+        if qualifier and qualifier not in selected:
+            return False
+        if not over & reads_target:
+            continue
+        if joined or id(star) not in projections:
+            return False
+    # DuckDB's `columns('re')` selects source columns by pattern.
+    if any(True for _ in scope.expression.find_all(exp.Columns)):
+        return False
+    for col in scope.columns:
+        name = col.name.lower()
+        # A whole-row reference (`to_json(o)`) reads every column at once.
+        if not col.table and name in reads_target and name in selected:
+            return False
+        # An unqualified column next to a join could be the source's.
+        if joined and not col.table:
+            return False
     return True
 
 
@@ -1073,13 +1195,20 @@ def _resolve_columns(
     dict[tuple[str, str], set[str]],
     dict[tuple[str, str], str],
     dict[tuple[str, str], list[str]],
+    list[SourceTable],
 ]:
     """Declared columns, filled in from the staging models where sources.yml falls short.
 
-    A source with every column already typed passes through untouched. Otherwise, every
-    column the reading models can account for - the union of what is declared and what is
-    inferred - is used; a source left with an untyped, unread column goes to `still_missing`
-    for the caller to turn into a SchemaError.
+    A source nothing reads - no model, directly or through a pass-through, no snapshot and
+    no test - and that sources.yml does not fully type is skipped: it needs no fixture, and
+    nothing would type it (the last element). A fully typed one keeps its fixture as
+    before: it costs nothing, and another source's foreign key may point at it.
+    A source with every column already typed passes through untouched. Otherwise every
+    column declared or read is used, and none stops the run: one the SQL never types is
+    typed by its name when every reader is accounted for (so no model reads it), and is a
+    `varchar` when a reader could not be followed (`_reader_accounted_for`); both are
+    listed as guessed. Only a read source with no column known at all - nothing declared,
+    nothing read - goes to `still_missing`, for the caller to turn into a SchemaError.
 
     Also returns, for every source (typed or not): `unique`/`not_null` tests carried back
     from a staging model's alias for one of its columns, and the foreign-key ref a
@@ -1092,6 +1221,14 @@ def _resolve_columns(
     effective: dict[str, list[SourceColumn]] = {}
     inferred: list[InferredSource] = []
     still_missing: list[SourceTable] = []
+    skipped = [
+        src
+        for src in sources.values()
+        if not (src.columns and all(c.data_type for c in src.columns))
+        and not _is_read(src, manifest, view)
+    ]
+    skipped_ids = {src.unique_id for src in skipped}
+    sources = {uid: src for uid, src in sources.items() if uid not in skipped_ids}
     carried_tests: dict[tuple[str, str], set[str]] = {}
     carried_values: dict[tuple[str, str], list[str]] = {}
     fk_refs: dict[tuple[str, str], str] = {}
@@ -1134,7 +1271,7 @@ def _resolve_columns(
         declared_names = {c.name for c in src.columns}
         merged: list[SourceColumn] = []
         guessed: list[str] = []
-        unresolved = False
+        unknown: list[str] = []
 
         def _resolve(
             name: str,
@@ -1179,13 +1316,17 @@ def _resolve_columns(
                     SourceColumn(col.name, _resolve(col.name, None, None), col.description)
                 )
             else:
-                unresolved = True
+                # A reader's SQL could not be followed, so a model may read this column in
+                # a way nothing here can type: text, flagged, rather than a guess by name.
+                guessed.append(col.name)
+                unknown.append(col.name)
+                merged.append(SourceColumn(col.name, "varchar", col.description))
         for name, (cast_type, hint) in found.items():
             if name in declared_names:
                 continue
             merged.append(SourceColumn(name, _resolve(name, cast_type, hint)))
 
-        if unresolved or not merged:
+        if not merged:
             still_missing.append(src)
             continue
 
@@ -1201,10 +1342,26 @@ def _resolve_columns(
                 guessed_columns=sorted(guessed),
                 compiled_columns=[c for c in result.compiled_columns if c in merged_names],
                 type_conflicts=result.type_conflicts,
+                unknown_columns=sorted(unknown),
             )
         )
 
-    return effective, inferred, still_missing, carried_tests, fk_refs, carried_values
+    return effective, inferred, still_missing, carried_tests, fk_refs, carried_values, skipped
+
+
+def _is_read(src: SourceTable, manifest: Manifest, view: CompiledView | None) -> bool:
+    """Whether anything enabled reads a source: a model (directly, or through a
+    pass-through), a snapshot, or a test."""
+    if any(src.unique_id in m.depends_on for m in manifest.models.values()):
+        return True
+    if view is not None and view.readers(src.unique_id):
+        return True
+    if any(src.unique_id in t.depends_on for t in manifest.tests.values()):
+        return True
+    return any(
+        child in manifest.snapshots or child in manifest.tests or child in manifest.models
+        for child in manifest.child_map.get(src.unique_id, [])
+    )
 
 
 def derive_dbml(
@@ -1228,26 +1385,39 @@ def derive_dbml(
 
     Returns the DBML text and a record of every source whose columns were inferred.
     """
+    return (derived := derive_schema(manifest, compiled)).text, derived.inferred
+
+
+@dataclass
+class DerivedSchema:
+    text: str
+    inferred: list[InferredSource]
+    skipped: list[str]  # "<source>.<table>" of the sources nothing reads, sorted
+
+
+def derive_schema(manifest: Manifest, compiled: CompiledSql | None = None) -> DerivedSchema:
+    """`derive_dbml`, plus the sources it skipped because nothing reads them."""
     sources = manifest.sources
     if not sources:
         raise SchemaError("The dbt project declares no sources, so there is nothing to generate.")
 
     names = source_table_names(sources.values())
     view = CompiledView(manifest, compiled) if compiled is not None else None
-    effective, inferred, still_missing, carried_tests, fk_refs, carried_values = _resolve_columns(
-        sources, manifest, names, view
-    )
+    (
+        effective, inferred, still_missing, carried_tests, fk_refs, carried_values, skipped
+    ) = _resolve_columns(sources, manifest, names, view)  # fmt: skip
     if still_missing:
+        tables = ", ".join(f"`{s.source_name}.{s.name}`" for s in still_missing)
         patch = _missing_types_patch(still_missing)
-        if patch:
-            raise SchemaError(
-                "Cannot derive a schema from sources.yml: every source column needs a "
-                "`data_type`, or has to be read by a staging model preflight can infer it "
-                "from, so the fixture has the right shape. Either point `schema:` in "
-                ".dbt-preflight.yml at a DBML file that describes the source system, or add "
-                "the missing types. This is what is missing, as YAML to paste into the "
-                f"sources file:\n\n{patch}"
-            )
+        raise SchemaError(
+            f"No columns are known for {tables}: sources.yml declares none, and no model "
+            "that reads it names one preflight can see, so there is no table to generate. "
+            "Point `schema:` in .dbt-preflight.yml at a DBML file describing the source "
+            "system (`dbt-preflight schema` writes a starting one from this project), or "
+            f"declare its columns in the sources file:\n\n{patch}"
+        )
+    skipped_ids = {s.unique_id for s in skipped}
+    sources = {uid: src for uid, src in sources.items() if uid not in skipped_ids}
 
     col_settings: dict[tuple[str, str], set[str]] = {}
     for key, tests in carried_tests.items():
@@ -1326,7 +1496,9 @@ def derive_dbml(
     lines = ["// Derived by dbt-preflight from the project's sources.yml. Do not edit.", ""]
     lines += enum_blocks  # enums first, so a column's type is defined before it is used
     lines += table_lines
-    return "\n".join(lines), inferred
+    return DerivedSchema(
+        "\n".join(lines), inferred, sorted(f"{s.source_name}.{s.name}" for s in skipped)
+    )
 
 
 def resolve_schema(
@@ -1341,7 +1513,8 @@ def resolve_schema(
             raise SchemaError(f"{schema_file} contains no tables.")
         return ResolvedSchema(tables=tables, refs=refs, dbml_path=schema_file, derived=False)
 
-    text, inferred = derive_dbml(manifest, compiled)
+    derived = derive_schema(manifest, compiled)
+    text, inferred = derived.text, derived.inferred
     workdir.mkdir(parents=True, exist_ok=True)
     path = workdir / "derived.dbml"
     path.write_text(text, encoding="utf-8")
@@ -1352,4 +1525,11 @@ def resolve_schema(
             f"The schema derived from sources.yml could not be read by model2data "
             f"({type(exc).__name__}): {exc}"
         ) from exc
-    return ResolvedSchema(tables=tables, refs=refs, dbml_path=path, derived=True, inferred=inferred)
+    return ResolvedSchema(
+        tables=tables,
+        refs=refs,
+        dbml_path=path,
+        derived=True,
+        inferred=inferred,
+        skipped=derived.skipped,
+    )

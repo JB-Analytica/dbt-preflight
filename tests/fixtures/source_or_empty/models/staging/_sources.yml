@@ -14,3 +14,7 @@ sources:
             data_type: varchar
       # No columns declared: the staging model is all preflight has to go on.
       - name: debtors
+      # Nothing reads this one: no fixture, and no reason to stop.
+      - name: archived_invoices
+        columns:
+          - name: invoice_number

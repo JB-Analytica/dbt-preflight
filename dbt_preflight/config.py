@@ -42,6 +42,8 @@ class PreflightConfig:
     seed: int = 42
     locale: str | None = None
     env: dict[str, str] = field(default_factory=dict)
+    # dbt project vars, passed to every dbt invocation as `--vars`.
+    vars: dict[str, Any] = field(default_factory=dict)
     loader_columns: dict[str, dict[str, str]] = field(
         default_factory=lambda: {k: dict(v) for k, v in DEFAULT_LOADER_COLUMNS.items()}
     )
@@ -112,6 +114,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
         "seed",
         "locale",
         "env",
+        "vars",
         "loader_columns",
         "dialect_failures",
         "check_all",
@@ -158,6 +161,10 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
     if not isinstance(env, dict):
         raise ConfigError("`env` must map variable names to values.")
     env = {str(k): str(v) for k, v in env.items()}
+    dbt_vars = raw.get("vars") or {}
+    if not isinstance(dbt_vars, dict):
+        raise ConfigError("`vars` must map dbt variable names to values.")
+    dbt_vars = {str(k): v for k, v in dbt_vars.items()}
 
     loader_columns = {k: dict(v) for k, v in DEFAULT_LOADER_COLUMNS.items()}
     extra = raw.get("loader_columns") or {}
@@ -203,6 +210,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
         seed=seed,
         locale=raw.get("locale"),
         env=env,
+        vars=dbt_vars,
         loader_columns=loader_columns,
         dialect_failures=dialect_failures,
         check_all=check_all,

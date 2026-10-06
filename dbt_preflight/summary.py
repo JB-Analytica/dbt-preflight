@@ -149,6 +149,7 @@ def _inferred_source(s: InferredSource) -> dict[str, Any]:
         "guessed_columns": list(s.guessed_columns),
         "compiled_columns": list(s.compiled_columns),
         "type_conflicts": list(s.type_conflicts),
+        "unknown_columns": list(s.unknown_columns),
     }
 
 
@@ -162,6 +163,7 @@ def _fixtures(report: PreflightReport) -> dict[str, Any] | None:
         ],
         "total_rows": fx.total_rows,
         "inferred_sources": [_inferred_source(s) for s in fx.inferred_sources],
+        "skipped_sources": list(fx.skipped_sources),
         "warnings": {
             "unmatched_sources": list(fx.unmatched_sources),
             "unused_dbml_tables": list(fx.unused_dbml_tables),

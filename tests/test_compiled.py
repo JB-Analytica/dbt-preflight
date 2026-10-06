@@ -197,13 +197,14 @@ def test_declared_columns_no_model_reads_are_typed_by_name() -> None:
     assert "_fivetran_deleted" in inferred[0].guessed_columns
 
 
-def test_unread_columns_stay_an_error_when_a_reader_did_not_compile() -> None:
+def test_unread_columns_are_a_flagged_varchar_when_a_reader_did_not_compile() -> None:
     declared = {"_fivetran_deleted": {"name": "_fivetran_deleted"}}
     raw = _fivetran(declared=declared)
     compiled = CompiledSql.from_dict(raw)
     del compiled.code[STG]
-    with pytest.raises(SchemaError):
-        derive_dbml(Manifest.from_dict(raw), compiled)
+    dbml, inferred = derive_dbml(Manifest.from_dict(raw), compiled)
+    assert "  _fivetran_deleted varchar\n" in _table(dbml, "customer")
+    assert inferred[0].unknown_columns == ["_fivetran_deleted"]
 
 
 def test_typed_null_keys_keep_their_foreign_key_ref() -> None:
@@ -556,9 +557,13 @@ def _events(compiled_sql: str) -> dict:
         "on x.id = e.id",
     ],
 )
-def test_an_unaccounted_reader_keeps_the_unread_column_error(compiled_sql: str) -> None:
-    with pytest.raises(SchemaError, match="- name: occurred"):
-        _derive(_events(compiled_sql))
+def test_an_unaccounted_reader_makes_the_unread_column_a_flagged_varchar(
+    compiled_sql: str,
+) -> None:
+    # Not trusted as unread, not guessed by name: text, and the comment says why.
+    dbml, inferred = _derive(_events(compiled_sql))
+    assert "  occurred varchar\n" in _table(dbml, "events")
+    assert inferred[0].unknown_columns == ["occurred"]
 
 
 def test_two_part_relation_names_match_an_unambiguous_source() -> None:
@@ -569,10 +574,14 @@ def test_two_part_relation_names_match_an_unambiguous_source() -> None:
 
 def test_the_projects_dialect_parses_what_duckdb_cannot() -> None:
     raw = _events(f'select id, occurred\nfrom "{DB}"."raw_s"."events" # a BigQuery comment')
-    with pytest.raises(SchemaError):  # DuckDB's and the default grammar reject `#`
-        derive_dbml(Manifest.from_dict(raw), CompiledSql.from_dict(raw))
-    dbml, _ = derive_dbml(Manifest.from_dict(raw), CompiledSql.from_dict(raw, dialect="bigquery"))
+    # DuckDB's and the default grammar reject `#`: the reader cannot be followed.
+    _, inferred = derive_dbml(Manifest.from_dict(raw), CompiledSql.from_dict(raw))
+    assert inferred[0].unknown_columns == ["occurred"]
+    dbml, inferred = derive_dbml(
+        Manifest.from_dict(raw), CompiledSql.from_dict(raw, dialect="bigquery")
+    )
     assert "  occurred " in _table(dbml, "events")
+    assert inferred[0].unknown_columns == []
 
 
 def test_typed_null_refs_only_for_id_names_to_integer_keys() -> None:
@@ -672,6 +681,10 @@ def test_source_or_empty_project_whole_build(tmp_path: Path) -> None:
     # `id` is the key, and creditor_number unique on its own: both unique tests pass.
     assert "| `stg_billing__creditors` | ✅ built | 200 | 4 passed |" in body
     assert "| `stg_billing__debtors` | ✅ built | 200 | 2 passed |" in body
+    assert (
+        "Read by no model, snapshot or test, so no fixture: `raw_billing.archived_invoices`" in body
+    )
+    assert "Sources with no matching table" not in body
 
 
 def test_a_test_carries_back_through_a_typed_null_placeholder() -> None:
@@ -681,3 +694,192 @@ def test_a_test_carries_back_through_a_typed_null_placeholder() -> None:
     raw["nodes"]["test.p.nn"] = _test("nn", "not_null", "accepts_marketing", STG)
     table = _table(_derive(raw)[0], "customer")
     assert "  accepts_marketing boolean [not null]" in table
+
+
+# --- Second review: the remaining gaps -------------------------------------------------
+
+O_SRC, C_SRC = "source.p.s.orders", "source.p.s.customers"
+O_REL, C_REL = f'"{DB}"."raw_s"."orders"', f'"{DB}"."raw_s"."customers"'
+
+
+def _orders(models: dict, tests: dict | None = None, amount_type=None) -> dict:
+    orders = {"id": "integer", "customer_id": "integer", "amount": amount_type,
+              "status": amount_type}  # fmt: skip
+    return {
+        "sources": {
+            O_SRC: _source("s", "orders", _cols(orders)),
+            C_SRC: _source("s", "customers", _cols({"id": "integer", "region": "varchar"})),
+        },
+        "nodes": {**models, **(tests or {})},
+    }
+
+
+def _accounted(raw: dict, model_uid: str) -> bool:
+    from dbt_preflight.schema import _reader_accounted_for
+
+    manifest = Manifest.from_dict(raw)
+    view = CompiledView(manifest, CompiledSql.from_dict(raw))
+    return _reader_accounted_for(view, manifest.models[model_uid], manifest.sources[O_SRC])
+
+
+@pytest.mark.parametrize(
+    "compiled_sql",
+    [
+        # a star inside a CTE that joins the source with something else
+        f"with j as (select * from {O_REL} o join {C_REL} c on c.id = o.customer_id) "
+        "select j.status::integer as status from j",
+        # whole-row references and pattern selection
+        f"select id, to_json(o) as payload from {O_REL} o",
+        f"select id, struct_pack(o.*) as payload from {O_REL} o",
+        f"select id, columns('am.*') from {O_REL} o",
+    ],
+)
+def test_readers_the_walk_cannot_follow_are_not_accounted_for(compiled_sql: str) -> None:
+    deps = [O_SRC, C_SRC] if "join" in compiled_sql else [O_SRC]
+    raw = _orders({"model.p.m": _model("m", deps, "x", compiled_sql)})
+    assert not _accounted(raw, "model.p.m")
+    _, inferred = _derive(raw)
+    assert "status" in next(i for i in inferred if i.table == "orders").unknown_columns
+
+
+def test_a_whole_row_reference_is_not_a_column() -> None:
+    raw = _orders({"model.p.m": _model("m", [O_SRC], "x", f"select id, to_json(o) from {O_REL} o")})
+    assert "  o " not in _table(_derive(raw)[0], "orders")
+
+
+def test_a_single_source_star_cte_read_by_name_is_accounted_for() -> None:
+    sql = f"with j as (select * from {O_REL} o) select j.status::integer as status, j.amount from j"
+    raw = _orders({"model.p.m": _model("m", [O_SRC], "x", sql)})
+    assert _accounted(raw, "model.p.m")
+    assert "  status int\n" in _table(_derive(raw)[0], "orders")
+
+
+def test_a_filter_in_a_pass_through_stops_carry_back() -> None:
+    raw = _orders(
+        {
+            "model.p.base_orders": _model(
+                "base_orders", [O_SRC],
+                "select * from {{ source('s','orders') }} where status <> 'deleted'",
+                f"select * from {O_REL} where status <> 'deleted'",
+            ),
+            "model.p.stg_orders": _model(
+                "stg_orders", ["model.p.base_orders"], "x",
+                f'select id as order_id, customer_id from "{DB}"."main"."base_orders"',
+            ),
+        },
+        {"test.p.u": _test("u", "unique", "customer_id", "model.p.stg_orders")},
+    )  # fmt: skip
+    view = CompiledView(Manifest.from_dict(raw), CompiledSql.from_dict(raw))
+    assert view.pass_through == {"model.p.base_orders": O_SRC}  # still its columns
+    assert view.filtered == {"model.p.base_orders"}  # but not its rows
+    assert "unique" not in _table(_derive(raw)[0], "orders")
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "select order_id, unnest(string_split(tags, ',')) as tag from {r}",
+        "select order_id, generate_series(1, 3) as n from {r}",
+        "select order_id from {r} using sample 10%",
+        "select order_id from {r} order by id fetch first 5 rows only",
+        "select order_id from {r} offset 5",
+        "select order_id from (select * from {r}) unpivot (v for k in (id, tags))",
+        "select order_id, explode(split(tags, ',')) as tag from {r}",
+        # a CTE of typed nulls over nothing does not stand for the source
+        "with s as (select * from {r}), d as (select cast(null as integer) as order_id) "
+        "select order_id from d",
+    ],
+)
+def test_grain_changes_and_unrelated_typed_nulls_carry_nothing_back(tail: str) -> None:
+    rel = f'"{DB}"."raw_s"."lines"'
+    src = "source.p.s.lines"
+    cols = _cols({"id": "integer", "order_id": "integer", "tags": "varchar"})
+    raw = {
+        "sources": {src: _source("s", "lines", cols)},
+        "nodes": {
+            "model.p.stg_lines": _model("stg_lines", [src], "x", tail.format(r=rel)),
+            "test.p.u": _test("u", "unique", "order_id", "model.p.stg_lines"),
+        },
+    }
+    assert "  order_id int\n" in _table(_derive(raw)[0], "lines")
+
+
+def _direct_mart(raw_code: str, compiled_sql: str) -> dict:
+    return _orders(
+        {"model.p.mart": _model("mart", [O_SRC], raw_code, compiled_sql)},
+        {"test.p.u": _test("u", "unique", "customer_id", "model.p.mart")},
+        amount_type="varchar",
+    )
+
+
+@pytest.mark.parametrize("with_compiled", [False, True])
+def test_a_mart_reading_the_source_directly_carries_nothing_back(with_compiled: bool) -> None:
+    raw = _direct_mart(
+        "select customer_id, sum(amount) as total from {{ source('s','orders') }} group by 1",
+        f"select customer_id, sum(amount) as total from {O_REL} group by 1",
+    )
+    assert "  customer_id int\n" in _table(_derive(raw, with_compiled)[0], "orders")
+
+
+def test_a_staging_model_with_a_where_carries_nothing_back_from_raw_sql() -> None:
+    raw = _direct_mart(
+        "select customer_id from {{ source('s','orders') }} where status <> 'deleted'",
+        f"select customer_id from {O_REL} where status <> 'deleted'",
+    )
+    assert "  customer_id int\n" in _table(_derive(raw, with_compiled=False)[0], "orders")
+
+
+def test_a_plain_staging_model_still_carries_its_tests_back_from_raw_sql() -> None:
+    raw = _direct_mart(
+        "select customer_id, status from {{ source('s','orders') }}",
+        f"select customer_id, status from {O_REL}",
+    )
+    for with_compiled in (False, True):
+        assert "  customer_id int [unique]" in _table(_derive(raw, with_compiled)[0], "orders")
+
+
+# --- Step 2: nothing untyped stops the run ---------------------------------------------
+
+
+def test_skipped_sources_and_unknown_columns_are_said_plainly() -> None:
+    from dbt_preflight.fixtures import FixtureSummary
+    from dbt_preflight.report import PreflightReport, _fixtures_block
+    from dbt_preflight.schema import InferredSource
+
+    report = PreflightReport()
+    report.fixtures = FixtureSummary(
+        skipped_sources=["shopify_graphql.tax_line"],
+        inferred_sources=[
+            InferredSource(
+                "s",
+                "events",
+                "events",
+                ["stg_events"],
+                3,
+                guessed_columns=["amount", "occurred"],
+                unknown_columns=["occurred"],
+            )  # fmt: skip
+        ],
+    )
+    block = _fixtures_block(report)
+    assert "Read by no model, snapshot or test, so no fixture: `shopify_graphql.tax_line`" in block
+    assert "types guessed for `amount`" in block
+    assert "typed varchar because a model reading it could not be followed" in block
+    assert "`occurred`" in block
+
+
+def test_a_wildcard_identifier_gets_a_dbml_name_and_keeps_its_relation(tmp_path) -> None:
+    from dbt_preflight.schema import resolve_schema
+
+    src = "source.p.ga4.events"
+    raw = {
+        "sources": {
+            src: {
+                **_source("ga4", "events", _cols({"event_name": "varchar"})),
+                "identifier": "events_*",
+            }
+        },  # fmt: skip
+        "nodes": {"model.p.stg": _model("stg", [src], "select event_name from x")},
+    }
+    resolved = resolve_schema(None, Manifest.from_dict(raw), tmp_path)
+    assert list(resolved.tables) == ["events__"]

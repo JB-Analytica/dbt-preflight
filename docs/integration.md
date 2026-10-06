@@ -81,7 +81,7 @@ Every flag on `run`:
 | `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
-| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared, and model2data's own warnings. |
+| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), and model2data's own warnings. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
 
 ### Failing tests and the base branch
@@ -164,6 +164,10 @@ for. A source's fixtures count as changed when:
   columns it reads all shape the derived schema, so editing one staging model can change
   what every reader of its source gets. A base that cannot be derived at all counts as
   every source changed.
+
+A change to `vars:` in `.dbt-preflight.yml` counts as a config change that reshapes the
+fixtures, like `env:` or `dialect:`: the vars are passed to every dbt command preflight
+runs (`--vars`), so they change what the models compile to.
 
 And when `dbt_project.yml`, `packages.yml`, `dependencies.yml`, `package-lock.yml`,
 `selectors.yml` or a checked-in `profiles.yml` in the project directory changed, nothing is

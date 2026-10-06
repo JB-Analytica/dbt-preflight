@@ -957,6 +957,12 @@ def _fixtures_block(report: PreflightReport) -> str:
             "Schema tables no source declares: "
             + ", ".join(f"`{t}`" for t in fx.unused_dbml_tables),
         ]
+    if fx.skipped_sources:
+        parts += [
+            "",
+            "Read by no model, snapshot or test, so no fixture: "
+            + ", ".join(f"`{s}`" for s in fx.skipped_sources),
+        ]
     if fx.inferred_sources:
         parts += ["", "Columns inferred from the staging models that read them:"]
         for src in fx.inferred_sources:
@@ -966,8 +972,15 @@ def _fixtures_block(report: PreflightReport) -> str:
                 )
             else:
                 line = f"- `{src.identifier}`: {src.total_columns} columns, read by no model"
-            if src.guessed_columns:
-                line += ", types guessed for " + ", ".join(f"`{c}`" for c in src.guessed_columns)
+            named = [c for c in src.guessed_columns if c not in src.unknown_columns]
+            if named:
+                line += ", types guessed for " + ", ".join(f"`{c}`" for c in named)
+            if src.unknown_columns:
+                line += (
+                    "; typed varchar because a model reading it could not be followed, so "
+                    "nothing says how these are used: "
+                    + ", ".join(f"`{c}`" for c in src.unknown_columns)
+                )
             parts.append(line)
         from_compiled = [s for s in fx.inferred_sources if s.compiled_columns]
         if from_compiled:

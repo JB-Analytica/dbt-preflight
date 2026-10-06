@@ -145,6 +145,7 @@ class DbtRunner:
         log_path: Path,
         env: dict[str, str],
         target: str = TARGET_NAME,
+        dbt_vars: dict[str, Any] | None = None,
     ) -> None:
         self.project = project
         self.profiles_dir = profiles_dir
@@ -152,6 +153,11 @@ class DbtRunner:
         self.log_path = log_path
         self.env = env
         self.target = target
+        self.dbt_vars = dbt_vars or {}
+
+    def _vars_args(self) -> list[str]:
+        """`--vars` for every invocation when `.dbt-preflight.yml` sets `vars:`."""
+        return ["--vars", json.dumps(self.dbt_vars, sort_keys=True)] if self.dbt_vars else []
 
     def _args(self, command: str, *extra: str) -> list[str]:
         return [
@@ -171,6 +177,7 @@ class DbtRunner:
             "--log-level-file",
             "info",
             "--no-use-colors",
+            *self._vars_args(),
             *extra,
         ]
 
@@ -210,6 +217,7 @@ class DbtRunner:
                 "--log-level",
                 "warn",
                 "--no-use-colors",
+                *self._vars_args(),
             ]
         )
         if not res.success:
