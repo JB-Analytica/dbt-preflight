@@ -54,7 +54,7 @@ jobs:
 ```
 
 Open a pull request that touches the project, and the comment appears when the job
-finishes. On the projects in our real-world suite a run takes 7 to 46 seconds, Fivetran's
+finishes. On the projects in our real-world suite a run takes 7 to 48 seconds, Fivetran's
 Shopify package included. `@v0` follows the latest 0.x release; pin `@v0.5.0` for an exact
 version.
 
