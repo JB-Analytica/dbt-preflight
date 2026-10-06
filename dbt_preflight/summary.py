@@ -164,6 +164,7 @@ def _fixtures(report: PreflightReport) -> dict[str, Any] | None:
         "total_rows": fx.total_rows,
         "inferred_sources": [_inferred_source(s) for s in fx.inferred_sources],
         "skipped_sources": list(fx.skipped_sources),
+        "guessed_sources": fx.guessed_sources,
         "warnings": {
             "unmatched_sources": list(fx.unmatched_sources),
             "unused_dbml_tables": list(fx.unused_dbml_tables),

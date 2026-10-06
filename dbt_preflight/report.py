@@ -602,6 +602,9 @@ def render(report: PreflightReport) -> str:
             lines.append(f"- {icon} **{v.rule}** `{v.path}` — {v.message}")
         lines.append("")
 
+    pointer = _schema_pointer(report)
+    if pointer:
+        lines += [pointer, ""]
     fixtures = _fixtures_block(report)
     if fixtures:
         lines.append(fixtures)
@@ -930,6 +933,25 @@ def _diff_section(report: PreflightReport) -> list[str]:
         )
         lines.append("")
     return lines
+
+
+STUDIO_URL = "https://studio.jbanalytica.com/?ref=dbt-preflight"
+
+
+def _schema_pointer(report: PreflightReport) -> str:
+    """One line, only when preflight had to guess a type: where to keep and refine the schema.
+
+    Never on a clean run, and never with schema content in the URL.
+    """
+    fx = report.fixtures
+    guessed = fx.guessed_sources if fx is not None else 0
+    if not guessed:
+        return ""
+    noun = "source" if guessed == 1 else "sources"
+    return (
+        f"Columns were guessed for {guessed} {noun}. Keep and refine the schema with "
+        f"`dbt-preflight schema`, then edit it in [model2data studio]({STUDIO_URL})."
+    )
 
 
 def _fixtures_block(report: PreflightReport) -> str:

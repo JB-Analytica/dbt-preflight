@@ -256,6 +256,42 @@ Preflight needs to know what the source tables look like. Three options:
    reference (`to_json(o)`) and reads no unqualified column next to a join. A model that
    does not compile is read from its raw SQL alone.
 
+### Keeping the schema
+
+A derived schema is a starting point that preflight rebuilds on every run. When it had to
+guess a type, the comment says so in one line, and `dbt-preflight schema` turns what it
+derived into a file you own:
+
+```bash
+dbt-preflight schema           # writes source_system/<project name>.dbml
+```
+
+It does what a run does on the head (`sources.yml`, the staging models, compiled SQL), with
+no warehouse, credentials or base ref, and writes the result as DBML. Every column that
+`sources.yml` did not type carries a note saying where its type came from: `type guessed
+from the name`, `type read from compiled SQL`, or `inferred from a staging cast`. They are
+plain prose, so model2data treats them as descriptions and they change nothing about the
+generated data; delete a note once you have checked its column. (A note that is, whole, a
+JSON object is how model2data shapes generation: put those next to the prose notes, not in
+them.)
+
+The default path is `source_system/<dbt project name>.dbml` in the folder that holds
+`.dbt-preflight.yml`, so the `schema:` line the command prints works as it is. `--output`
+chooses another path. The command refuses to overwrite a file without `--force`, and does
+nothing when the config already sets `schema:`.
+
+Then:
+
+1. Add `schema: source_system/<project name>.dbml` to `.dbt-preflight.yml`.
+2. Commit the file.
+3. Refine it in [model2data studio](https://studio.jbanalytica.com/?ref=dbt-preflight), by
+   pasting it into the editor or opening the repository as a repository project. Weighted
+   statuses, null rates and skewed keys carry through to the fixtures.
+
+A run with `schema:` pointing at the written file builds the same tables, columns and types
+as the derived run, and stops reporting guesses. The DBML file is then the schema, and a
+change to it counts as a change to every source.
+
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.
 

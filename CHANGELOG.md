@@ -7,6 +7,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `dbt-preflight schema` writes the schema a run derives from the project as a DBML file to
+  keep and refine in model2data studio. It does the head's derivation (sources.yml, staging
+  SQL, compiled SQL) with no warehouse, credentials or base ref. Columns `sources.yml` did
+  not type carry a prose note (`type guessed from the name`, `type read from compiled SQL`,
+  `inferred from a staging cast`), which model2data reads as a description, never as a
+  generation hint. Default path `source_system/<dbt project name>.dbml` beside
+  `.dbt-preflight.yml`; `--output` overrides it, `--force` overwrites and also derives when
+  the config already has `schema:`. A run with `schema:` pointing at the file builds the
+  same fixtures as the derived run.
+- When a run had to guess a column's type, the comment gets one line, outside the folded
+  fixtures block, pointing at `dbt-preflight schema` and model2data studio. It never
+  appears on a clean run, and the link carries no schema content. The summary JSON gains
+  `fixtures.guessed_sources` (schema version unchanged).
 - Schema inference reads dbt's compiled SQL as well as the raw SQL, so a source read
   through a macro is no longer invisible. The models that read a source are compiled
   against an empty DuckDB file on both branches; a pure `select *` (or a macro's empty

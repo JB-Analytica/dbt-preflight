@@ -16,7 +16,7 @@ dbt-preflight run \
   --summary-file preflight-summary.json
 ```
 
-Every flag on `run`:
+Every flag on `run`. The `schema` command's flags follow.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
@@ -30,6 +30,18 @@ Every flag on `run`:
 | `--fail-on-error` / `--no-fail-on-error` | `--fail-on-error` | Whether a failed check exits 1. |
 | `--keep-workdir` | off | Keep `.preflight/` (fixtures, the DuckDB file, dbt artefacts) after the run, for inspection. |
 | `--version` | — | Print the version and exit. |
+
+`dbt-preflight schema` writes the schema a run would derive from the project as a DBML file to
+keep and edit (see "Keeping the schema" in the README). It needs no warehouse, credentials or
+base ref, and exits 0 on success, when `.dbt-preflight.yml` already has `schema:` (nothing is
+written), and 1 when it cannot derive a schema or the output exists.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--config` | `.dbt-preflight.yml` at the repo root | Path to the config file. |
+| `--repo-root` | the git root of the current directory | Repository root. |
+| `--output` | `source_system/<dbt project name>.dbml`, in the folder holding `.dbt-preflight.yml` | Where to write the DBML. A `schema:` line copied from the command's output works as printed. |
+| `--force` | off | Overwrite an existing output file, and derive a schema even when the config already has `schema:` (the config is never edited). |
 
 ## Exit code
 
@@ -81,7 +93,7 @@ Every flag on `run`:
 | `broken_on_base_models` | array | Models that fail to build on the base branch too, the same way, without this change touching them: name, unique_id, error (DuckDB's error line). They do not fail the run. Empty without `--base-ref`. |
 | `violations` | array | Convention violations: rule, severity, model, path, message. |
 | `diffs` | array | Base-versus-head comparison for changed models and everything downstream: rows, added/removed/retyped/renamed columns, moved metrics with base and head values (`spans` names the models a metric reads when it reads more than one, e.g. a ratio of orders to customers; empty otherwise), and where a removed or renamed column was referenced on the base branch. |
-| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), and model2data's own warnings. |
+| `fixtures` | object or null | The synthetic data generated: tables and rows, sources whose columns were inferred rather than declared (`inferred_sources`; each lists `guessed_columns`, the subset typed `varchar` because a reader could not be followed as `unknown_columns`, `compiled_columns` and `type_conflicts`), sources skipped because nothing reads them (`skipped_sources`), and model2data's own warnings. `guessed_sources` is the number of sources with at least one guessed column (the count behind the comment's pointer to `dbt-preflight schema`); 0 when nothing was guessed. |
 | `comment_file` | string or null | The `--comment-file` path this run was given, or null if none. |
 
 ### Failing tests and the base branch
