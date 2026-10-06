@@ -658,3 +658,50 @@ def test_a_new_hard_coded_table_reads_as_one(webshop: Path, tmp_path: Path) -> N
         "reads `finance.fx_rates`, which no model, seed or source in this project builds "
         "(a hard-coded table?)"
     ) in body.split("### Build errors")[1]
+
+
+def test_a_failure_over_a_guessed_column_is_not_broken_on_main(tmp_path: Path) -> None:
+    # Both staging models fail on both branches with the same error (they read a table no
+    # branch builds). One reads `status`, whose type preflight guessed: its failure may be
+    # the guess, so it cannot count as "broken on main". The other reads only typed columns.
+    repo = tmp_path / "guessed"
+    _write(
+        repo,
+        "dbt_project.yml",
+        'name: guessed\nversion: "1.0.0"\nconfig-version: 2\nprofile: guessed\n'
+        'model-paths: ["models"]\nflags:\n  send_anonymous_usage_stats: false\n',
+    )
+    _write(
+        repo,
+        "models/staging/_sources.yml",
+        "version: 2\nsources:\n  - name: shop\n    schema: raw\n    tables:\n"
+        "      - name: orders\n        columns:\n          - name: id\n            data_type: integer\n"
+        "          - name: status\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_status.sql",
+        "select o.id, o.status from finance.nowhere as n\n"
+        "join {{ source('shop', 'orders') }} as o on n.id = o.id\n",
+    )
+    _write(
+        repo,
+        "models/staging/stg_ids.sql",
+        "select o.id from finance.nowhere as n\n"
+        "join {{ source('shop', 'orders') }} as o on n.id = o.id\n",
+    )
+    _write(repo, "models/marts/m_status.sql", "select id from {{ ref('stg_status') }}\n")
+    _write(repo, "models/marts/m_ids.sql", "select id from {{ ref('stg_ids') }}\n")
+    _commit_base_then_branch(repo)
+    for mart in ("m_status", "m_ids"):
+        path = repo / f"models/marts/{mart}.sql"
+        path.write_text("-- touched\n" + path.read_text())
+    _git(repo, "commit", "-qam", "touch the marts")
+
+    code, body, summary = _run(repo, tmp_path, config=False)
+    assert [m["name"] for m in summary["broken_on_base_models"]] == ["stg_ids"]
+    [unverified] = summary["unverified_broken_on_base_models"]
+    assert unverified["name"] == "stg_status"
+    assert unverified["guessed_inputs"] == ["orders.status"]
+    assert "reads `orders.status`, whose type preflight guessed" in body
+    assert summary["verdict"] == "failed"

@@ -8,6 +8,7 @@ project's `profiles.yml` and `sources.yml` expect to find.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,21 @@ def _as_path(repo_root: Path, value: Any, key: str) -> Path:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"`{key}` must be a path string, got {value!r}.")
     return (repo_root / value).resolve()
+
+
+def _json_value(value: Any, key: str) -> Any:
+    """A `vars:` value as JSON can carry it to `--vars`: a YAML date or timestamp becomes
+    its ISO string (`start_date: 2024-01-01` is a date to YAML, and a string to dbt
+    either way); anything else that is not plain JSON is refused."""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [_json_value(v, f"{key}[{i}]") for i, v in enumerate(value)]
+    if isinstance(value, dict):
+        return {str(k): _json_value(v, f"{key}.{k}") for k, v in value.items()}
+    raise ConfigError(f"`{key}` must be a string, number, boolean, list or mapping.")
 
 
 def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightConfig:
@@ -164,7 +180,7 @@ def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightCo
     dbt_vars = raw.get("vars") or {}
     if not isinstance(dbt_vars, dict):
         raise ConfigError("`vars` must map dbt variable names to values.")
-    dbt_vars = {str(k): v for k, v in dbt_vars.items()}
+    dbt_vars = {str(k): _json_value(v, f"vars.{k}") for k, v in dbt_vars.items()}
 
     loader_columns = {k: dict(v) for k, v in DEFAULT_LOADER_COLUMNS.items()}
     extra = raw.get("loader_columns") or {}

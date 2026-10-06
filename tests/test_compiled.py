@@ -742,9 +742,36 @@ def test_readers_the_walk_cannot_follow_are_not_accounted_for(compiled_sql: str)
     assert "status" in next(i for i in inferred if i.table == "orders").unknown_columns
 
 
-def test_a_whole_row_reference_is_not_a_column() -> None:
-    raw = _orders({"model.p.m": _model("m", [O_SRC], "x", f"select id, to_json(o) from {O_REL} o")})
-    assert "  o " not in _table(_derive(raw)[0], "orders")
+@pytest.mark.parametrize("with_compiled", [False, True])
+def test_a_column_named_like_its_cte_is_still_a_column(with_compiled: bool) -> None:
+    # A real `source` column under `with source as (...)`: dropping it would leave DuckDB
+    # binding `source` to the whole row as a struct, and the model building on it.
+    src = "source.p.ga.sessions"
+    raw = {
+        "sources": {src: _source("ga", "sessions", _cols({"id": "integer", "source": None}))},
+        "nodes": {
+            "model.p.stg": _model(
+                "stg", [src],
+                "with source as (select * from {{ source('ga', 'sessions') }})\n"
+                "select id, cast(source as varchar) as traffic_source from source",
+                f'with source as (select * from "{DB}"."raw_ga"."sessions")\n'
+                "select id, cast(source as varchar) as traffic_source from source",
+            ),
+        },
+    }  # fmt: skip
+    dbml, inferred = _derive(raw, with_compiled)
+    assert "  source varchar\n" in _table(dbml, "sessions")
+    if with_compiled:
+        assert _accounted_for_source(raw, "model.p.stg", src)
+        assert inferred[0].unknown_columns == []
+
+
+def _accounted_for_source(raw: dict, model_uid: str, source_uid: str) -> bool:
+    from dbt_preflight.schema import _reader_accounted_for
+
+    manifest = Manifest.from_dict(raw)
+    view = CompiledView(manifest, CompiledSql.from_dict(raw))
+    return _reader_accounted_for(view, manifest.models[model_uid], manifest.sources[source_uid])
 
 
 def test_a_single_source_star_cte_read_by_name_is_accounted_for() -> None:
@@ -883,3 +910,160 @@ def test_a_wildcard_identifier_gets_a_dbml_name_and_keeps_its_relation(tmp_path)
     }
     resolved = resolve_schema(None, Manifest.from_dict(raw), tmp_path)
     assert list(resolved.tables) == ["events__"]
+
+
+# --- Third review -----------------------------------------------------------------------
+
+
+def _ga4(identifier: str, cast: str) -> dict:
+    src = "source.p.ga4.events"
+    return {
+        "sources": {src: {**_source("ga4", "events"), "identifier": identifier}},
+        "nodes": {
+            "model.p.stg": _model(
+                "stg", [src],
+                f"select cast(event_name as {cast}) as event_name from {{{{ source('ga4', 'events') }}}}",
+            ),
+        },
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize("identifier", ["events_*", "events"])
+def test_a_reshaped_source_is_found_under_its_written_name(identifier: str) -> None:
+    from dbt_preflight.cli import _reshaped_sources
+
+    head = _ga4(identifier, "integer")
+    base = _ga4(identifier, "varchar")
+    if identifier == "events":
+        # Two sources with one identifier: each is written as `<source>__<identifier>`.
+        other = {**_source("ga4_backup", "events"), "identifier": "events"}
+        for raw in (head, base):
+            raw["sources"]["source.p.ga4_backup.events"] = other
+            raw["nodes"]["model.p.stg2"] = _model(
+                "stg2", ["source.p.ga4_backup.events"],
+                "select event_name from {{ source('ga4_backup', 'events') }}",
+            )  # fmt: skip
+    reshaped = _reshaped_sources(Manifest.from_dict(head), Manifest.from_dict(base))
+    assert reshaped == {"source.p.ga4.events"}
+    assert _reshaped_sources(Manifest.from_dict(head), Manifest.from_dict(head)) == set()
+
+
+def _snapshot_reader(kind: str) -> dict:
+    src = "source.p.s.events"
+    raw = _events(f'select id, occurred from "{DB}"."raw_s"."events"')
+    raw["sources"][src]["columns"]["payload"] = {"name": "payload", "data_type": None}
+    if kind == "snapshot":
+        raw["nodes"]["snapshot.p.events_snap"] = {
+            "resource_type": "snapshot", "name": "events_snap", "schema": "snapshots",
+            "depends_on": {"nodes": [src]}, "fqn": ["p", "events_snap"],
+        }  # fmt: skip
+        raw["child_map"] = {src: ["model.p.stg_events", "snapshot.p.events_snap"]}
+    else:
+        raw["nodes"]["test.p.assert_events"] = {
+            "resource_type": "test", "name": "assert_events", "column_name": None,
+            "attached_node": None, "depends_on": {"nodes": [src]},
+            "original_file_path": "tests/assert_events.sql",
+        }  # fmt: skip
+    return raw
+
+
+@pytest.mark.parametrize("kind", ["snapshot", "singular test"])
+def test_a_snapshot_or_singular_test_reader_is_not_followed(kind: str) -> None:
+    dbml, inferred = _derive(_snapshot_reader(kind))
+    assert "  payload varchar\n" in _table(dbml, "events")
+    assert inferred[0].unknown_columns == ["payload"]
+    reader = "snapshot.p.events_snap" if kind == "snapshot" else "test.p.assert_events"
+    assert inferred[0].guessed_readers["payload"] == [reader]
+
+
+def test_guessed_columns_bind_their_readers_and_what_is_downstream() -> None:
+    from dbt_preflight.cli import _guess_bound
+    from dbt_preflight.report import PreflightReport
+
+    raw = _orders(
+        {
+            "model.p.stg_orders": _model(
+                "stg_orders", [O_SRC], "x", f"select id, status from {O_REL}"
+            ),
+            "model.p.stg_ids": _model("stg_ids", [O_SRC], "x", f"select id from {O_REL}"),
+        }
+    )
+    raw["nodes"]["model.p.fct"] = _model("fct", ["model.p.stg_orders"], "x", "select 1")
+    raw["child_map"] = {"model.p.stg_orders": ["model.p.fct"]}
+    manifest = Manifest.from_dict(raw)
+    _, inferred = derive_dbml(manifest, CompiledSql.from_dict(raw))
+    report = PreflightReport()
+    from dbt_preflight.fixtures import FixtureSummary
+
+    report.fixtures = FixtureSummary(inferred_sources=inferred)
+    bound = _guess_bound(manifest, report)
+    assert bound["model.p.stg_orders"] == ["orders.status"]
+    assert bound["model.p.fct"] == ["orders.status"]  # downstream of a guessed read
+    assert "model.p.stg_ids" not in bound  # reads only typed columns
+
+
+def test_a_failing_test_over_a_guessed_column_says_so() -> None:
+    from dbt_preflight.cli import _BaseBuild, _mark_guessed_tests, _Trust
+    from dbt_preflight.report import FailedTest, PreflightReport, _test_entry_lines
+
+    raw = _orders({"model.p.stg": _model("stg", [O_SRC], "x", f"select id, status from {O_REL}")})
+    raw["nodes"]["test.p.expr"] = _test("expr", "expression_is_true", "status", "model.p.stg")
+    manifest = Manifest.from_dict(raw)
+    report = PreflightReport()
+    report.tests = [
+        FailedTest(
+            name="expr", model="stg", status="fail", failures=3, message="", unique_id="test.p.expr"
+        )  # fmt: skip
+    ]
+    trust = _Trust(modified=set(), fixture_bound=set(), untrusted=set(), changed_upstream=set(),
+                   guess_bound={"model.p.stg": ["orders.status"]})  # fmt: skip
+    _mark_guessed_tests(report, manifest, _BaseBuild(manifest=manifest, trust=trust))
+    assert report.tests[0].guessed_inputs == ["orders.status"]
+    line = _test_entry_lines(report.tests[0], details=False)[0]
+    assert "reads `orders.status`, whose type preflight guessed" in line
+
+
+def _trust_with_guess() -> object:
+    from dbt_preflight.cli import _Trust
+
+    return _Trust(modified=set(), fixture_bound=set(), untrusted=set(), changed_upstream=set(),
+                  guess_bound={"model.p.stg": ["orders.status"]})  # fmt: skip
+
+
+def _base_result(status: str, failures: int | None):
+    from dbt_preflight.dbt_runner import NodeResult
+
+    return NodeResult(unique_id="test.p.expr", name="expr", resource_type="test", status=status,
+                      message="", failures=failures, execution_time=0.0,
+                      depends_on=["model.p.stg"])  # fmt: skip
+
+
+def test_an_error_on_guessed_data_is_not_judged_by_the_base() -> None:
+    from dbt_preflight.cli import _base_test_usable
+    from dbt_preflight.report import FailedTest, _test_entry_lines
+
+    trust = _trust_with_guess()
+    assert not _base_test_usable(_base_result("error", None), trust)  # type: ignore[arg-type]
+    t = FailedTest(name="expr", model="stg", status="error", failures=None,
+                   message="Conversion Error: Could not convert string 'x' to INT32",
+                   unique_id="test.p.expr", guessed_inputs=["orders.status"])  # fmt: skip
+    line = _test_entry_lines(t, details=False)[0]
+    assert line.startswith("- ❌")
+    assert "could not be checked against the base branch" in line
+
+
+def test_failing_rows_on_guessed_data_stay_pre_existing_but_say_so() -> None:
+    from dbt_preflight.baseline import is_preexisting
+    from dbt_preflight.cli import _base_test_usable
+    from dbt_preflight.report import FailedTest, _test_entry_lines
+
+    base = _base_result("fail", 108)
+    assert _base_test_usable(base, _trust_with_guess())  # type: ignore[arg-type]
+    assert is_preexisting(_base_result("fail", 108), base)
+    t = FailedTest(name="expr", model="stg", status="fail", failures=108, message="",
+                   unique_id="test.p.expr", preexisting=True,
+                   guessed_inputs=["orders.status"])  # fmt: skip
+    line = _test_entry_lines(t, details=False)[0]
+    assert line.startswith("- ⚪")
+    assert "reads `orders.status`, whose type preflight guessed" in line
+    assert "the failure may be the guess" in line

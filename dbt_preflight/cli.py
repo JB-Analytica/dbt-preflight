@@ -49,7 +49,7 @@ from dbt_preflight.report import (
     PreflightReport,
     render,
 )
-from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema
+from dbt_preflight.schema import SchemaError, derive_dbml, resolve_schema, source_table_names
 from dbt_preflight.summary import build_summary
 from dbt_preflight.transpile import TranspileHook, detect_dialect
 
@@ -504,6 +504,7 @@ def _run(
                     untrusted=untrusted,
                     changed_upstream=untrusted | manifest.descendants(untrusted),
                     judge=judge,
+                    guess_bound=_guess_bound(manifest, report),
                 ),
                 timer,
             )
@@ -627,10 +628,17 @@ def _reshaped_sources(
     except SchemaError:
         return set(head.sources)
     head_tables, base_tables = _dbml_tables(head_text), _dbml_tables(base_text)
+    # By the name each side writes the source's table under, not its identifier: that name
+    # is sanitised (`events_*` -> `events__`) or prefixed for a duplicate identifier
+    # (`<source>__<identifier>`), and a lookup that finds nothing on either side would
+    # compare equal and hide the change.
+    head_names = source_table_names(head.sources.values())
+    base_names = source_table_names(base.sources.values())
     return {
         uid
-        for uid, src in head.sources.items()
-        if head_tables.get(src.identifier) != base_tables.get(src.identifier)
+        for uid in head.sources
+        if head_tables.get(head_names[uid])
+        != (base_tables.get(base_names[uid]) if uid in base_names else None)
     }
 
 
@@ -702,6 +710,9 @@ class _Trust:
     # `untrusted` and everything downstream of it: never broken on the base, and no test
     # reading it is pre-existing on an error, since one error can hide another.
     changed_upstream: set[str]
+    # Nodes reading a source column whose type preflight guessed, directly or upstream:
+    # uid -> "<table>.<column>". Never "broken on main", never a pre-existing failure.
+    guess_bound: dict[str, list[str]] = field(default_factory=dict)
     # False when a project-level file changed: nothing is judged by the base at all.
     judge: bool = True
 
@@ -789,15 +800,7 @@ def _build_base(
     if tests.error:
         _say(f"   ⚠️  base tests could not run, every head failure counts: {tests.error}")
     built = sum(1 for r in tables.results if r.status == "success")
-    results = {
-        r.unique_id: r
-        for r in tests.results
-        if trust.judge
-        and r.resource_type in {"test", "unit_test"}
-        and r.unique_id not in trust.modified
-        and not trust.fixture_bound.intersection(r.depends_on)
-        and not (r.status == "error" and trust.changed_upstream.intersection(r.depends_on))
-    }
+    results = {r.unique_id: r for r in tests.results if _base_test_usable(r, trust)}
     failing = sum(1 for r in results.values() if r.status in FAILING)
     timer.mark(
         f"   base branch: {built} nodes built, {len(results)} tests, {failing} failing there"
@@ -868,6 +871,7 @@ def _build_and_check(
     )
     if base is not None:
         _judge_builds(report, manifest, outcome, base)
+        _mark_guessed_tests(report, manifest, base)
     built = [m for m in report.models if m.status == BUILT]
     timer.mark(
         f"   built {len(built)}/{len(report.models)} models, "
@@ -972,6 +976,21 @@ def _judge_builds(
         on_base = base.tables.get(m.unique_id)
         if m.status != FAILED or r is None:
             continue
+        guessed = trust.guess_bound.get(m.unique_id)
+        if (
+            guessed
+            # A compilation error happens before any data is read, so no fixture type can
+            # have caused it: that one is judged against the base as usual.
+            and "Compilation Error" not in (r.message or "")
+            and on_base is not None
+            and on_base.status == "error"
+            and same_error(r.message, on_base.message)
+        ):
+            # Failing the same way on main proves nothing when the model reads a column
+            # whose type preflight guessed: both branches ran on the guess. It counts.
+            m.unverified_broken_on_base = True
+            m.guessed_inputs = guessed
+            continue
         m.broken_on_base = is_broken_on_base(r, on_base, trust.changed_upstream)
         if (
             not m.broken_on_base
@@ -1027,6 +1046,69 @@ def _judge_builds(
             and on_base is not None
             and on_base.status == "skipped"
         )
+
+
+def _base_test_usable(r: NodeResult, trust: _Trust) -> bool:
+    """Whether a test's base result may judge the head's: see `_build_base`."""
+    guessed = r.unique_id in trust.guess_bound or bool(trust.guess_bound.keys() & set(r.depends_on))
+    return (
+        trust.judge
+        and r.resource_type in {"test", "unit_test"}
+        and r.unique_id not in trust.modified
+        and not trust.fixture_bound.intersection(r.depends_on)
+        and not (r.status == "error" and bool(trust.changed_upstream.intersection(r.depends_on)))
+        # A test over what reads a guessed column that errors on the base: a type mismatch
+        # or failed cast on guessed data is the guess's as likely as the project's, so it
+        # is not pre-existing. Failing rows on both branches still are (annotated, see
+        # `_mark_guessed_tests`): an invariant random data breaks is not a typing question.
+        and not (r.status == "error" and guessed)
+    )
+
+
+def _mark_guessed_tests(report: PreflightReport, manifest: Manifest, base: _BaseBuild) -> None:
+    """Name the guessed columns a failing test reads, directly or upstream, so the comment
+    says the failure may be preflight's guess rather than the project: an error there was
+    not judged against the base (`_build_base`), and failing rows on both branches stay
+    pre-existing but say what they read."""
+    if base.trust is None or not base.trust.guess_bound:
+        return
+    bound = base.trust.guess_bound
+    for t in report.tests:
+        test = manifest.tests.get(t.unique_id) or manifest.unit_tests.get(t.unique_id)
+        cols = set(bound.get(t.unique_id, []))
+        for dep in test.depends_on if test is not None else []:
+            cols |= set(bound.get(dep, []))
+        t.guessed_inputs = sorted(cols)
+
+
+def _guess_bound(manifest: Manifest, report: PreflightReport) -> dict[str, list[str]]:
+    """{node unique id: the guessed source columns it reads, as "<table>.<column>"}.
+
+    Column by column, as far as inference can tell: the models whose SQL reads a guessed
+    column (for a column typed varchar because a reader could not be followed, those
+    readers), a test on the source over a guessed column, and everything downstream of
+    them. A guessed column nothing reads binds nothing."""
+    fx = report.fixtures
+    if fx is None:
+        return {}
+    direct: dict[str, set[str]] = {}
+    guessed_by_source: dict[tuple[str, str], set[str]] = {}
+    for src in fx.inferred_sources:
+        guessed_by_source[(src.source_name, src.table)] = set(src.guessed_columns)
+        for col, readers in src.guessed_readers.items():
+            for uid in readers:
+                direct.setdefault(uid, set()).add(f"{src.identifier}.{col}")
+    for test in manifest.source_tests():
+        src = manifest.sources.get(test.attached_node or "")
+        if src is None or not test.column_name:
+            continue
+        if test.column_name in guessed_by_source.get((src.source_name, src.name), set()):
+            direct.setdefault(test.unique_id, set()).add(f"{src.identifier}.{test.column_name}")
+    out = {uid: set(cols) for uid, cols in direct.items()}
+    for uid, cols in direct.items():
+        for child in manifest.descendants({uid}):
+            out.setdefault(child, set()).update(cols)
+    return {uid: sorted(cols) for uid, cols in sorted(out.items())}
 
 
 def _changed_ancestors(manifest: Manifest, uid: str, modified: set[str]) -> list[str]:

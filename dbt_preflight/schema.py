@@ -89,6 +89,10 @@ class InferredSource:
     # Typed varchar because a model reading the source could not be followed in full, so
     # nothing could say what it reads (a subset of guessed_columns).
     unknown_columns: list[str] = field(default_factory=list)
+    # Guessed column -> unique ids of what reads it (for an unknown column, every reader
+    # that could not be followed). A failure there may be preflight's guess, not the
+    # project's (`cli._guess_bound`).
+    guessed_readers: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -549,8 +553,6 @@ def _columns_in_tree(tree: exp.Expr, table_name: str) -> dict[str, tuple[str | N
             name = col.name.lower()
             if not name or name.startswith("__preflight_") or not _DBML_NAME_RE.fullmatch(name):
                 continue
-            if not col.table and _is_row_reference(col, scope, table_name):
-                continue
             if not _column_is_from_target(col, scope, table_name):
                 continue
             cast_type, hint = columns.get(name, (None, None))
@@ -561,16 +563,6 @@ def _columns_in_tree(tree: exp.Expr, table_name: str) -> dict[str, tuple[str | N
                 hint = _column_hint(col)
             columns[name] = (cast_type, hint)
     return columns
-
-
-def _is_row_reference(col: exp.Column, scope: Scope, table_name: str) -> bool:
-    """`to_json(o)` with `o` a table alias: the whole row, not a column called `o`. Only an
-    alias other than the table's own name counts, so a source that has a column named
-    after its own table keeps it."""
-    name = col.name.lower()
-    if name == table_name.lower():
-        return False
-    return any(alias.lower() == name for alias in scope.selected_sources)
 
 
 def _leaf_tables(source: object, seen: frozenset[int] = frozenset()) -> set[str] | None:
@@ -974,8 +966,16 @@ def _scope_accounted_for(scope: Scope) -> bool:
         return False
     for col in scope.columns:
         name = col.name.lower()
-        # A whole-row reference (`to_json(o)`) reads every column at once.
-        if not col.table and name in reads_target and name in selected:
+        # A bare alias passed to a function (`to_json(o)`, `struct_pack(o)`) may be the
+        # whole row, every column at once. Elsewhere - `cast(source as varchar)`, a plain
+        # select item - DuckDB binds a column of that name first, so it is just a column,
+        # and the walk keeps it either way.
+        if (
+            not col.table
+            and name in reads_target
+            and isinstance(col.parent, exp.Func)
+            and not isinstance(col.parent, exp.Cast)
+        ):
             return False
         # An unqualified column next to a join could be the source's.
         if joined and not col.table:
@@ -989,6 +989,8 @@ class _Inferred:
 
     columns: dict[str, tuple[str | None, str | None]]  # name -> (cast type, usage hint)
     models: list[str]
+    # name -> unique ids of the models whose SQL reads that column, raw or compiled.
+    readers_by_column: dict[str, set[str]] = field(default_factory=dict)
     compiled_columns: list[str] = field(default_factory=list)
     type_conflicts: list[str] = field(default_factory=list)
     # Columns typed by a compiled `cast(null as T)`: a package's own statement of the column,
@@ -1006,6 +1008,7 @@ def _infer_source_columns(source: SourceTable, manifest: Manifest) -> _Inferred:
     """
     columns: dict[str, tuple[str | None, str | None]] = {}
     used_models: list[str] = []
+    readers: dict[str, set[str]] = {}
     for model in manifest.models.values():
         if source.unique_id not in model.depends_on:
             continue
@@ -1016,11 +1019,12 @@ def _infer_source_columns(source: SourceTable, manifest: Manifest) -> _Inferred:
         for name, (cast_type, hint) in found.items():
             existing_cast, existing_hint = columns.get(name, (None, None))
             columns[name] = (existing_cast or cast_type, existing_hint or hint)
-    return _Inferred(columns, sorted(used_models))
+            readers.setdefault(name, set()).add(model.unique_id)
+    return _Inferred(columns, sorted(used_models), readers_by_column=readers)
 
 
 def _compiled_source_columns(
-    source: SourceTable, view: CompiledView
+    source: SourceTable, view: CompiledView, readers: dict[str, set[str]] | None = None
 ) -> tuple[dict[str, tuple[str | None, str | None]], dict[str, str], set[str]]:
     """Columns the compiled SQL of a source's readers accounts for, and which model each
     came from first.
@@ -1058,6 +1062,8 @@ def _compiled_source_columns(
             origin.setdefault(name, model.name)
             if existing_cast is None and name in nulls:
                 typed_nulls.add(name)
+            if readers is not None:
+                readers.setdefault(name, set()).add(model.unique_id)
     return columns, origin, typed_nulls
 
 
@@ -1104,7 +1110,7 @@ def _merge_compiled(
             )
     models = sorted(set(raw.models) | {origin[n] for n in added if n in origin})
     typed = {n for n in added if n in typed_nulls and columns[n][0] == compiled[n][0]}
-    return _Inferred(columns, models, sorted(added), conflicts, typed)
+    return _Inferred(columns, models, raw.readers_by_column, sorted(added), conflicts, typed)
 
 
 def _is_key_name(name: str) -> bool:
@@ -1245,7 +1251,10 @@ def _resolve_columns(
         else:
             inferred_here = _infer_source_columns(src, manifest)
             if view is not None:
-                inferred_here = _merge_compiled(inferred_here, *_compiled_source_columns(src, view))
+                inferred_here = _merge_compiled(
+                    inferred_here,
+                    *_compiled_source_columns(src, view, inferred_here.readers_by_column),
+                )
             found_by_source[src.unique_id] = inferred_here
         if (
             "id" in {c.name.lower() for c in src.columns}
@@ -1295,14 +1304,13 @@ def _resolve_columns(
                 fk_refs[(src.unique_id, name)] = names[target.unique_id]
             return dtype
 
-        # With every reader's compiled SQL in hand, a declared column none of it mentions
-        # is one no model reads (Fivetran's sources.yml documents more columns than its
-        # staging macros select), so its type cannot break a model: it is typed by its name
-        # and listed as guessed, rather than failing the whole run. Without that certainty
-        # it stays an error, as before.
-        unread_ok = view is not None and all(
-            _reader_accounted_for(view, m, src) for m in view.readers(src.unique_id)
-        )
+        # With every reader followed (`_reader_accounted_for`), a declared column none of
+        # their SQL mentions is one nothing reads (Fivetran's sources.yml documents more
+        # columns than its staging macros select): it is typed by its name and listed as
+        # guessed. Otherwise - no compiled SQL, a model the walk cannot follow, or a
+        # snapshot or singular test reading the source - it is a flagged varchar below.
+        opaque = _opaque_readers(src, manifest, view)
+        unread_ok = view is not None and not opaque
         for col in src.columns:
             if col.data_type:
                 merged.append(col)
@@ -1343,10 +1351,45 @@ def _resolve_columns(
                 compiled_columns=[c for c in result.compiled_columns if c in merged_names],
                 type_conflicts=result.type_conflicts,
                 unknown_columns=sorted(unknown),
+                guessed_readers={
+                    name: (
+                        list(opaque)
+                        if name in unknown
+                        else sorted(result.readers_by_column.get(name, set()))
+                    )
+                    for name in sorted(set(guessed))
+                },
             )
         )
 
     return effective, inferred, still_missing, carried_tests, fk_refs, carried_values, skipped
+
+
+def _opaque_readers(src: SourceTable, manifest: Manifest, view: CompiledView | None) -> list[str]:
+    """Unique ids of what reads a source in a way nothing here can follow column by column:
+    a model whose compiled SQL `_reader_accounted_for` rejects (every model reading it,
+    without compiled SQL), a snapshot, or a test other than a generic one on a named
+    column. Kept in step with `_is_read`, which counts the same readers."""
+    out: set[str] = set()
+    if view is None:
+        out |= {uid for uid, m in manifest.models.items() if src.unique_id in m.depends_on}
+    else:
+        out |= {
+            m.unique_id
+            for m in view.readers(src.unique_id)
+            if not _reader_accounted_for(view, m, src)
+        }
+    out |= {c for c in manifest.child_map.get(src.unique_id, []) if c in manifest.snapshots}
+    for uid, test in manifest.tests.items():
+        if src.unique_id not in test.depends_on:
+            continue
+        on_column = test.test_name is not None and (
+            (test.attached_node == src.unique_id and test.column_name)
+            or (test.test_name == "relationships" and test.kwargs.get("field"))
+        )
+        if not on_column:
+            out.add(uid)
+    return sorted(out)
 
 
 def _is_read(src: SourceTable, manifest: Manifest, view: CompiledView | None) -> bool:
