@@ -32,7 +32,7 @@ Every flag on `run`. The `schema` command's flags follow.
 | `--version` | — | Print the version and exit. |
 
 `dbt-preflight schema` writes the schema a run would derive from the project as a DBML file to
-keep and edit (see "Keeping the schema" in the README). It needs no warehouse, credentials or
+keep and edit (see [Keeping the schema](configuration.md#keeping-the-schema)). It needs no warehouse, credentials or
 base ref, and exits 0 on success, when `.dbt-preflight.yml` already has `schema:` (nothing is
 written), and 1 when it cannot derive a schema or the output exists.
 
@@ -213,7 +213,9 @@ fixtures changed, neither tests nor model builds are judged against the base, be
 base is built on the head's fixtures and there it runs on data its own code was not written
 for. A source's fixtures count as changed when:
 
-- the DBML file named by `schema:` changed, or `.dbt-preflight.yml` changed (every source);
+- the DBML file named by `schema:` changed, or a key of `.dbt-preflight.yml` that shapes
+  the fixtures changed (every source; [configuration.md](configuration.md#dbt-preflightyml)
+  lists the keys);
 - dbt's `state:modified` selects the source (an edit to its `sources.yml` entry);
 - with no `schema:`, the DBML preflight derives from the head differs, for that source's
   table, from the one it derives from the base: columns, types, keys, refs or enum values.
@@ -276,8 +278,8 @@ should point here rather than restate them. The rules themselves live in
 layering, a tested primary key, descriptions, column-naming), `none()` turns every rule
 off, and `from_config()` reads the `conventions:` block of `.dbt-preflight.yml` to adjust
 severities, swap in a project's own layer patterns, or change which folder is allowed to
-read `source()`. README.md's "Conventions" section is the human-readable version of the
-same rules; `dbt_preflight/checks.py` is where they are checked against the manifest and
+read `source()`. The [Conventions](configuration.md#conventions) section of
+configuration.md is the human-readable version of the same rules; `dbt_preflight/checks.py` is where they are checked against the manifest and
 the built tables.
 
 ## A pre-pull-request hook, worked example
