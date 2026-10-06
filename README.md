@@ -157,7 +157,7 @@ needs none: the data is synthetic, and the warehouse is a DuckDB file that lives
 length of the job.
 
 - **A team that will not put warehouse credentials in CI.** Preflight writes its own
-  `profiles.yml`, so the project's real profile and its credentials are never read.
+  `profiles.yml`, so the project's real profile is never used to connect and its credentials are never read.
 - **A reviewer of a refactor that should change nothing.** The comment shows whether any
   row, column or metric moved, before anyone has to reason about the SQL.
 - **A team letting coding agents change the dbt project.** The agent runs preflight before
