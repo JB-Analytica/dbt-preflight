@@ -237,6 +237,13 @@ def test_lost_rename_only_counts_if_baseline_had_it():
     assert rw.compare(base, {"p/rename": _row(rename_detected=False)}) == {}
 
 
+def test_a_project_that_could_not_run_before_can_only_improve():
+    # shopify_derived: could_not_run on 0.4.0, then running with a failing model is progress.
+    base = _base(verdict="could_not_run", built=0, failed=0, not_verified=0, no_result=0)
+    assert rw.compare(base, {"p/rename": _row(failed=2, verdict="failed")}) == {}
+    assert rw.compare(base, {"p/rename": _row(verdict="could_not_run", built=0)}) == {}
+
+
 def test_new_key_without_baseline_is_not_a_regression():
     assert rw.compare({"results": {}}, {"p/rename": _row()}) == {}
     assert rw.compare(rw.load_baseline(Path("/nonexistent.json")), {"p/rename": _row()}) == {}
