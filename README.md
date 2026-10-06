@@ -215,10 +215,12 @@ Preflight needs to know what the source tables look like. Three options:
    reported rather than guessed, because a fixture with the wrong type is worse than no
    fixture.
 
-   A source column named `id` is always the primary key. A staging model's own `unique`/
+   A source column named `id` is always the primary key, and a table never gets more than
+   one: without an `id`, the first column carrying both `unique` and `not_null` is the key.
+   A staging model's own `unique`/
    `not_null` tests on the alias it gave a source column (`id as customer_id`, tested as
-   `customer_id`) carry back to that source column too - `pk` when both are declared,
-   `unique`/`not null` alone otherwise - so a project that tests its staging models instead
+   `customer_id`) carry back to that source column too - `pk` when both are declared and it
+   is the key, `unique`/`not null` otherwise - so a project that tests its staging models instead
    of its sources still gets keys in the derived schema. A `cast()` around the column is
    seen through, because a staging layer over a schemaless loader is where types get
    pinned; `lower(email)` is not, because it changes the value rather than the type.
@@ -227,6 +229,19 @@ Preflight needs to know what the source tables look like. Three options:
    enum of exactly those values, so a column the project treats as a vocabulary is not
    filled with placeholder text its own test then rejects. Only a string column becomes an
    enum, since an enum's values are strings.
+
+   **Compiled SQL fills the gaps.** Before deriving the schema, preflight runs `dbt compile`
+   on the models that read a source, against an empty DuckDB file, so what a macro hides
+   from the raw SQL is read too: a project's own `{{ source_or_empty(...) }}`, or Fivetran's
+   `stg_<table>_tmp` models and `fill_staging_columns`. In compiled SQL a source is matched
+   by its relation name. A model that is only `select * from` a source (or the empty stand-in
+   a macro renders when the source does not exist yet) counts as that source, and in a model
+   that reads one source and nothing else, `cast(null as T) as col` means the package
+   expects `col` of type `T` - a `numeric` key is taken as an integer, and keeps its
+   foreign-key ref. The raw SQL wins wherever it says something; a compiled type that
+   disagrees with it is listed in the comment. Once every reader's compiled SQL is in hand,
+   a column `sources.yml` declares but no model reads is typed by its name rather than
+   failing the run. A model that does not compile is read from its raw SQL alone.
 
 Sources declared with `loader: dlt` get `_dlt_load_id` and `_dlt_id` added to their
 fixtures. Other loaders can be declared under `loader_columns:` in the config.

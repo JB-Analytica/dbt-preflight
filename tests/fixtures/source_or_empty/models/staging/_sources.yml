@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: raw_billing
+    schema: raw_billing
+    tables:
+      - name: creditors
+        columns:
+          - name: id
+            data_type: integer
+          - name: creditor_number
+            data_type: varchar
+          - name: name
+            data_type: varchar
+      # No columns declared: the staging model is all preflight has to go on.
+      - name: debtors

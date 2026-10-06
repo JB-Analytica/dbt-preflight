@@ -336,3 +336,49 @@ class DbtRunner:
                 )
             )
         return outcome
+
+
+# How dbt names the model a compile aborted on: "Compilation Error in model stg_x (models/...)".
+_FAILED_MODEL = re.compile(r"Error in model (\w+) \(")
+
+
+@dataclass
+class CompileOutcome:
+    manifest: Path | None  # the manifest carrying `compiled_code`; None if nothing compiled
+    failed: list[str] = field(default_factory=list)  # models left out because they failed
+
+
+def compile_models(runner: DbtRunner, select: list[str], attempts: int = 8) -> CompileOutcome:
+    """`dbt compile` the selection, leaving out each model that fails until the rest compile.
+
+    dbt aborts a whole compile on one model's compilation error (a macro that introspects a
+    relation the empty database does not have, `dbt_utils.get_column_values` for one), so a
+    failure is read off the error, that model excluded, and the compile run again; the
+    retries reuse the target path, so dbt's partial parsing keeps them cheap. Every model
+    that compiles in the end is in the manifest; the rest, and everything after `attempts`
+    runs, are the caller's to read from raw SQL instead. Never raises.
+    """
+    failed: list[str] = []
+    if not select:
+        return CompileOutcome(manifest=None)
+    for _ in range(attempts):
+        extra = ["--select", *select]
+        if failed:
+            extra += ["--exclude", *failed]
+        try:
+            res = runner._invoke(runner._args("compile", *extra), quiet=True)
+        except Exception:  # noqa: BLE001 - compiling is best effort, raw SQL still works
+            return CompileOutcome(manifest=None, failed=failed)
+        manifest = runner.target_path / "manifest.json"
+        if res.success:
+            return CompileOutcome(manifest=manifest if manifest.exists() else None, failed=failed)
+        names = set(_FAILED_MODEL.findall(str(res.exception or "")))
+        for r in getattr(res.result, "results", None) or []:
+            status = str(getattr(r, "status", "")).split(".")[-1].lower()
+            if status == "error":
+                names.add(r.node.name)
+        names -= set(failed)
+        if not names:
+            break
+        failed = sorted(set(failed) | names)
+    return CompileOutcome(manifest=None, failed=failed)

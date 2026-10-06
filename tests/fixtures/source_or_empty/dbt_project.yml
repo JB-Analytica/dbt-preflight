@@ -1,0 +1,11 @@
+name: billing
+version: "1.0.0"
+config-version: 2
+profile: billing
+model-paths: ["models"]
+macro-paths: ["macros"]
+flags:
+  send_anonymous_usage_stats: false
+models:
+  billing:
+    +materialized: view

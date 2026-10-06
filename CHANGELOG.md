@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Schema inference reads dbt's compiled SQL as well as the raw SQL, so a source read
+  through a macro is no longer invisible. The models that read a source are compiled
+  against an empty DuckDB file on both branches; a pure `select *` (or a macro's empty
+  stand-in) counts as its source, and a typed null in a single-source model types the
+  column. Fivetran's dbt_shopify now derives a schema without a hand-written DBML file
+  (87 sources). The raw SQL wins where it already says something, and the fixtures block
+  says how many columns came from compiled SQL.
+
+### Fixed
+
+- A derived table could get two `pk` columns (`id`, and a column whose staging alias was
+  tested `unique` and `not_null`), which model2data reads as one composite key, so neither
+  was unique and the staging model's `unique` test failed on the fixtures
+  (audience-analytics' `stg_billtobox__creditors`). `id`, or failing that the first such
+  column, is now the only key; the others are `unique, not null`.
+
 ## [0.4.0] - 2026-10-05
 
 ### Added

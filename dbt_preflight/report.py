@@ -960,12 +960,29 @@ def _fixtures_block(report: PreflightReport) -> str:
     if fx.inferred_sources:
         parts += ["", "Columns inferred from the staging models that read them:"]
         for src in fx.inferred_sources:
-            line = f"- `{src.identifier}`: {src.total_columns} columns inferred from " + ", ".join(
-                f"`{m}`" for m in src.models
-            )
+            if src.models:
+                line = f"- `{src.identifier}`: {src.total_columns} columns inferred from " + (
+                    ", ".join(f"`{m}`" for m in src.models)
+                )
+            else:
+                line = f"- `{src.identifier}`: {src.total_columns} columns, read by no model"
             if src.guessed_columns:
                 line += ", types guessed for " + ", ".join(f"`{c}`" for c in src.guessed_columns)
             parts.append(line)
+        from_compiled = [s for s in fx.inferred_sources if s.compiled_columns]
+        if from_compiled:
+            n_columns = sum(len(s.compiled_columns) for s in from_compiled)
+            parts += [
+                "",
+                f"{n_columns:,} columns for {len(from_compiled):,} sources read from compiled SQL.",
+            ]
+        conflicts = [f"`{s.identifier}`.{c}" for s in fx.inferred_sources for c in s.type_conflicts]
+        if conflicts:
+            parts += [
+                "",
+                "Typed differently by the compiled SQL, raw SQL's type kept: "
+                + "; ".join(conflicts),
+            ]
     if fx.unmapped_columns:
         parts += [
             "",

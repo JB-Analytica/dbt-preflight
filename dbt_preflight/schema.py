@@ -27,6 +27,13 @@ from model2data.utils import normalize_identifier
 from sqlglot import exp
 from sqlglot.optimizer.scope import Scope, traverse_scope
 
+from dbt_preflight.compiled import (
+    TARGET_PLACEHOLDER,
+    CompiledSql,
+    CompiledView,
+    null_casts,
+    with_target,
+)
 from dbt_preflight.manifest import Manifest, SourceColumn, SourceTable, TestNode
 
 # dbt / warehouse type names -> the DBML types model2data understands.
@@ -55,6 +62,9 @@ _TYPE_ALIASES = {
     "timestamp_tz": "timestamp",
     "timestamptz": "timestamp",
     "timestamp with time zone": "timestamp",
+    # sqlglot's own names for DuckDB's timestamps, as compiled SQL renders them.
+    "timestampntz": "timestamp",
+    "timestampltz": "timestamp",
 }
 
 
@@ -72,6 +82,10 @@ class InferredSource:
     models: list[str]  # staging models the columns were read from
     total_columns: int
     guessed_columns: list[str]  # columns typed by name heuristic, not an explicit cast
+    # Columns only the compiled SQL accounted for, or only it typed (see `compiled.py`).
+    compiled_columns: list[str] = field(default_factory=list)
+    # "`col`: int in the raw SQL, varchar compiled": the raw SQL's type was kept.
+    type_conflicts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -176,7 +190,7 @@ _DATE_PART_WORDS = {
     "years",
 }
 
-_TARGET_PLACEHOLDER = "__preflight_target__"
+_TARGET_PLACEHOLDER = TARGET_PLACEHOLDER
 
 # Name -> guessed DBML type, checked in order; the first match wins.
 _TIMESTAMP_SUFFIXES = ("_at", "_timestamp", "_datetime")
@@ -495,6 +509,22 @@ def _model_source_columns(
     if tree is None:
         return None
 
+    columns = _columns_in_tree(tree, table_name)
+    # A macro's string argument names a column but not which table it belongs to, so it is
+    # only trusted when the model reads nothing but this source.
+    if not any(
+        t.name.startswith("__preflight_") and t.name != _TARGET_PLACEHOLDER
+        for t in tree.find_all(exp.Table)
+    ):
+        for name in macro_columns:
+            columns.setdefault(name, (None, None))
+    return columns
+
+
+def _columns_in_tree(tree: exp.Expr, table_name: str) -> dict[str, tuple[str | None, str | None]]:
+    """{column_name: (explicit cast type, usage hint)} read off the source the placeholder
+    stands for, in SQL already parsed: the walk `_model_source_columns` describes, shared
+    with the compiled-SQL route (`compiled.with_target` puts the placeholder in)."""
     columns: dict[str, tuple[str | None, str | None]] = {}
     for scope in traverse_scope(tree):
         for col in scope.columns:
@@ -510,14 +540,6 @@ def _model_source_columns(
             if hint is None:
                 hint = _column_hint(col)
             columns[name] = (cast_type, hint)
-    # A macro's string argument names a column but not which table it belongs to, so it is
-    # only trusted when the model reads nothing but this source.
-    if not any(
-        t.name.startswith("__preflight_") and t.name != _TARGET_PLACEHOLDER
-        for t in tree.find_all(exp.Table)
-    ):
-        for name in macro_columns:
-            columns.setdefault(name, (None, None))
     return columns
 
 
@@ -643,8 +665,11 @@ def _model_alias_map(raw_code: str) -> dict[str, str]:
     is left out - the test would have to attach to the source column itself for that.
     """
     tree = _parse_staging_sql(raw_code)
-    if tree is None:
-        return {}
+    return _alias_map_of_tree(tree) if tree is not None else {}
+
+
+def _alias_map_of_tree(tree: exp.Expr) -> dict[str, str]:
+    """`_model_alias_map` on SQL already parsed, raw or compiled."""
     aliases: dict[str, str] = {}
     for select in tree.find_all(exp.Select):
         for e in select.expressions:
@@ -678,7 +703,7 @@ def _accepted_values(test: TestNode) -> list[str]:
 
 
 def _carried_tests_for_source(
-    source: SourceTable, manifest: Manifest
+    source: SourceTable, manifest: Manifest, view: CompiledView | None = None
 ) -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     """{source_column_name: {test names}}, carried back from the `unique`/`not_null`
     tests a staging model declares on the alias it gave one of this source's columns.
@@ -687,13 +712,25 @@ def _carried_tests_for_source(
     lets another column - `sku`, `order_id`, whatever the project actually keys its
     source rows by - carry the same settings, so the fixtures satisfy tests the
     project's own YAML already documents instead of leaving them to chance.
+
+    With compiled SQL, a model reading the source through a pass-through counts as a
+    reader too, and an alias only the compiled SQL shows (`cast(id as integer) as
+    creditor_id`, where the raw SQL said `{{ dbt.type_int() }}` inside a macro-built CTE)
+    is added to the raw SQL's aliases, never in place of one.
     """
     carried: dict[str, set[str]] = {}
     carried_values: dict[str, list[str]] = {}
-    for model in manifest.models.values():
-        if source.unique_id not in model.depends_on:
+    readers = {uid for uid, m in manifest.models.items() if source.unique_id in m.depends_on}
+    if view is not None:
+        readers |= {m.unique_id for m in view.readers(source.unique_id)}
+    for uid, model in manifest.models.items():
+        if uid not in readers:
             continue
-        alias_map = _model_alias_map(model.raw_code)
+        alias_map = _model_alias_map(model.raw_code) if source.unique_id in model.depends_on else {}
+        tree = view.tree(uid) if view is not None else None
+        if tree is not None:
+            for alias, column in _alias_map_of_tree(tree).items():
+                alias_map.setdefault(alias, column)
         if not alias_map:
             continue
         for test in manifest.tests_for_model(model.unique_id):
@@ -711,11 +748,22 @@ def _carried_tests_for_source(
     return carried, carried_values
 
 
-def _infer_source_columns(
-    source: SourceTable, manifest: Manifest
-) -> tuple[dict[str, tuple[str | None, str | None]], list[str]]:
+@dataclass
+class _Inferred:
+    """What the models reading one source say about its columns."""
+
+    columns: dict[str, tuple[str | None, str | None]]  # name -> (cast type, usage hint)
+    models: list[str]
+    compiled_columns: list[str] = field(default_factory=list)
+    type_conflicts: list[str] = field(default_factory=list)
+    # Columns typed by a compiled `cast(null as T)`: a package's own statement of the column,
+    # so a key keeps its foreign-key ref (`_typed_null_type_and_ref`).
+    typed_nulls: set[str] = field(default_factory=set)
+
+
+def _infer_source_columns(source: SourceTable, manifest: Manifest) -> _Inferred:
     """Columns (and any explicit cast type / usage hint) inferred from every model that
-    reads a source.
+    reads a source, from its raw SQL.
 
     A staging model typically names every column it selects off its source, so this is
     read as the closest thing to a schema a project without one has. Models that do not
@@ -733,7 +781,125 @@ def _infer_source_columns(
         for name, (cast_type, hint) in found.items():
             existing_cast, existing_hint = columns.get(name, (None, None))
             columns[name] = (existing_cast or cast_type, existing_hint or hint)
-    return columns, sorted(used_models)
+    return _Inferred(columns, sorted(used_models))
+
+
+def _compiled_source_columns(
+    source: SourceTable, view: CompiledView
+) -> tuple[dict[str, tuple[str | None, str | None]], dict[str, str], set[str]]:
+    """Columns the compiled SQL of a source's readers accounts for, and which model each
+    came from first.
+
+    Two kinds of evidence. Columns read off the source's relation, or a pass-through's,
+    found by the same walk the raw SQL gets. And `cast(null as T) as col`, read as "the
+    model expects column `col` of type `T`" - but only in a model whose every dependency is
+    this one source, directly or through a pass-through: with two sources upstream, a
+    typed null could stand for either.
+
+    Returns the columns, the model each came from first, and the names whose type is a
+    typed null's.
+    """
+    columns: dict[str, tuple[str | None, str | None]] = {}
+    origin: dict[str, str] = {}
+    typed_nulls: set[str] = set()
+    for model in view.readers(source.unique_id):
+        tree = view.tree(model.unique_id)
+        if tree is None:
+            continue
+        found: dict[str, tuple[str | None, str | None]] = {}
+        target, present = with_target(tree, view.relation_keys(model, source.unique_id))
+        if present:
+            found = _columns_in_tree(target, source.name)
+        nulls: set[str] = set()
+        if view.single_source(model) == source.unique_id:
+            for name, cast_type in null_casts(tree).items():
+                existing_cast, hint = found.get(name, (None, None))
+                found[name] = (existing_cast or cast_type, hint)
+                if existing_cast is None:
+                    nulls.add(name)
+        for name, (cast_type, hint) in sorted(found.items()):
+            existing_cast, existing_hint = columns.get(name, (None, None))
+            columns[name] = (existing_cast or cast_type, existing_hint or hint)
+            origin.setdefault(name, model.name)
+            if existing_cast is None and name in nulls:
+                typed_nulls.add(name)
+    return columns, origin, typed_nulls
+
+
+def _usable_cast(cast_type: str | None) -> str | None:
+    """A raw cast to a type the Jinja substitution hid (`cast(x as {{ dbt.type_int() }})`
+    parses as a cast to the placeholder) is no type at all."""
+    return None if cast_type is None or "__preflight_" in cast_type else cast_type
+
+
+def _merge_compiled(
+    raw: _Inferred,
+    compiled: dict[str, tuple[str | None, str | None]],
+    origin: dict[str, str],
+    typed_nulls: set[str],
+) -> _Inferred:
+    """The raw SQL's inference with the compiled SQL's filling its gaps.
+
+    The raw SQL is kept wherever it already says something: a column it found keeps its
+    cast, and a compiled cast to another type is only noted. The compiled SQL adds the
+    columns the raw SQL never saw, and the type of a column the raw SQL found but could
+    not type. Its models join the list only when they added something.
+    """
+    columns = dict(raw.columns)
+    added: set[str] = set()
+    conflicts: list[str] = []
+    for name in sorted(compiled):
+        c_cast, c_hint = compiled[name]
+        if name not in columns:
+            columns[name] = (c_cast, c_hint)
+            added.add(name)
+            continue
+        r_cast, r_hint = columns[name]
+        if _usable_cast(r_cast) is None:
+            if c_cast is not None:
+                columns[name] = (c_cast, r_hint or c_hint)
+                added.add(name)
+            elif r_hint is None and c_hint is not None:
+                columns[name] = (r_cast, c_hint)
+                added.add(name)
+        elif c_cast is not None and _dbml_type(c_cast) != _dbml_type(r_cast or ""):
+            conflicts.append(
+                f"`{name}`: {_dbml_type(r_cast or '')} in the raw SQL, "
+                f"{_dbml_type(c_cast)} compiled"
+            )
+    models = sorted(set(raw.models) | {origin[n] for n in added if n in origin})
+    typed = {n for n in added if n in typed_nulls and columns[n][0] == compiled[n][0]}
+    return _Inferred(columns, models, sorted(added), conflicts, typed)
+
+
+def _is_key_name(name: str) -> bool:
+    n = name.lower()
+    return n == "id" or n.endswith("_id")
+
+
+def _typed_null_type_and_ref(
+    name: str,
+    cast_type: str,
+    src: SourceTable,
+    all_sources: list[SourceTable],
+    id_tables: set[str],
+) -> tuple[str, SourceTable | None]:
+    """The DBML type for a column a compiled `cast(null as T)` typed, and its foreign-key
+    ref.
+
+    The type is the package's, with one correction: a key typed `numeric` is an integer.
+    Fivetran declares every id `numeric(28,6)` so a 64-bit id fits on any warehouse, and a
+    fixture of fractional ids neither joins nor takes a ref from an integer column. A key
+    that ends up an integer keeps the foreign-key ref its name points at, which an explicit
+    cast in a staging model does not get: this is the package describing the source, not a
+    model reshaping it.
+    """
+    dtype = _dbml_type(cast_type)
+    if dtype in {"decimal", "numeric"} and _is_key_name(name):
+        dtype = "int"
+    if dtype != "int":
+        return dtype, None
+    return dtype, _fk_ref_target(name, src, all_sources, id_tables)
 
 
 def _missing_types_patch(sources: list[SourceTable]) -> str:
@@ -769,7 +935,10 @@ def _missing_types_patch(sources: list[SourceTable]) -> str:
 
 
 def _resolve_columns(
-    sources: dict[str, SourceTable], manifest: Manifest, names: dict[str, str]
+    sources: dict[str, SourceTable],
+    manifest: Manifest,
+    names: dict[str, str],
+    view: CompiledView | None = None,
 ) -> tuple[
     dict[str, list[SourceColumn]],
     list[InferredSource],
@@ -790,6 +959,8 @@ def _resolve_columns(
     column's name points at, when one was found - both keyed by (source unique_id,
     column name), for the caller to fold into the DBML it writes. The ref's value is the
     DBML table name it points at.
+
+    With `view`, the compiled SQL fills what the raw SQL leaves open (`_merge_compiled`).
     """
     effective: dict[str, list[SourceColumn]] = {}
     inferred: list[InferredSource] = []
@@ -801,21 +972,25 @@ def _resolve_columns(
 
     # What each source's models read, up front: a foreign-key guess needs to know whether
     # its target has an `id` column, and an untyped target only learns that from inference.
-    found_by_source: dict[str, tuple[dict[str, tuple[str | None, str | None]], list[str]]] = {}
+    found_by_source: dict[str, _Inferred] = {}
     id_tables: set[str] = set()
     for src in all_sources:
         fully_typed = bool(src.columns) and all(c.data_type for c in src.columns)
-        found_by_source[src.unique_id] = (
-            ({}, []) if fully_typed else _infer_source_columns(src, manifest)
-        )
+        if fully_typed:
+            found_by_source[src.unique_id] = _Inferred({}, [])
+        else:
+            inferred_here = _infer_source_columns(src, manifest)
+            if view is not None:
+                inferred_here = _merge_compiled(inferred_here, *_compiled_source_columns(src, view))
+            found_by_source[src.unique_id] = inferred_here
         if (
             "id" in {c.name.lower() for c in src.columns}
-            or "id" in found_by_source[src.unique_id][0]
+            or "id" in found_by_source[src.unique_id].columns
         ):
             id_tables.add(src.unique_id)
 
     for src in all_sources:
-        src_tests, src_values = _carried_tests_for_source(src, manifest)
+        src_tests, src_values = _carried_tests_for_source(src, manifest, view)
         for col_name, tests in src_tests.items():
             carried_tests.setdefault((src.unique_id, col_name), set()).update(tests)
         for col_name, values in src_values.items():
@@ -825,7 +1000,9 @@ def _resolve_columns(
             effective[src.unique_id] = src.columns
             continue
 
-        found, used_models = found_by_source[src.unique_id]
+        result = found_by_source[src.unique_id]
+        found = result.columns
+        typed_nulls = result.typed_nulls
         declared_names = {c.name for c in src.columns}
         merged: list[SourceColumn] = []
         guessed: list[str] = []
@@ -837,16 +1014,28 @@ def _resolve_columns(
             hint: str | None,
             src: SourceTable = src,
             guessed: list[str] = guessed,
+            typed_nulls: set[str] = typed_nulls,
         ) -> str:
-            dtype, target = _resolve_type_and_ref(
-                name, cast_type, hint, src, all_sources, id_tables
-            )
+            if cast_type is not None and name in typed_nulls:
+                dtype, target = _typed_null_type_and_ref(
+                    name, cast_type, src, all_sources, id_tables
+                )
+            else:
+                dtype, target = _resolve_type_and_ref(
+                    name, cast_type, hint, src, all_sources, id_tables
+                )
             if not cast_type:
                 guessed.append(name)
             if target is not None:
                 fk_refs[(src.unique_id, name)] = names[target.unique_id]
             return dtype
 
+        # With every reader's compiled SQL in hand, a declared column none of it mentions
+        # is one no model reads (Fivetran's sources.yml documents more columns than its
+        # staging macros select), so its type cannot break a model: it is typed by its name
+        # and listed as guessed, rather than failing the whole run. Without that certainty
+        # it stays an error, as before.
+        unread_ok = view is not None and view.every_reader_compiled(src.unique_id)
         for col in src.columns:
             if col.data_type:
                 merged.append(col)
@@ -854,6 +1043,10 @@ def _resolve_columns(
                 cast_type, hint = found[col.name]
                 merged.append(
                     SourceColumn(col.name, _resolve(col.name, cast_type, hint), col.description)
+                )
+            elif unread_ok:
+                merged.append(
+                    SourceColumn(col.name, _resolve(col.name, None, None), col.description)
                 )
             else:
                 unresolved = True
@@ -867,21 +1060,26 @@ def _resolve_columns(
             continue
 
         effective[src.unique_id] = merged
+        merged_names = {c.name for c in merged}
         inferred.append(
             InferredSource(
                 source_name=src.source_name,
                 table=src.name,
                 identifier=src.identifier,
-                models=used_models,
+                models=result.models,
                 total_columns=len(merged),
                 guessed_columns=sorted(guessed),
+                compiled_columns=[c for c in result.compiled_columns if c in merged_names],
+                type_conflicts=result.type_conflicts,
             )
         )
 
     return effective, inferred, still_missing, carried_tests, fk_refs, carried_values
 
 
-def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
+def derive_dbml(
+    manifest: Manifest, compiled: CompiledSql | None = None
+) -> tuple[str, list[InferredSource]]:
     """Write the sources of a manifest as DBML.
 
     Column settings come from the generic tests declared on the source - `unique` and
@@ -895,6 +1093,9 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     the staging models that read it; only a source inference cannot help either raises a
     SchemaError.
 
+    `compiled`, when preflight could compile the models that read sources, fills what the
+    raw SQL leaves open: see `compiled.py` and `_merge_compiled`.
+
     Returns the DBML text and a record of every source whose columns were inferred.
     """
     sources = manifest.sources
@@ -902,8 +1103,9 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
         raise SchemaError("The dbt project declares no sources, so there is nothing to generate.")
 
     names = source_table_names(sources.values())
+    view = CompiledView(manifest, compiled) if compiled is not None else None
     effective, inferred, still_missing, carried_tests, fk_refs, carried_values = _resolve_columns(
-        sources, manifest, names
+        sources, manifest, names, view
     )
     if still_missing:
         patch = _missing_types_patch(still_missing)
@@ -945,10 +1147,23 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     for src in sources.values():
         table_name = names[src.unique_id]
         table_lines.append(f"Table {table_name} {{")
-        for col in effective.get(src.unique_id, src.columns):
+        columns = effective.get(src.unique_id, src.columns)
+        # One primary key per table: `id` when there is one, else the first column carrying
+        # both `unique` and `not_null`. Two `pk` columns would be read as one composite key,
+        # which leaves each of them free to repeat - and the staging model's `unique` test
+        # on either one then fails on the fixtures.
+        pk_column = next((c.name for c in columns if c.name == "id"), None) or next(
+            (
+                c.name
+                for c in columns
+                if {"unique", "not_null"} <= col_settings.get((src.unique_id, c.name), set())
+            ),
+            None,
+        )
+        for col in columns:
             settings: list[str] = []
             tests = col_settings.get((src.unique_id, col.name), set())
-            if col.name == "id" or {"unique", "not_null"} <= tests:
+            if col.name == pk_column:
                 settings.append("pk")
             else:
                 if "unique" in tests:
@@ -984,14 +1199,19 @@ def derive_dbml(manifest: Manifest) -> tuple[str, list[InferredSource]]:
     return "\n".join(lines), inferred
 
 
-def resolve_schema(schema_file: Path | None, manifest: Manifest, workdir: Path) -> ResolvedSchema:
+def resolve_schema(
+    schema_file: Path | None,
+    manifest: Manifest,
+    workdir: Path,
+    compiled: CompiledSql | None = None,
+) -> ResolvedSchema:
     if schema_file is not None:
         tables, refs = parse_dbml(schema_file)
         if not tables:
             raise SchemaError(f"{schema_file} contains no tables.")
         return ResolvedSchema(tables=tables, refs=refs, dbml_path=schema_file, derived=False)
 
-    text, inferred = derive_dbml(manifest)
+    text, inferred = derive_dbml(manifest, compiled)
     workdir.mkdir(parents=True, exist_ok=True)
     path = workdir / "derived.dbml"
     path.write_text(text, encoding="utf-8")

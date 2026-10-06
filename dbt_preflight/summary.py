@@ -147,6 +147,8 @@ def _inferred_source(s: InferredSource) -> dict[str, Any]:
         "models": list(s.models),
         "total_columns": s.total_columns,
         "guessed_columns": list(s.guessed_columns),
+        "compiled_columns": list(s.compiled_columns),
+        "type_conflicts": list(s.type_conflicts),
     }
 
 

@@ -20,6 +20,7 @@ import yaml
 from dbt_preflight import __version__
 from dbt_preflight.baseline import FAILING, is_broken_on_base, is_preexisting, same_error
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
+from dbt_preflight.compiled import CompiledSql, compile_selection
 from dbt_preflight.config import ConfigError, PreflightConfig, load_config
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
@@ -27,6 +28,7 @@ from dbt_preflight.dbt_runner import (
     DbtRunner,
     NodeResult,
     RunOutcome,
+    compile_models,
     read_project,
     write_profiles,
 )
@@ -331,8 +333,14 @@ def _run(
 
     # 2. Fixtures. A project with no sources takes its input from seeds, which dbt loads
     # itself during the build; there is nothing to generate and nothing to miss.
+    compiled: CompiledSql | None = None
+    if manifest.sources and config.schema is None:
+        compiled = _compile_for_inference(
+            project, manifest, catalog, workdir, "compiled", config.env
+        )
+        timer.mark(f"   {_compiled_line(compiled)}")
     if manifest.sources:
-        schema = resolve_schema(config.schema, manifest, workdir)
+        schema = resolve_schema(config.schema, manifest, workdir, compiled)
         fixtures = build_fixtures(config, schema, list(manifest.sources.values()), db_path)
         report.fixtures = fixtures
         timer.mark(
@@ -392,7 +400,17 @@ def _run(
             # staging model's casts or tests shape them: a source whose derived table
             # differs from the base's is as changed as an edited sources.yml.
             if config.schema is None and manifest.sources:
-                reshaped = _reshaped_sources(manifest, Manifest.load(state_dir / "manifest.json"))
+                base_manifest = Manifest.load(state_dir / "manifest.json")
+                base_compiled = _compile_for_inference(
+                    base_project,
+                    base_manifest,
+                    catalog,
+                    workdir,
+                    "base_compiled",
+                    config.env,
+                )
+                timer.mark(f"   base {_compiled_line(base_compiled)}")
+                reshaped = _reshaped_sources(manifest, base_manifest, compiled, base_compiled)
                 if reshaped - modified:
                     names = ", ".join(
                         f"`{manifest.sources[u].identifier}`" for u in sorted(reshaped - modified)
@@ -561,20 +579,26 @@ def _config_reshapes_fixtures(config: PreflightConfig, base_ref: str) -> bool:
     return any(base_raw.get(k) != head_raw.get(k) for k in _FIXTURE_KEYS)
 
 
-def _reshaped_sources(head: Manifest, base: Manifest) -> set[str]:
+def _reshaped_sources(
+    head: Manifest,
+    base: Manifest,
+    head_compiled: CompiledSql | None = None,
+    base_compiled: CompiledSql | None = None,
+) -> set[str]:
     """Head sources whose derived fixture table differs from the one the base derives.
 
     Columns, types, keys, refs and enum values all come from the project's own YAML and
     staging SQL when there is no DBML file, so a pull request that edits a cast or a test
     in one staging model changes the data every reader of that source gets. When the base
-    cannot be derived at all, every source counts.
+    cannot be derived at all, every source counts. Each side is derived from its own
+    compiled SQL, compiled the same way, so a difference is the change's.
     """
     try:
-        head_text, _ = derive_dbml(head)
+        head_text, _ = derive_dbml(head, head_compiled)
     except SchemaError:
         return set()  # the head run reports this itself
     try:
-        base_text, _ = derive_dbml(base)
+        base_text, _ = derive_dbml(base, base_compiled)
     except SchemaError:
         return set(head.sources)
     head_tables, base_tables = _dbml_tables(head_text), _dbml_tables(base_text)
@@ -583,6 +607,40 @@ def _reshaped_sources(head: Manifest, base: Manifest) -> set[str]:
         for uid, src in head.sources.items()
         if head_tables.get(src.identifier) != base_tables.get(src.identifier)
     }
+
+
+def _compile_for_inference(
+    project,
+    manifest: Manifest,
+    catalog: str,
+    workdir: Path,
+    name: str,
+    env: dict[str, str],
+) -> CompiledSql | None:
+    """Compile the models that read sources, for the schema inference (`compiled.py`).
+
+    Against a DuckDB file of its own, empty, under the catalog name the sources resolve
+    to: the head and the base then see exactly the same database - no relation at all -
+    whenever each is compiled, so a macro that introspects one renders its fallback on both
+    sides. None when nothing compiled; the inference then reads raw SQL alone.
+    """
+    compile_profiles = workdir / f"{name}_profiles"
+    (workdir / name).mkdir(parents=True, exist_ok=True)
+    write_profiles(compile_profiles, project.profile, workdir / name / f"{catalog}.duckdb")
+    runner = DbtRunner(project, compile_profiles, workdir / f"{name}_target", workdir / "logs", env)
+    outcome = compile_models(runner, [manifest.selector(u) for u in compile_selection(manifest)])
+    if outcome.manifest is None:
+        return None
+    return CompiledSql.load(outcome.manifest, outcome.failed)
+
+
+def _compiled_line(compiled: CompiledSql | None) -> str:
+    if compiled is None:
+        return "could not compile the models that read sources; inferring from raw SQL"
+    line = f"compiled {len(compiled.code)} models that read sources"
+    if compiled.failed:
+        line += f" ({len(compiled.failed)} failed to compile, read as raw SQL)"
+    return line
 
 
 def _fixture_bound(manifest: Manifest, modified: set[str]) -> set[str]:
