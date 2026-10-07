@@ -1,18 +1,23 @@
-# Regenerate the README demo GIF:
-#   brew install vhs
+# Regenerate the demo recording (assets/demo.gif and assets/demo.mp4):
+#
 #   uv sync --extra dev
-#   uv run python scripts/demo_repo.py /tmp/preflight-demo   # a git repo with a broken branch
-#   cd /tmp/preflight-demo && vhs <repo>/assets/demo.tape
-# Then shrink it before committing:
+#   uv run python scripts/demo_repo.py /tmp/preflight-demo    # a git repo with a PR branch
+#   cd /tmp/preflight-demo && PREFLIGHT_VENV=<repo>/.venv vhs <repo>/assets/demo.tape
+#
+# Then shrink the GIF before committing it:
 #   ffmpeg -i demo.gif -vf "fps=12,palettegen=max_colors=32:stats_mode=diff" -y pal.png
 #   ffmpeg -i demo.gif -i pal.png \
 #     -lavfi "fps=12[x];[x][1:v]paletteuse=dither=none:diff_mode=rectangle" \
 #     -y <repo>/assets/demo.gif
+#
+# The recorded change counts cancelled orders in customer lifetime revenue. Every test
+# passes, so this is the shape nothing else catches without a warehouse: only the
+# comparison against the base branch shows that the numbers moved.
 
 Output demo.gif
 Output demo.mp4
 
-Set Shell "zsh"
+Set Shell "bash"
 Set FontSize 15
 Set Width 1200
 Set Height 820
@@ -27,28 +32,29 @@ Enter
 Sleep 500ms
 Show
 
-# 1. The pull request: one staging model renamed a column.
+# 1. The pull request: one line gone from a mart. Nothing a reviewer would stop on.
 Type "git diff main --stat && git diff main | grep '^[-+] '"
 Sleep 300ms
 Enter
-Sleep 3500ms
+Sleep 4000ms
 
 Type "clear"
 Enter
 Sleep 300ms
 
-# 2. Preflight, with no warehouse anywhere.
+# 2. Preflight, with no warehouse and no credentials anywhere.
 Type "dbt-preflight run --base-ref main --comment-file comment.md"
 Sleep 300ms
 Enter
-Sleep 7000ms
+Sleep 24000ms
 
 Type "clear"
 Enter
 Sleep 300ms
 
-# 3. The comment a reviewer sees: the verdict and what broke.
-Type "sed -n '2,20p' comment.md"
+# 3. The comment a reviewer sees. Every test passes, and the first line still says
+#    three metrics moved.
+Type "sed -n '2,14p' comment.md"
 Sleep 300ms
 Enter
 Sleep 8000ms
@@ -57,8 +63,8 @@ Type "clear"
 Enter
 Sleep 300ms
 
-# 4. And what the change did to the output, compared with main on the same data.
-Type "grep -A 7 'What changed in the output' comment.md"
+# 4. What the change actually did, against main on the same synthetic data.
+Type "sed -n '16,30p' comment.md"
 Sleep 300ms
 Enter
-Sleep 9000ms
+Sleep 10000ms
