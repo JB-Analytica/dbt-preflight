@@ -6,7 +6,7 @@ measured against code we did not write and not only against `examples/webshop`.
 | Project | Why it is here |
 | --- | --- |
 | `jaffle_shop_classic` | dbt-labs/jaffle_shop: 5 models, seeds only, no config |
-| `jaffle_shop_current` | dbt-labs/jaffle-shop main: dbt 2.0 project (its `require-dbt-version` is relaxed in the base commit) |
+| `jaffle_shop_current` | dbt-labs/jaffle-shop main: a dbt 2.0 project, run untouched on dbt 1.x |
 | `mattermost` | Snowflake project in a subdirectory, needs `.dbt-preflight.yml` and `env:` |
 | `shopify` | fivetran/dbt_shopify via `integration_tests`, with a hand-written DBML as `schema:` |
 | `shopify_derived` | the same pinned dbt_shopify and changes, but no DBML: preflight must derive the source schema (a source it cannot see) |

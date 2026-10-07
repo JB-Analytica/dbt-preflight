@@ -27,7 +27,14 @@ from dbt_preflight.baseline import (
 )
 from dbt_preflight.checks import check_columns, check_manifest, row_counts
 from dbt_preflight.compiled import CompiledSql, compile_selection, json_compile_selection
-from dbt_preflight.config import CONFIG_FILENAME, ConfigError, PreflightConfig, load_config
+from dbt_preflight.config import (
+    CONFIG_FILENAME,
+    ConfigError,
+    PreflightConfig,
+    env_var_help,
+    load_config,
+    missing_env_vars,
+)
 from dbt_preflight.dbt_runner import (
     BASE_TARGET_NAME,
     DbtError,
@@ -306,7 +313,7 @@ def run(
     try:
         _run(config, report, base_ref, workdir)
     except (SchemaError, DbtError, GitError) as exc:
-        report.fatal = str(exc)
+        report.fatal = _with_env_var_help(str(exc), config)
     except Exception as exc:  # noqa: BLE001 - the comment must still be written
         traceback.print_exc(file=sys.stderr)
         report.fatal = f"Unexpected {type(exc).__name__}: {exc}"
@@ -316,6 +323,23 @@ def run(
             shutil.rmtree(workdir, ignore_errors=True)
 
     _finish(report, comment_file, summary_file, post, pr, fail_on_error)
+
+
+def _with_env_var_help(message: str, config: PreflightConfig) -> str:
+    """A run that stopped on an unset `env_var()` gets the whole list, not just the first.
+
+    dbt renders the project until something fails, so it reports one variable per run and
+    finding them all is one run each. The project is scanned once here instead.
+    """
+    if "env_var" not in message and "Env var required but not provided" not in message:
+        return message
+    try:
+        missing = missing_env_vars(config.project_dir, config.env)
+    except OSError:
+        return message
+    if len(missing) < 2:
+        return message
+    return f"{message}\n\n{env_var_help(missing)}"
 
 
 def _run(
@@ -755,7 +779,7 @@ def _project_dialect(config: PreflightConfig, project) -> str | None:
     dialect = (
         config.dialect
         if config.dialect is not None
-        else detect_dialect(config.project_dir, project.profile)
+        else detect_dialect(config.project_dir, project.profile, config.repo_root)
     )
     return None if dialect in {"duckdb", "none"} else dialect
 
@@ -931,6 +955,11 @@ def _build_and_check(
         report.untranspiled = dict(hook.unparsed)
         for name, why in hook.unparsed.items():
             _say(f"   ⚠️  {name}: could not transpile, ran as written ({why})")
+    dropped = head_runner.warehouse_configs.dropped
+    if dropped:
+        report.warehouse_configs_dropped = dict(dropped)
+        keys = sorted({k for ks in dropped.values() for k in ks})
+        _say(f"   {len(dropped)} models: ignored warehouse-only {', '.join(keys)} on DuckDB")
     selected_ids = [
         r.unique_id
         for r in outcome.results

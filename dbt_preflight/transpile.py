@@ -51,18 +51,43 @@ _BACKTICK_DIALECTS = {"bigquery", "spark", "databricks", "hive"}
 _QUOTED_RELATION = re.compile(r'"([^"\n]+)"\."([^"\n]+)"(?:\."([^"\n]+)")?')
 
 
-def detect_dialect(project_dir: Path, profile: str) -> str | None:
+def profiles_candidates(project_dir: Path, repo_root: Path | None = None) -> list[Path]:
+    """Where a checked-in `profiles.yml` may sit, nearest the project first.
+
+    dbt itself only looks beside `dbt_project.yml` (and in `~/.dbt`), but a repository that
+    keeps the dbt project in a subdirectory very often keeps the profile at the repository
+    root instead, next to the CI workflow that uses it. Looking only beside the project
+    meant no dialect was detected for those, and every warehouse function went untranspiled.
+    """
+    seen: list[Path] = []
+    for directory in (project_dir, project_dir.parent, repo_root):
+        if directory is None:
+            continue
+        candidate = (directory / "profiles.yml").resolve()
+        if candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
+def detect_dialect(project_dir: Path, profile: str, repo_root: Path | None = None) -> str | None:
     """The sqlglot dialect of the project's own target, read from a checked-in profiles.yml.
 
-    Only the project directory is consulted, never `~/.dbt`: a profile in the repository
-    documents what the project is written for; one on a developer's machine is theirs.
+    Only the repository is consulted, never `~/.dbt`: a profile in the repository documents
+    what the project is written for; one on a developer's machine is theirs.
     """
-    path = project_dir / "profiles.yml"
+    for path in profiles_candidates(project_dir, repo_root):
+        dialect = _dialect_from(path, profile)
+        if dialect is not None:
+            return dialect
+    return None
+
+
+def _dialect_from(path: Path, profile: str) -> str | None:
     if not path.exists():
         return None
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
+    except (yaml.YAMLError, OSError):
         return None
     entry = doc.get(profile) if isinstance(doc, dict) else None
     if not isinstance(entry, dict):

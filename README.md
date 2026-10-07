@@ -42,6 +42,34 @@ jobs:
 
 Or try it locally first, on a branch: `uvx dbt-preflight run --base-ref origin/main`.
 
+### Two minutes, on a project you already know
+
+No warehouse, no credentials, no config file. This breaks a real dbt project on purpose and
+shows you what preflight says about it:
+
+```bash
+git clone https://github.com/dbt-labs/jaffle_shop && cd jaffle_shop
+git switch -c rename-a-column
+perl -pi -e 's/id as customer_id,/id as cust_id,/' models/staging/stg_customers.sql
+git commit -am "Rename customer_id to cust_id"
+
+uvx dbt-preflight run --base-ref main
+```
+
+About twelve seconds later, among other things:
+
+```
+**`stg_customers`** — rows 100 (unchanged) · columns: `customer_id` → `cust_id` (renamed, same values) ⚠️
+
+`customer_id` was referenced on the base branch by its YAML column entry
+(models/staging/schema.yml), downstream model `customers`, `unique` test; each of those
+needs the new name or the column back.
+```
+
+It generated data for the project's sources, built it from `main` and from your branch,
+compared the two, and worked out every place that column was used. Nothing was configured
+and nothing was connected.
+
 > **Want it set up for your team?** The Action is free and stays open source. Getting the
 > most from it on a real project is mostly about the parts around it: a source schema that
 > behaves like your business, the conventions your team actually follows, metrics worth

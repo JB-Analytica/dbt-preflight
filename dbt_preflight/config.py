@@ -9,6 +9,8 @@ project's `profiles.yml` and `sources.yml` expect to find.
 from __future__ import annotations
 
 import datetime
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -98,6 +100,46 @@ def _json_value(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return {str(k): _json_value(v, f"{key}.{k}") for k, v in value.items()}
     raise ConfigError(f"`{key}` must be a string, number, boolean, list or mapping.")
+
+
+# `env_var('NAME')` with no default. A second argument is a default, so the project runs
+# without the variable set and it is not missing.
+_ENV_VAR_CALL = re.compile(r"""env_var\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)""")
+_ENV_VAR_SCANNED = ("*.yml", "*.yaml", "*.sql")
+
+
+def missing_env_vars(project_dir: Path, provided: dict[str, str]) -> list[str]:
+    """Every `env_var()` the project reads with no default that nothing supplies.
+
+    dbt fails on the first one it happens to render, so finding them is one run per
+    variable. Reading them all off the project at once turns that into a single list.
+    Only calls without a default count, because a call with one is satisfied already.
+    """
+    known = set(provided) | set(os.environ)
+    found: set[str] = set()
+    for pattern in _ENV_VAR_SCANNED:
+        for path in project_dir.rglob(pattern):
+            # dbt's own output, and installed packages, are not the project's to fix.
+            if any(part in {"target", "dbt_packages", "logs", ".preflight"} for part in path.parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            found.update(_ENV_VAR_CALL.findall(text))
+    return sorted(found - known)
+
+
+def env_var_help(names: list[str]) -> str:
+    """The `env:` block to paste into `.dbt-preflight.yml`, for a run that stopped on one."""
+    lines = "\n".join(f"  {name}: <value>" for name in names)
+    plural = "variable" if len(names) == 1 else "variables"
+    return (
+        f"The project reads {len(names)} environment {plural} nothing sets. "
+        "Preflight writes its own profiles.yml, so a value here only has to be "
+        "something the project can parse, not a real credential:\n\n"
+        f"env:\n{lines}"
+    )
 
 
 def load_config(repo_root: Path, config_path: Path | None = None) -> PreflightConfig:

@@ -41,10 +41,10 @@ projects:
     description: dbt-labs/jaffle-shop (current main, dbt 2.0 project).
     repo: https://github.com/dbt-labs/jaffle-shop.git
     sha: 5beb145b00f5465ec759cfcdd9745e858818cf95
-    setup:
-      # The project declares require-dbt-version >=2.0.0 and preflight runs dbt-core 1.x.
-      - file: dbt_project.yml
-        replace: {old: 'require-dbt-version: ">=2.0.0"', new: 'require-dbt-version: ">=1.0.0"'}
+    # No setup: the project declares require-dbt-version >=2.0.0 and preflight runs
+    # dbt-core 1.x, which it now passes --no-version-check for. Running this pinned commit
+    # untouched is the point of the entry.
+    setup: []
     rename_column: {old: customer_id, new: cust_id}
     expect: {harmless: passes, rename: caught}
     changes:

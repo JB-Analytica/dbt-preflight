@@ -281,5 +281,10 @@ def build_summary(
         ],
         "diffs": [_diff(d) for d in report.diffs],
         "fixtures": _fixtures(report),
+        # Warehouse-only layout settings dropped so DuckDB could build the model. Additive,
+        # so the schema version does not move.
+        "warehouse_configs_dropped": {
+            model: list(keys) for model, keys in report.warehouse_configs_dropped.items()
+        },
         "comment_file": str(comment_file) if comment_file is not None else None,
     }
