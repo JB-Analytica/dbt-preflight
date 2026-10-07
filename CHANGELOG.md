@@ -40,6 +40,8 @@ All notable changes to this project are documented here. The format follows
 
 - A two-minute path at the top of the README: clone dbt-labs/jaffle_shop, rename a column,
   run preflight, see what it says. No warehouse, no credentials, no config file.
+- The 52-second demo in the README, under that path. The Marketplace listing renders this
+  README, so it shows there from the next release too.
 
 
 ## [0.5.2] - 2026-10-07

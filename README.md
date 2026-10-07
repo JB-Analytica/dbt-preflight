@@ -70,6 +70,14 @@ It generated data for the project's sources, built it from `main` and from your 
 compared the two, and worked out every place that column was used. Nothing was configured
 and nothing was connected.
 
+### The whole loop, in 52 seconds
+
+![dbt-preflight on a pull request that counts cancelled orders in lifetime revenue: the one-line diff, the run with no warehouse, every test passing, and the comment reporting three metrics moved](https://raw.githubusercontent.com/JB-Analytica/dbt-preflight/main/assets/demo.gif)
+
+*A pull request removes one line from a mart, so cancelled orders count towards customer
+lifetime revenue. No test covers it, and every test passes. The comment's first line still
+says three metrics moved, and shows by how much per segment.*
+
 > **Want it set up for your team?** The Action is free and stays open source. Getting the
 > most from it on a real project is mostly about the parts around it: a source schema that
 > behaves like your business, the conventions your team actually follows, metrics worth
