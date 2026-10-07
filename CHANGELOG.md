@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-07
+
+The first release listed on the GitHub Marketplace. Nothing about a run changes.
+
 ### Changed
 
 - The action's description, which the GitHub Marketplace shows, now says what a run does:
