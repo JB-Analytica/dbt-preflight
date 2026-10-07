@@ -296,3 +296,33 @@ def test_model_and_test_order_is_stable_across_runs(example_copy: Path, tmp_path
     assert model_orders[0] == sorted(model_orders[0])
     assert model_orders[0] == model_orders[1]
     assert bodies[0] == bodies[1]
+
+
+def test_a_project_requiring_dbt_2_still_runs(example_copy: Path, tmp_path: Path) -> None:
+    """dbt-labs/jaffle-shop declares `require-dbt-version: ">=2.0.0"`, and preflight pins
+    dbt 1.x, so dbt used to stop before parsing a line. It is the project a curious person
+    reaches for first, and the check guards against a risk preflight does not take: it
+    builds into a throwaway DuckDB file and never writes to a warehouse."""
+    project = example_copy / "dbt" / "dbt_project.yml"
+    text = project.read_text()
+    assert "require-dbt-version" not in text
+    project.write_text(
+        text.replace("profile: webshop", 'profile: webshop\nrequire-dbt-version: ">=2.0.0"', 1)
+    )
+
+    comment = tmp_path / "comment.md"
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--repo-root",
+            str(example_copy),
+            "--config",
+            str(example_copy / ".dbt-preflight.yml"),
+            "--comment-file",
+            str(comment),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "not supported with the" not in comment.read_text()
+    assert "✅ passed" in comment.read_text()

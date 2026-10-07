@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from dbt_preflight.transpile import TranspileHook
+from dbt_preflight.warehouse_configs import WarehouseConfigHook
 
 TARGET_NAME = "preflight"
 BASE_TARGET_NAME = "preflight_base"  # the base branch builds here, on the same fixtures
@@ -154,6 +155,9 @@ class DbtRunner:
         self.env = env
         self.target = target
         self.dbt_vars = dbt_vars or {}
+        # Shared across every build this runner does, so the record of what was dropped
+        # covers the whole run rather than one command.
+        self.warehouse_configs = WarehouseConfigHook()
 
     def _vars_args(self) -> list[str]:
         """`--vars` for every invocation when `.dbt-preflight.yml` sets `vars:`."""
@@ -181,6 +185,14 @@ class DbtRunner:
             "--log-level-file",
             "info",
             "--no-use-colors",
+            # A project that declares `require-dbt-version: ">=2.0.0"` would stop dbt 1.x
+            # before it parsed a line, and preflight pins dbt 1.x. The check guards against
+            # running a project on a dbt that cannot build it correctly, which is a real
+            # risk for a deployment and no risk at all here: preflight builds into a
+            # throwaway DuckDB file and never writes to a warehouse. A project that turns
+            # out to need dbt 2 for real fails later, on the syntax it uses, with an error
+            # that says so.
+            "--no-version-check",
             *self._vars_args(),
             *extra,
         ]
@@ -221,6 +233,7 @@ class DbtRunner:
                 "--log-level",
                 "warn",
                 "--no-use-colors",
+                "--no-version-check",  # see _args
                 *self._vars_args(),
             ]
         )
@@ -316,9 +329,13 @@ class DbtRunner:
             extra += ["--exclude-resource-type", rtype]
         if transpile is not None:
             transpile.install()
+        # Always on, unlike the transpiler: a project can carry a BigQuery `partition_by`
+        # without declaring a dialect preflight recognises.
+        self.warehouse_configs.install()
         try:
             res = self._invoke(self._args(command, *extra))
         finally:
+            self.warehouse_configs.uninstall()
             if transpile is not None:
                 transpile.uninstall()
 

@@ -5,6 +5,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A project that declares `require-dbt-version: ">=2.0.0"` runs.** dbt stopped before
+  parsing a line, and preflight pins dbt 1.x, so the current dbt-labs/jaffle-shop (the
+  project most people reach for first) could not be checked at all. Every dbt command
+  preflight runs now passes `--no-version-check`. The check guards against building a
+  project on a dbt that cannot build it correctly, which is a real risk for a deployment
+  and none here: preflight builds into a throwaway DuckDB file and never writes to a
+  warehouse. A project that genuinely needs dbt 2 still fails, later, on the syntax it
+  uses, with an error that says so.
+- **Warehouse-only layout settings no longer lose a model.** A model written for BigQuery
+  carries `partition_by={'field': ..., 'granularity': ...}`; dbt-duckdb rejects it rather
+  than ignoring it, so a project with partitioned marts lost every one of those models
+  before a row was compared. On dbt-ga4 that was 54 models. Settings that describe how a
+  warehouse lays a table out, and nothing about the rows a model returns, are now dropped
+  while building on DuckDB: BigQuery's `partition_by`, `cluster_by` and
+  `require_partition_filter`, Snowflake's `transient` and `automatic_clustering`,
+  Databricks' `zorder`, Redshift's `sort` and `dist`, and their relatives. Anything that
+  changes a model's output, `materialized` and `unique_key` among them, is untouched. The
+  comment names the models and the settings, and the summary JSON carries
+  `warehouse_configs_dropped`.
+- **`profiles.yml` is found above the project directory.** A repository that keeps its dbt
+  project in a subdirectory usually keeps the profile at the repository root, next to the
+  workflow that uses it. Only the project directory was looked at, so no dialect was
+  detected for those projects and every warehouse-specific function went untranspiled.
+  The project directory still wins when both exist.
+- **Every unset `env_var()` is listed at once.** dbt fails on the first one it happens to
+  render, so finding them all took one run per variable. A run that stops on an unset
+  variable now scans the project and lists all of them, with the `env:` block to paste into
+  `.dbt-preflight.yml`.
+
+### Added
+
+- A two-minute path at the top of the README: clone dbt-labs/jaffle_shop, rename a column,
+  run preflight, see what it says. No warehouse, no credentials, no config file.
+
+
 ## [0.5.2] - 2026-10-07
 
 Maintenance only: nothing about a run changes.

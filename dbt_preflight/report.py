@@ -119,6 +119,8 @@ class PreflightReport:
     note: str | None = None  # one line of context under the summary, e.g. why all models ran
     dialect: str | None = None  # SQL dialect transpiled to DuckDB, when one was
     untranspiled: dict[str, str] = field(default_factory=dict)  # model -> why sqlglot gave up
+    # model -> warehouse-only layout settings dropped so DuckDB would build it
+    warehouse_configs_dropped: dict[str, list[str]] = field(default_factory=dict)
     # Snapshots with a legacy fixed `target_schema`, built for the pull request only.
     shared_snapshots: list[str] = field(default_factory=list)
     # (schema, table) of every relation the project builds or reads, from the manifest;
@@ -1352,6 +1354,18 @@ def _fixtures_block(report: PreflightReport) -> str:
                 "Ran as written because sqlglot could not parse them: "
                 + ", ".join(f"`{m}` ({why})" for m, why in report.untranspiled.items()),
             ]
+    if report.warehouse_configs_dropped:
+        dropped = report.warehouse_configs_dropped
+        keys = sorted({k for keys in dropped.values() for k in keys})
+        shown = sorted(dropped)[:5]
+        more = f" and {len(dropped) - 5} more" if len(dropped) > 5 else ""
+        parts += [
+            "",
+            "Warehouse-only layout settings ignored, because they describe how a warehouse "
+            f"stores a table and DuckDB has no equivalent: {', '.join(f'`{k}`' for k in keys)} "
+            f"on {', '.join(f'`{m}`' for m in shown)}{more}. They do not change what a model "
+            "returns, so the comparison above is unaffected.",
+        ]
     ref = f"base `{report.base_ref}`" if report.base_ref else "no base branch"
     head = f", head `{report.head}`" if report.head else ""
     parts += ["", f"Compared against {ref}{head}.", "</details>"]
