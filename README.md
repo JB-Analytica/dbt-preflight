@@ -275,7 +275,7 @@ As a GitHub Action, in the workflow at the top of this page:
 
 ```yaml
 - uses: JB-Analytica/dbt-preflight@v0        # follows the latest 0.x release
-- uses: JB-Analytica/dbt-preflight@v0.5.1    # or pin an exact version
+- uses: JB-Analytica/dbt-preflight@v0.5.2    # or pin an exact version
 ```
 
 As a CLI, to run locally or in another CI:

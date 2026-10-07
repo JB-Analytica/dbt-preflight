@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-07
+
+Maintenance only: nothing about a run changes.
+
+### Fixed
+
+- `scripts/draft_release.sh` stopped without a message when the local `v0` tag was behind
+  the one on GitHub, which is the case after every release. It now updates local tags to
+  match.
+
 ## [0.5.1] - 2026-10-07
 
 The first release listed on the GitHub Marketplace. Nothing about a run changes.
