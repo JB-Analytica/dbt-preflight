@@ -36,6 +36,16 @@ All notable changes to this project are documented here. The format follows
   variable now scans the project and lists all of them, with the `env:` block to paste into
   `.dbt-preflight.yml`.
 
+### Changed
+
+- **The run's progress lines say where the data comes from.** The first line now ends
+  `· on DuckDB, no warehouse`, and the fixtures step reads `generated N tables, M rows of
+  synthetic data from <schema> (model2data, seed S)` instead of `fixtures: N tables, M
+  rows`. The comment already said "against synthetic data"; the terminal did not, so
+  someone watching a run for the first time could not tell that the data was generated
+  rather than loaded from somewhere, which is the one thing that makes preflight runnable
+  with no credentials.
+
 ### Added
 
 - A two-minute path at the top of the README: clone dbt-labs/jaffle_shop, rename a column,

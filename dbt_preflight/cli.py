@@ -351,7 +351,12 @@ def _run(
     db_path = workdir / "preflight.duckdb"
     write_profiles(profiles_dir, project.profile, db_path)
 
-    _say(f"🛫 dbt preflight {__version__} · project `{project.name}` at {project_relpath}")
+    # The engine is named here because it is the run's main premise: everything below this
+    # line happens in a local DuckDB file, so nothing needs a warehouse or a credential.
+    _say(
+        f"🛫 dbt preflight {__version__} · project `{project.name}` at {project_relpath} "
+        "· on DuckDB, no warehouse"
+    )
     timer = _StepTimer()
 
     # 1. Parse the head so we know the sources and where they think they live.
@@ -397,9 +402,11 @@ def _run(
             head_dbml = schema.dbml_path.read_text(encoding="utf-8")
         fixtures = build_fixtures(config, schema, list(manifest.sources.values()), db_path)
         report.fixtures = fixtures
+        # "generated" rather than "fixtures", so a reader who has never run this sees that
+        # the data was made from the schema and not loaded from anywhere.
         timer.mark(
-            f"   fixtures: {len(fixtures.tables)} tables, {fixtures.total_rows:,} rows "
-            f"from {report.schema_source} (seed {config.seed})"
+            f"   generated {len(fixtures.tables)} tables, {fixtures.total_rows:,} rows of "
+            f"synthetic data from {report.schema_source} (model2data, seed {config.seed})"
         )
         for missing in fixtures.unmatched_sources:
             _say(f"   ⚠️  no schema table for source {missing}")
