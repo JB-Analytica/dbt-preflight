@@ -12,7 +12,8 @@ read_version() { sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1; }
 version=$(read_version < pyproject.toml)
 tag="v$version"
 
-git fetch -q origin main --tags
+# --force: v0 moves on every release, and a plain fetch refuses to update a local tag that moved.
+git fetch -q --force origin main --tags
 main_version=$(git show origin/main:pyproject.toml | read_version)
 [ "$main_version" = "$version" ] || { echo "origin/main is at $main_version, not $version: merge the version bump first" >&2; exit 1; }
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
