@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The action's description, which the GitHub Marketplace shows, now says what a run does:
+  builds main and the pull request on synthetic data, compares them, and leaves one comment.
+
 ## [0.5.0] - 2026-10-06
 
 ### Added

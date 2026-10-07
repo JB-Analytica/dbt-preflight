@@ -1,7 +1,7 @@
 name: dbt preflight
 description: >-
-  Build and test the dbt models a pull request changes against synthetic data on DuckDB,
-  check house conventions, and leave one review comment. No warehouse credentials needed.
+  CI for dbt pull requests without a warehouse: builds main and the PR on synthetic data,
+  compares them, leaves one comment.
 author: JB Analytica
 branding:
   icon: check-circle
