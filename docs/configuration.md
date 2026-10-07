@@ -37,7 +37,7 @@ jobs:
       - uses: JB-Analytica/dbt-preflight@v0
 ```
 
-`@v0` follows the latest 0.x release; pin a release tag such as `@v0.5.1` for an exact
+`@v0` follows the latest 0.x release; pin a release tag such as `@v0.5.2` for an exact
 version. The action installs preflight with uv, runs it against the pull request's base
 branch, posts or updates the comment, and copies the comment into the job summary.
 
